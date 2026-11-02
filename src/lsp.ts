@@ -2,6 +2,7 @@ import { allTabs, editor, ensureModel, events, handlePathMoved, monaco, openFile
 import { api, Channel, invoke, type RpcEvent } from "./ipc";
 import { runInPanel } from "./run";
 import { symbolPath } from "./breadcrumbs";
+import { constantName, implementationPattern } from "./implementations";
 import { applyTokenEdits } from "./semantic";
 import { askTrust, onSettingsChange, setting } from "./settings";
 import { showLocations, type Loc } from "./search";
@@ -758,20 +759,41 @@ async function jumpOrPick(title: string, locs: monaco.languages.Location[]) {
   });
 }
 
-/// Uses textDocument/implementation when the server has it; ruby-lsp doesn't, so classes and modules fall back
-/// to the type hierarchy (subclasses and including modules).
+/// Uses textDocument/implementation when the server has it, then the type hierarchy's subtypes. ruby-lsp has
+/// neither (its subtypes request returns nothing), so classes and modules fall back to a project search for
+/// subclasses and include/extend/prepend sites.
 export async function goToImplementation() {
   const model = editor.getModel();
   const pos = editor.getPosition();
-  if (!model || !pos || !live(model)) return toast("Go to Implementation needs Ruby LSP on a Ruby file.");
-  if (capabilities.implementationProvider) {
+  if (!model || !pos || !LANGS.includes(model.getLanguageId())) return toast("Go to Implementation works in Ruby files.");
+  if (live(model) && capabilities.implementationProvider) {
     return jumpOrPick("Implementations", await locations(await request("textDocument/implementation", docPos(model, pos)).catch(() => null)));
   }
-  if (!capabilities.typeHierarchyProvider) return toast("The language server does not provide implementations.");
-  const items: Json[] = (await request("textDocument/prepareTypeHierarchy", docPos(model, pos)).catch(() => null)) ?? [];
-  if (!items.length) return toast("Place the caret on a class or module to find its implementations.");
-  const subs: Json[] = (await Promise.all(items.map((item) => request("typeHierarchy/subtypes", { item }).catch(() => null)))).flat().filter(Boolean);
-  jumpOrPick("Implementations", await locations(subs.map((s) => ({ uri: s.uri, range: s.selectionRange ?? s.range }))));
+  if (live(model) && capabilities.typeHierarchyProvider) {
+    const items: Json[] = (await request("textDocument/prepareTypeHierarchy", docPos(model, pos)).catch(() => null)) ?? [];
+    const subs: Json[] = (await Promise.all(items.map((item) => request("typeHierarchy/subtypes", { item }).catch(() => null)))).flat().filter(Boolean);
+    if (subs.length) return jumpOrPick("Implementations", await locations(subs.map((s) => ({ uri: s.uri, range: s.selectionRange ?? s.range }))));
+  }
+  const name = constantName(model.getWordAtPosition(pos)?.word);
+  if (!name) return toast("Place the caret on a class or module to find its implementations.");
+  jumpOrPick("Implementations", await searchProject(implementationPattern(name), "**/*.rb"));
+}
+
+/// One-shot project search returning match locations.
+// ponytail: shares search_text's generation counter, so it cancels a Find panel search still streaming.
+function searchProject(query: string, include: string): Promise<monaco.languages.Location[]> {
+  return new Promise((resolve) => {
+    const found: monaco.languages.Location[] = [];
+    const channel = new Channel<{ type: string; path?: string; matches?: { line: number; ranges: [number, number][] }[] }>();
+    channel.onmessage = (ev) => {
+      if (ev.type === "done") return resolve(found);
+      for (const m of ev.matches ?? []) {
+        const [s, e] = m.ranges[0] ?? [0, 0];
+        found.push({ uri: monaco.Uri.file(ev.path!), range: new monaco.Range(m.line, s + 1, m.line, e + 1) });
+      }
+    };
+    invoke("search_text", { opts: { query, regex: true, caseSensitive: true, wholeWord: false, include }, onEvent: channel }).catch(() => resolve(found));
+  });
 }
 
 export async function goToTypeDefinition() {

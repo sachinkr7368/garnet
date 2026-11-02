@@ -178,6 +178,15 @@ fn timed_out_report(last: &str, secs: u64) -> String {
     serde_json::to_string_pretty(&v).unwrap_or_default()
 }
 
+/// The main window from tauri.conf.json. A smoke run keeps its webview running while the window is hidden or behind
+/// other windows; WebKit's default suspends timers there and the run stalls until someone looks at it.
+pub fn main_window(mut window: tauri::utils::config::WindowConfig, smoke: bool) -> tauri::utils::config::WindowConfig {
+    if smoke {
+        window.background_throttling = Some(tauri::utils::config::BackgroundThrottlingPolicy::Disabled);
+    }
+    window
+}
+
 /// Smoke mode only: CSV/JSON exports skip the save dialog and go next to the report. Inert without `GARNET_SMOKE`.
 pub fn smoke_export_path(ext: &str) -> Option<PathBuf> {
     std::env::var_os("GARNET_SMOKE").map(|r| PathBuf::from(format!("{}.export.{ext}", r.to_string_lossy())))
@@ -194,6 +203,13 @@ mod tests {
         assert_eq!(r["checks"]["timeout"], "did not finish within 60s; stopped in: lsp");
         let r: serde_json::Value = serde_json::from_str(&timed_out_report("", 5)).unwrap();
         assert!(r["checks"]["timeout"].as_str().unwrap().contains("before the frontend reported"));
+    }
+
+    #[test]
+    fn smoke_window_is_never_throttled_and_normal_window_keeps_the_default() {
+        use tauri::utils::config::{BackgroundThrottlingPolicy, WindowConfig};
+        assert!(matches!(main_window(WindowConfig::default(), true).background_throttling, Some(BackgroundThrottlingPolicy::Disabled)));
+        assert!(main_window(WindowConfig::default(), false).background_throttling.is_none());
     }
 
     #[test]

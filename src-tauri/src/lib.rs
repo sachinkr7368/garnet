@@ -92,6 +92,8 @@ pub fn run() {
         .manage(db::Db::default())
         .menu(menu)
         .setup(|app| {
+            let window = project::main_window(app.config().app.windows[0].clone(), project::smoke_target().is_some());
+            tauri::WebviewWindowBuilder::from_config(app.handle(), &window)?.build()?;
             project::smoke_watchdog(app.handle().clone());
             Ok(())
         })

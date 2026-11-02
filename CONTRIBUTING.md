@@ -70,6 +70,9 @@ installed app: unpack `Garnet_universal.app.tar.gz` from the release (or use
 `/Applications/Garnet.app`) and run its `Contents/MacOS/garnet` binary. Only
 the `GARNET_SMOKE*` variables switch it on; without them none of it runs.
 
+- In smoke mode the webview is never throttled, so the run keeps going when
+  its window is hidden or behind other windows (WebKit suspends a hidden page's
+  timers by default; v0.2.0 and older stall there unless the window stays visible).
 - The report is rewritten after every check, and each step is logged to stderr
   with its time (`smoke: 14870 ms  database`), so a run that is killed still
   leaves what it checked.

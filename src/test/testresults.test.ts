@@ -4,7 +4,7 @@ vi.mock("../editor", async () => await import("./fakeEditor"));
 import { newConfig } from "../run";
 import { loadSettings } from "../settings";
 import { state } from "../state";
-import { prepareTestRun } from "../testresults";
+import { prepareTestRun, startTestRun, testRunState } from "../testresults";
 import { fake } from "./fakeIpc";
 
 const ROOT = "/work/blog";
@@ -32,5 +32,19 @@ describe("prepareTestRun RUBYLIB", () => {
   it("leaves RSpec runs' RUBYLIB alone", async () => {
     const t = await prepareTestRun(newConfig("rspec", "s"), { RUBYLIB: "lib" });
     expect(t?.env.RUBYLIB).toBeUndefined();
+  });
+});
+
+describe("test run end", () => {
+  it("reports exited only after the last results are read", async () => {
+    const cfg = newConfig("minitest", "t", "test/a_test.rb");
+    const h = (await prepareTestRun(cfg))!;
+    startTestRun(h, cfg, {} as never);
+    fake.files.set(h.eventsPath, `{"event":"result","id":"a","status":"failed","file":"${ROOT}/test/a_test.rb","line":3,"name":"a"}\n{"event":"done"}\n`);
+    const finished = h.finished();
+    const seen = testRunState()!;
+    expect(seen.exited && seen.counts.failed === 0).toBe(false);
+    await finished;
+    expect(testRunState()).toMatchObject({ exited: true, done: true, counts: { failed: 1, total: 1 } });
   });
 });

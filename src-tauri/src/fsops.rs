@@ -123,6 +123,10 @@ pub async fn export_file(app: AppHandle, format: String, default_name: String, c
     use tauri_plugin_dialog::DialogExt;
     let ext = export_extension(&format)?;
     let name = Path::new(&default_name).file_name().and_then(|n| n.to_str()).unwrap_or("export").to_string();
+    if let Some(path) = crate::project::smoke_export_path(ext) {
+        write_new(&path, &content, false)?;
+        return Ok(Some(path.to_string_lossy().into_owned()));
+    }
     let picked = tauri::async_runtime::spawn_blocking(move || {
         app.dialog().file().set_file_name(&name).add_filter(ext.to_uppercase(), &[ext]).blocking_save_file()
     })

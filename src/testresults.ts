@@ -115,8 +115,8 @@ export function startTestRun(handle: TestRunHandle, cfg: RunConfig, item: RunIte
   const timer = window.setInterval(poll, 400);
   handle.finished = async () => {
     clearInterval(timer);
-    run.exited = true;
     await poll();
+    run.exited = true;
     api.deletePath(handle.eventsPath).catch(() => {});
     if (current === run) render();
   };

@@ -91,6 +91,10 @@ pub fn run() {
         .manage(watch::Watch::default())
         .manage(db::Db::default())
         .menu(menu)
+        .setup(|app| {
+            project::smoke_watchdog(app.handle().clone());
+            Ok(())
+        })
         .on_menu_event(|app, event| {
             let _ = app.emit("menu", event.id().0.clone());
         })
@@ -159,6 +163,7 @@ pub fn run() {
             project::index_root,
             project::smoke_target,
             project::smoke_finish,
+            project::smoke_progress,
             project::uptime_ms,
             db::db_connect,
             db::db_disconnect,

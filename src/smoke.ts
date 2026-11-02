@@ -22,10 +22,18 @@ import { isDarkTheme, isTrusted, loadSettings, setting, toggleTheme, updateSetti
 import { openSettingsWindow } from "./settingsui";
 import { refreshToolbar } from "./toolbar";
 import { monaco } from "./editor";
-import { state } from "./state";
+import { shellQuote, state } from "./state";
+import { dbSmokeHooks } from "./db";
+import { runRailsGenerator } from "./generators";
+import { loadMigrations } from "./migrations";
+import { railsTreeEl, refreshRailsTree } from "./railsview";
+import { toggleRailsView } from "./tree";
+import { gh, refreshAccount, signIn } from "./github";
+import { bottom } from "./ui";
 
 type Report = Record<string, unknown> & { checks: Record<string, boolean | string> };
 
+let substep = (_: string) => {};
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(fn: () => T | Promise<T>, timeoutMs: number, everyMs = 100): Promise<T | null> {
   const end = Date.now() + timeoutMs;
@@ -39,8 +47,13 @@ async function until<T>(fn: () => T | Promise<T>, timeoutMs: number, everyMs = 1
 
 export async function runSmoke(project: string, withDebug: boolean, openProject: (p: string) => Promise<void>) {
   const report: Report = { checks: {} };
-  const check = (name: string, ok: boolean | string) => (report.checks[name] = ok);
+  let current = "startup";
+  const save = (log = "") => void invoke("smoke_progress", { report: JSON.stringify({ ...report, step: current }, null, 2), step: log }).catch(() => {});
+  const check = (name: string, ok: boolean | string) => ((report.checks[name] = ok), save(ok === true ? "" : `  FAIL ${name}`));
+  const step = (name: string) => ((current = name), save(name));
+  substep = (name: string) => step(`${current.split(" › ")[0]} › ${name}`);
   try {
+    step("open project");
     let indexMs = -1;
     const indexStart = performance.now();
     const indexReady = new Promise<void>((resolve) =>
@@ -63,6 +76,7 @@ export async function runSmoke(project: string, withDebug: boolean, openProject:
     await Promise.race([indexReady, sleep(10000)]);
     report.indexReadyMs = Math.round(indexMs);
 
+    step("go to file and find in files");
     const goto: number[] = [];
     let hits: string[] = [];
     for (const q of ["p", "po", "pos", "post", "postsc", "postscontroller"]) {
@@ -86,6 +100,7 @@ export async function runSmoke(project: string, withDebug: boolean, openProject:
     });
     report.findInFilesMs = searchMs;
 
+    step("editor typing");
     const controller = `${state.project!.root}/app/controllers/posts_controller.rb`;
     await openFile(controller);
     const model = editor.getModel()!;
@@ -99,6 +114,7 @@ export async function runSmoke(project: string, withDebug: boolean, openProject:
     report.typingSyncMsPerKeystroke = Math.round(((performance.now() - ts) / typed) * 1000) / 1000;
     while (model.getAlternativeVersionId() !== 1 && model.canUndo()) model.undo();
 
+    step("terminal");
     const term = await new Promise<string>((resolve) => {
       let buf = "";
       const ch = new Channel<PtyEvent>();
@@ -111,9 +127,11 @@ export async function runSmoke(project: string, withDebug: boolean, openProject:
     });
     check("pty login shell runs ruby", /\d+\.\d+\.\d+/.test(term) || term.slice(-200));
 
+    step("git status");
     await refreshGit();
     check("git status", (await api.gitBranch(state.project!.root).catch((e) => String(e))) !== "");
 
+    step("ruby-lsp");
     const lspStart = performance.now();
     const ok = await until(() => lspReady(), 90000, 200);
     report.lspReadyMs = ok ? Math.round(performance.now() - lspStart) : -1;
@@ -137,14 +155,28 @@ export async function runSmoke(project: string, withDebug: boolean, openProject:
       check("lsp formatting responds", Array.isArray(fmt) || fmt === null || String(fmt));
     }
 
+    step("settings and UI");
     await uiChecks(check);
+    step("editor features");
     await editorFeatureChecks(check, !!ok);
+    step("git tools");
     await gitChecks(controller, check);
+    step("breakpoints");
     const bpRestored = await breakpointChecks(check);
+    step("test tree");
     await testTreeChecks(report, check);
+    step("database");
+    await databaseChecks(report, check);
+    step("rails tools");
+    await railsToolChecks(report, check);
+    step("github (read-only)");
+    await githubChecks(report, check);
+    step("docker");
     await dockerChecks(report, check);
     if (withDebug) {
+      step("debug: rails request");
       await debugRailsRequest(report, controller, check);
+      step("debug: two sessions");
       await twoDebugSessions(report, check);
     }
     check("breakpoint survives an app restart", bpRestored);
@@ -421,6 +453,7 @@ async function testTreeChecks(report: Report, check: (n: string, ok: boolean | s
   const root = state.project!.root;
   const spec = `${root}/spec/calc_spec.rb`;
   const rspec = { ...newConfig("rspec", "Smoke specs", "spec/calc_spec.rb"), bundler: false };
+  substep("rspec");
   const r = await runToEnd(rspec);
   report.rspecTree = r && { counts: r.counts, rows: r.rows, progress: r.progressWidth };
   check("rspec tree: 1 passed, 1 failed, 1 pending", !!r && r.counts.passed === 1 && r.counts.failed === 1 && r.counts.pending === 1 || JSON.stringify(r?.counts ?? null));
@@ -429,17 +462,20 @@ async function testTreeChecks(report: Report, check: (n: string, ok: boolean | s
   check("rspec failure message and backtrace", !!failed?.message?.includes("expected: 5") && !!failed.backtrace?.some((l) => l.includes("calc_spec.rb:8")) || JSON.stringify(failed ?? null));
   check("rspec progress complete", r?.progressWidth === "100%" || String(r?.progressWidth));
   check("gutter shows last result", testStatusAt(spec, 7) === "failed" && testStatusAt(spec, 3) === "passed" && testStatusAt(spec, 2) === "failed" || String(testStatusAt(spec, 7)));
+  substep("rspec rerun failed");
   const before = testRunState()?.id;
   rerunFailed();
   await until(() => testRunState()?.id !== before, 30000);
   const rf = await until(() => (testRunState()?.exited ? testRunState() : null), 180000, 200);
   check("rspec rerun failed runs only the failure", !!rf && rf.counts.failed === 1 && rf.counts.total === 1 || JSON.stringify(rf?.counts ?? null));
 
+  substep("minitest");
   const mt = await runToEnd(newConfig("minitest", "Smoke tests", "test/models/smoke_calc_test.rb"));
   report.minitestTree = mt && { counts: mt.counts, rows: mt.rows };
   check("minitest tree: 1 passed, 1 failed, 1 skipped", !!mt && mt.counts.passed === 1 && mt.counts.failed === 1 && mt.counts.pending === 1 || JSON.stringify(mt?.counts ?? null));
   const mf = mt?.results.find((x) => x.status === "failed");
   check("minitest failure message and line", !!mf?.message?.includes("Expected: 5") && mf.line === 8 || JSON.stringify(mf ?? null));
+  substep("minitest rerun failed");
   const before2 = testRunState()?.id;
   rerunFailed();
   await until(() => testRunState()?.id !== before2, 30000);
@@ -558,4 +594,203 @@ async function gitChecks(controller: string, check: (n: string, ok: boolean | st
     await api.runCapture(root, `rm -rf ${JSON.stringify(dir)}`, 30);
     document.getElementById("overlay-root")!.replaceChildren();
   }
+}
+
+type Check = (n: string, ok: boolean | string) => void;
+
+const click = (el: Element | null | undefined, detail = 1) => el?.dispatchEvent(new MouseEvent("click", { bubbles: true, detail }));
+const dbRow = (label: string) => [...document.querySelectorAll<HTMLElement>(".db-tree .tree-row")].find((r) => r.querySelector(".tree-label")?.textContent === label);
+const dbPane = () => [...document.querySelectorAll<HTMLElement>(".db-tab-body > *")].find((p) => !p.hidden && p.offsetParent !== null) ?? null;
+
+/// Runs SQL in the visible SQL console the way a user does: text in the editor, selection, Run button.
+async function consoleRun(sql: string) {
+  const pane = await until(() => dbPane()?.classList.contains("db-console") && dbPane(), 5000);
+  const model = monaco.editor.getModels().filter((m) => m.getLanguageId() === "sql").pop();
+  const ed = monaco.editor.getEditors().find((e) => e.getModel() === model);
+  if (!pane || !model || !ed) return null;
+  model.setValue(sql);
+  ed.setSelection(model.getFullModelRange());
+  pane.querySelector<HTMLButtonElement>('[title^="Run statement"]')!.click();
+  return until(() => {
+    const text = pane.querySelector(".db-results")?.textContent ?? "";
+    return !pane.querySelector<HTMLButtonElement>('[title^="Run statement"]')!.disabled && !/Running…/.test(text) && text ? pane : null;
+  }, 30000);
+}
+
+async function databaseChecks(report: Report, check: Check) {
+  const root = state.project!.root;
+  const dev = `${root}::env::development`;
+  const test = `${root}::env::test`;
+  const q = (id: string, sql: string) => invoke<{ rows: (string | null)[][] }>("db_query", { id, sql, maxRows: 1000 });
+  const prevHistory = await api.configRead("db-history.json");
+  const exportPath = `${(await invoke<[string, boolean] | null>("smoke_target"))![0]}.export.csv`;
+  try {
+    bottom.show("database");
+    const detected = await until(() => dbRow("development")?.textContent?.includes("sqlite storage/development.sqlite3") && dbRow("test"), 15000);
+    report.dbConnections = [...document.querySelectorAll(".db-tree .tree-row")].map((r) => r.textContent);
+    check("db: development connection detected from config/database.yml", !!detected || JSON.stringify(report.dbConnections));
+    if (!detected) return;
+    click(dbRow("development"), 2);
+    const live = await until(() => dbRow("development")?.querySelector(".db-live"), 15000);
+    check("db: connect to development (sqlite)", !!live || String(document.querySelector(".toasts")?.textContent));
+    if (!live) return;
+    await q(dev, "INSERT INTO posts (title, body, created_at, updated_at) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 150) SELECT 'garnet-smoke-' || i, 'body', datetime('now'), datetime('now') FROM n");
+    await q(dev, "CREATE TABLE IF NOT EXISTS garnet_smoke_drop (id integer)");
+    const postsRow = await until(() => dbRow("posts"), 15000);
+    check("db: schema lists the posts table", !!postsRow && !!dbRow("schema_migrations") || String(document.querySelector(".db-tree")?.textContent));
+
+    click(postsRow, 2);
+    const range = () => dbPane()?.querySelector(".db-range")?.textContent ?? "";
+    const first = await until(() => /^rows 1–100 of 1\d\d$/.test(range()) && range(), 15000);
+    check("db: table viewer shows the first page of 100", !!first || range());
+    const total = Number(range().split(" of ")[1]);
+    click(dbPane()?.querySelector('[title="Next page"]'));
+    const second = await until(() => range() === `rows 101–${total} of ${total}` && range(), 15000);
+    check("db: table viewer pages forward", !!second || range());
+
+    click(dbRow("development"));
+    click(dbRow("development"));
+    click(document.querySelector('.db-view [title="Open SQL Console"]'));
+    const limit = await until(() => dbPane()?.querySelector<HTMLInputElement>(".db-limit input"), 5000);
+    if (limit) limit.checked = true;
+    await updateSetting("database.autoLimitRows", 7);
+    let pane = await consoleRun("SELECT * FROM posts");
+    const status = () => pane?.querySelector(".db-status")?.textContent ?? pane?.querySelector(".db-results")?.textContent ?? "";
+    check("db: console SELECT gets LIMIT injected (7 rows)", status().startsWith("7 rows") || status());
+    await updateSetting("database.autoLimitRows", undefined);
+    pane = await consoleRun("SELECT id, title FROM posts WHERE title LIKE 'garnet-smoke-%' ORDER BY id");
+    check("db: console SELECT returns rows", status().startsWith("150 rows") || status());
+
+    click([...(pane?.querySelectorAll("button") ?? [])].find((b) => b.textContent === "Export CSV"));
+    const exported = await until(() => [...document.querySelectorAll(".toast-msg")].find((t) => t.textContent?.includes(exportPath))?.textContent, 10000);
+    const csv = exported ? await api.runCapture(root, `cat ${shellQuote(exportPath)}`, 30) : "";
+    const lines = csv.trim().split(/\r?\n/);
+    check("db: CSV export (dialog skipped in smoke mode)", (lines[0] === "id,title" && lines.length === 151 && lines[1].endsWith(",garnet-smoke-1")) || `${exported}: ${csv.slice(0, 120)}`);
+    await api.runCapture(root, `rm -f ${shellQuote(exportPath)}`, 30);
+
+    let asked: { message: string; title?: string } | null = null;
+    dbSmokeHooks.ask = async (message, opts) => ((asked = { message, title: typeof opts === "string" ? opts : opts?.title }), false);
+    pane = await consoleRun("DROP TABLE garnet_smoke_drop");
+    const a = asked as { message: string; title?: string } | null;
+    const still = (await q(dev, "SELECT name FROM sqlite_master WHERE name = 'garnet_smoke_drop'")).rows.length === 1;
+    check("db: DROP on a writable connection asks first; cancel runs nothing", (!!a && a.title === "Dangerous Statement" && a.message.includes("DROP statement") && still && !!pane?.textContent?.includes("Cancelled; nothing was run.")) || JSON.stringify({ a, still, pane: pane?.textContent?.slice(0, 200) }));
+
+    click(dbRow("test"), 2);
+    const testLive = await until(() => dbRow("test")?.querySelector(".db-live"), 15000);
+    check("db: test connection is read-only by default", !!dbRow("test")?.querySelector(".db-ro") || String(dbRow("test")?.textContent));
+    if (testLive) {
+      click(dbRow("test"));
+      click(document.querySelector('.db-view [title="Open SQL Console"]'));
+      await until(() => dbPane()?.querySelector(".db-conn-head strong")?.textContent === "test", 5000);
+      pane = await consoleRun("DELETE FROM posts WHERE id = -1");
+      check("db: write blocked on a read-only connection (UI)", !!pane?.textContent?.includes('"test" is read-only') || String(pane?.textContent?.slice(0, 200)));
+      const backend = await q(test, "INSERT INTO posts (title, created_at, updated_at) VALUES ('x', datetime('now'), datetime('now'))").then(() => "written!", (e) => String(e));
+      check("db: write blocked on a read-only connection (backend)", backend !== "written!" || backend);
+    }
+  } catch (e) {
+    check("db scenario", String(e));
+  } finally {
+    dbSmokeHooks.ask = undefined;
+    await updateSetting("database.autoLimitRows", undefined);
+    await q(dev, "DELETE FROM posts WHERE title LIKE 'garnet-smoke-%'").catch(() => {});
+    await q(dev, "DROP TABLE IF EXISTS garnet_smoke_drop").catch(() => {});
+    for (const id of [dev, test]) await invoke("db_disconnect", { id }).catch(() => {});
+    if (prevHistory === null) await api.configWrite("db-history.json", "{}");
+    else await api.configWrite("db-history.json", prevHistory);
+    clearToasts();
+  }
+}
+
+async function railsToolChecks(report: Report, check: Check) {
+  const root = state.project!.root;
+  const overlay = document.getElementById("overlay-root")!;
+  substep("generator list");
+  await runRailsGenerator();
+  const labels = [...overlay.querySelectorAll(".qp-item .qp-label")].map((e) => e.textContent ?? "");
+  report.generators = labels.length;
+  check("rails: generator list parsed from bin/rails generate --help", ["scaffold", "model", "controller", "migration"].every((g) => labels.includes(g)) || labels.join(","));
+  const scaffold = [...overlay.querySelectorAll<HTMLElement>(".qp-item")].find((e) => e.querySelector(".qp-label")?.textContent === "scaffold");
+  scaffold?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  substep("generator dialog");
+  const dlg = await until(() => overlay.querySelector<HTMLElement>(".gen-dialog"), 60000);
+  if (dlg) {
+    const args = [...dlg.querySelectorAll<HTMLElement>(".rc-field")].find((f) => f.querySelector("span")?.textContent === "Arguments")?.querySelector("input");
+    args!.value = "GarnetSmokeWidget name:string";
+    args!.dispatchEvent(new Event("input"));
+    [...dlg.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Preview (--pretend)")!.click();
+    const out = await until(() => {
+      const t = [...dlg.querySelectorAll<HTMLElement>(".gen-form > pre.gen-output")].pop()?.textContent ?? "";
+      return t.includes("app/models/garnet_smoke_widget.rb") ? t : null;
+    }, 120000, 250);
+    const created = await api.readFile(`${root}/app/models/garnet_smoke_widget.rb`).then(() => true, () => false);
+    check("rails: scaffold --pretend previews files without creating them", (!!out && out.includes("--pretend") && !created) || `created=${created}`);
+    [...dlg.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Cancel")!.click();
+  } else check("rails: scaffold --pretend previews files without creating them", "generator dialog did not open");
+  overlay.querySelector(".qp-backdrop")?.remove();
+
+  substep("migrations");
+  bottom.show("migrations");
+  await loadMigrations();
+  const migRows = [...document.querySelectorAll<HTMLElement>(".migration-row")];
+  const files = (await api.indexFiles()).filter((f) => /^db\/migrate\/\d+_.+\.rb$/.test(f));
+  report.migrations = migRows.map((r) => r.textContent);
+  check("rails: migrations status lists every migration as up", (migRows.length === files.length && migRows.length > 0 && migRows.every((r) => r.classList.contains("up"))) || JSON.stringify(report.migrations));
+
+  substep("project view");
+  toggleRailsView(true);
+  await refreshRailsTree();
+  const railsText = [...railsTreeEl.querySelectorAll(".tree-row")].map((r) => r.textContent ?? "");
+  check("rails: project view lists models and controllers", (railsText.some((t) => t.startsWith("Models")) && railsText.includes("post.rb") && railsText.some((t) => t.startsWith("Controllers")) && railsText.includes("posts_controller.rb")) || railsText.join("|"));
+  toggleRailsView(false);
+
+  substep("cmd+click");
+  const nav = `${root}/app/views/posts/garnet_smoke_nav.html.erb`;
+  const partial = `${root}/app/views/posts/_garnet_smoke_partial.html.erb`;
+  const locale = `${root}/config/locales/garnet_smoke.en.yml`;
+  await api.writeFile(nav, '<%= render "garnet_smoke_partial" %>\n<%= t(".garnet_smoke_title") %>\n');
+  await api.writeFile(partial, "<p>smoke</p>\n");
+  await api.writeFile(locale, 'en:\n  posts:\n    garnet_smoke_nav:\n      garnet_smoke_title: "Smoke"\n');
+  const jump = async (file: string, needle: string, target: string) =>
+    until(async () => {
+      await openFile(file);
+      const m = editor.getModel()!;
+      const at = m.findMatches(needle, false, false, true, null, false)[0]?.range;
+      if (!at) return null;
+      editor.setPosition({ lineNumber: at.startLineNumber, column: at.startColumn + 2 });
+      editor.trigger("smoke", "editor.action.revealDefinition", null);
+      await sleep(400);
+      document.querySelector<HTMLElement>(".peekview-widget")?.remove();
+      return activeTab()?.path === target ? { line: editor.getPosition()?.lineNumber } : null;
+    }, 15000, 500);
+  try {
+    const real = await jump(`${root}/app/views/posts/new.html.erb`, '"form"', `${root}/app/views/posts/_form.html.erb`);
+    check("rails: Cmd+click render \"form\" opens _form.html.erb", !!real || String(activeTab()?.path));
+    const p = await jump(nav, '"garnet_smoke_partial"', partial);
+    check("rails: Cmd+click partial opens the new partial", !!p || String(activeTab()?.path));
+    const k = await jump(nav, '".garnet_smoke_title"', locale);
+    check("rails: Cmd+click i18n key opens the locale file at the key", k?.line === 4 || JSON.stringify({ k, at: activeTab()?.path }));
+  } finally {
+    for (const t of allTabs().filter((t) => [nav, partial, locale, `${root}/app/views/posts/_form.html.erb`, `${root}/app/views/posts/new.html.erb`].includes(t.path))) await closeTab(t, true);
+    for (const f of [nav, partial, locale]) await api.deletePath(f).catch(() => {});
+  }
+  clearToasts();
+}
+
+/// Read-only: never signs in, stores a token or writes anything on GitHub.
+async function githubChecks(report: Report, check: Check) {
+  const s = await refreshAccount();
+  const ghLoggedIn = (await api.runCapture(state.project!.root, "gh auth status >/dev/null 2>&1 && echo yes || echo no", 30).catch(() => "no")).trim() === "yes";
+  report.github = { signedIn: s.signedIn, ghAvailable: s.ghAvailable, ghLoggedIn };
+  check("github: gh CLI account detection", s.ghAvailable === ghLoggedIn || JSON.stringify(report.github));
+  if (s.ghAvailable) {
+    const overlay = document.getElementById("overlay-root")!;
+    const closed = signIn();
+    const offer = await until(() => [...overlay.querySelectorAll<HTMLButtonElement>(".gh-dialog button")].find((b) => b.textContent === "Use gh Account"), 15000);
+    check("github: sign-in dialog offers the gh account", !!offer);
+    [...overlay.querySelectorAll<HTMLButtonElement>(".gh-dialog button")].find((b) => b.textContent === "Cancel")?.click();
+    await closed;
+  } else check("github: sign-in dialog offers the gh account", "skipped: gh is not logged in");
+  if (!s.signedIn) return check("github: signed-in account", "skipped: not signed in to Garnet");
+  const me = await gh<{ login: string }>("GET", "/user").catch((e) => ({ login: String(e) }));
+  check("github: signed-in account", (!!s.login && me.login === s.login && !!document.querySelector(".status-item.clickable")?.parentElement?.textContent?.includes(s.login)) || JSON.stringify({ login: s.login, me }));
 }

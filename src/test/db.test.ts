@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fake } from "./fakeIpc";
 
 vi.mock("../editor", () => import("./fakeEditor"));
-const { mergeConnections, overrideFrom, runBatch, completions, unresolvedFields, exportResult } = await import("../db");
+const { mergeConnections, overrideFrom, runBatch, completions, unresolvedFields, exportResult, dbSmokeHooks } = await import("../db");
 type Detected = import("../db").Detected;
 type Conn = import("../db").Conn;
 
@@ -92,6 +92,20 @@ describe("runBatch safety", () => {
     expect(String(vi.mocked(ask).mock.calls[0][0])).toContain("delete from t");
     expect(res.outcomes).toEqual([]);
     expect(fake.calls).not.toContain("db_query");
+  });
+
+  it("smoke hook answers the confirmation instead of the native dialog", async () => {
+    const seen: string[] = [];
+    dbSmokeHooks.ask = async (message) => (seen.push(String(message)), false);
+    try {
+      const res = await runBatch(conn(false), ["drop table t"]);
+      expect(seen[0]).toContain("DROP statement");
+      expect(ask).not.toHaveBeenCalled();
+      expect(res.blocked).toBe("Cancelled; nothing was run.");
+      expect(fake.calls).not.toContain("db_query");
+    } finally {
+      dbSmokeHooks.ask = undefined;
+    }
   });
 
   it("runs dangerous statements once confirmed and stops at the first error", async () => {

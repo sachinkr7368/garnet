@@ -1,5 +1,5 @@
 import { debugSession, sessionFor, stopSession } from "./debug";
-import { composeCommand, debugPortFor, defaultDocker, localfsMap, mapPath, validateDocker, type DockerTarget } from "./docker";
+import { checkPublishedPort, composeCommand, debugPortFor, defaultDocker, hostSocket, localfsMap, mapPath, rdbgListen, validateDocker, type DockerTarget } from "./docker";
 import { activeTab, editor, events, monaco, saveAll } from "./editor";
 import { api } from "./ipc";
 import { askTrust, isTrusted, setting } from "./settings";
@@ -165,7 +165,7 @@ export function buildCommand(cfg: RunConfig, opts: BuildOptions = {}): string {
   let args = cfg.args.trim();
   if (cfg.type === "rails-server") {
     if (!/(^|\s)(-p|--port)\b/.test(args)) args = `-p ${setting("rails.serverPort")} ${args}`;
-    if (!/(^|\s)(-b|--binding)\b/.test(args)) args = `-b ${docker ? "0.0.0.0" : setting("rails.serverBinding")} ${args}`;
+    if (!/(^|\s)(-b|--binding)\b/.test(args)) args = `-b ${setting("rails.serverBinding")} ${args}`;
   }
   if (testArgs) args = `${args} ${testArgs}`;
   const runner = setting<string>("testing.rspecRunner");
@@ -183,12 +183,12 @@ export function buildCommand(cfg: RunConfig, opts: BuildOptions = {}): string {
   const base = cfg.type === "custom" ? raw.trim() : raw.replace(/\s+/g, " ").trim();
   const bundledRdbg = `${cfg.bundler && debugBundled() && !debug?.globalRdbg ? "bundle exec " : ""}rdbg`;
   const rdbg = docker ? bundledRdbg : setting<string>("debug.rdbgPath") || bundledRdbg;
-  const cmd = debug ? `${rdbg} --open --port=${debug.port} --host=${docker ? "0.0.0.0" : "127.0.0.1"} --command -- ${base}` : base;
+  const cmd = debug ? `${rdbg} --open ${docker ? rdbgListen(docker, debug.port) : `--port=${debug.port} --host=127.0.0.1`} --command -- ${base}` : base;
   if (!docker) return MANAGER_PREFIX[cfg.rubyManager] + cmd;
   return composeCommand(
     docker,
     cmd,
-    { envNames: opts.envNames ?? Object.keys(cfg.env), cwd: cfg.cwd.trim() ? rel(abs(cfg.cwd.trim())) : "", publish: debug && docker.mode === "run" ? debug.port : undefined, servicePorts: cfg.type === "rails-server" },
+    { envNames: opts.envNames ?? Object.keys(cfg.env), cwd: cfg.cwd.trim() ? rel(abs(cfg.cwd.trim())) : "", publish: debug && docker.mode === "run" && !docker.socketPath ? debug.port : undefined },
     shellQuote,
   );
 }
@@ -243,7 +243,16 @@ function stopItem(item: RunItem) {
   item.view.kill();
 }
 
+/// Console header for Docker runs: where it runs and the effective Rails binding.
+export function dockerHeader(cfg: RunConfig, d: DockerTarget): string {
+  const binding = cfg.args.match(/(?:^|\s)(?:-b|--binding)[\s=](\S+)/)?.[1] ?? setting<string>("rails.serverBinding");
+  const parts = [`service ${d.service} (docker compose ${d.mode})`, `${root()} ↔ ${d.containerRoot}`];
+  if (cfg.type === "rails-server") parts.push(`Rails binding ${binding}${/^(127\.|localhost|::1)/.test(binding) ? " (only reachable inside the container; use -b 0.0.0.0 with published ports to reach it from the host)" : ""}`);
+  return parts.join(" · ");
+}
+
 export interface RunOptions {
+  header?: string;
   env?: Record<string, string>;
   cwd?: string;
   onExit?: (code: number | null) => void;
@@ -266,6 +275,7 @@ export function runInPanel(title: string, command: string, opts: RunOptions = {}
       opts.onExit?.(code);
     },
   });
+  if (opts.header) view.term.writeln(`\x1b[2m[docker] ${opts.header}\x1b[0m`);
   view.term.writeln(`\x1b[2m$ ${command}\x1b[0m`);
   const item = runs.add(title, view);
   runs.setStatus(item, "running");
@@ -293,10 +303,18 @@ export async function launch(cfg: RunConfig, mode: "run" | "debug", opts: { glob
   const env = await resolveEnv(cfg);
   const cwd = cfg.cwd.trim() && !docker ? abs(cfg.cwd.trim()) : root();
   const port = mode === "debug" ? (docker ? debugPortFor(docker, await api.freePort()) : await api.freePort()) : 0;
+  let attachPort = port;
+  if (mode === "debug" && docker?.mode === "exec" && !docker.socketPath) {
+    const out = await api.runCapture(root(), `docker compose ${docker.composeFile ? `-f ${shellQuote(docker.composeFile)} ` : ""}port ${docker.service} ${port} 2>&1`, 30).catch((e) => String(e));
+    const checked = checkPublishedPort(out, port);
+    if ("error" in checked) return toast(`Not debugging "${cfg.name}": ${checked.error}`, "error");
+    attachPort = checked.port;
+  }
   const test = docker ? null : await prepareTestRun(cfg);
   const command = buildCommand(cfg, { debug: mode === "debug" ? { port, globalRdbg: opts.globalRdbg } : undefined, testArgs: test?.args, envNames: Object.keys(env) });
   const title = mode === "debug" ? `${cfg.name} (debug)` : cfg.name;
   const item = runInPanel(title, command, {
+    header: docker ? dockerHeader(cfg, docker) : undefined,
     env: { ...env, ...test?.env },
     cwd,
     onExit: () => {
@@ -310,7 +328,7 @@ export async function launch(cfg: RunConfig, mode: "run" | "debug", opts: { glob
   if (test) startTestRun(test, cfg, item);
   if (mode === "debug")
     debugSession({
-      target: docker ? `127.0.0.1:${port}` : String(port),
+      target: docker ? (docker.socketPath ? hostSocket(docker, root()) : `127.0.0.1:${attachPort}`) : String(port),
       cfg,
       item,
       localfsMap: docker ? localfsMap(docker, root()) : undefined,
@@ -562,6 +580,10 @@ export function editConfigurations() {
       };
       const mode = h("select", { class: "run-select" }, h("option", { value: "run", selected: d.mode === "run" }, "docker compose run (new container)"), h("option", { value: "exec", selected: d.mode === "exec" }, "docker compose exec (running container)"));
       mode.onchange = () => ((d.mode = mode.value as DockerTarget["mode"]), renderForm());
+      const servicePorts = h("input", { type: "checkbox", checked: d.servicePorts });
+      servicePorts.onchange = () => ((d.servicePorts = servicePorts.checked), update());
+      const socket = h("input", { class: "search-input", value: d.socketPath, placeholder: "tmp/rdbg.sock", spellcheck: false });
+      socket.oninput = () => ((d.socketPath = socket.value.trim()), renderForm());
       const port = h("input", { class: "search-input", type: "number", min: 1, max: 65535, value: String(d.debugPort) });
       port.oninput = () => ((d.debugPort = Number(port.value) || d.debugPort), update());
       return [
@@ -570,7 +592,14 @@ export function editConfigurations() {
         field("Mode", mode),
         field("Compose file", input("composeFile", "docker-compose.yml"), "relative to the project root; empty uses compose's default lookup"),
         field("Project root in container", input("containerRoot", "/app"), `path mapping for the debugger: ${root()} ↔ container path`),
-        d.mode === "exec" ? field("rdbg port", port, "debugging with exec needs this port published by the service (ports: in the compose file)") : h("small", { class: "dim" }, "Debug publishes a free port on 127.0.0.1 and attaches to rdbg in the container. The service needs the debug gem."),
+        d.mode === "run" ? h("label", { class: "rc-check" }, servicePorts, " Publish the service's ports (--service-ports)") : null,
+        field("rdbg socket on a shared volume (optional)", socket, "relative to the project root, which must be mounted at the container path; preferred over TCP. Docker Desktop for Mac can't share sockets through bind mounts, so leave empty there"),
+        d.socketPath
+          ? null
+          : d.mode === "exec"
+            ? field("rdbg port", port, `debugging with exec needs this port published on loopback only: ports: ["127.0.0.1:${d.debugPort}:${d.debugPort}"]; Garnet refuses ports published on all interfaces`)
+            : h("small", { class: "dim" }, "Debug publishes a free port on 127.0.0.1 only and attaches to rdbg in the container. The service needs the debug gem."),
+        c.type === "rails-server" ? h("small", { class: "dim" }, `Effective Rails binding: ${c.args.match(/(?:^|\s)(?:-b|--binding)[\s=](\S+)/)?.[1] ?? setting<string>("rails.serverBinding")} (from ${/(^|\s)(-b|--binding)\b/.test(c.args) ? "the arguments" : "Settings › Rails"}); inside a container 127.0.0.1 is only reachable from the container itself`) : null,
       ];
     };
     const argsHint = {
@@ -588,7 +617,7 @@ export function editConfigurations() {
       field("Ruby version manager", manager, detectedManagers.length ? `detected via login shell: ${detectedManagers.join(", ")}; auto uses your shell setup as is` : "auto uses your login shell setup as is"),
       h("label", { class: "rc-check" }, bundler, " Use bundler (bundle exec)"),
       h("label", { class: "rc-check", title: dockerWhy || "" }, dockerBox, " Run inside a Docker Compose service", dockerWhy ? h("small", { class: "dim" }, ` (unavailable: ${dockerWhy})`) : dockerWhy === null ? h("small", { class: "dim" }, " (checking Docker…)") : null),
-      ...(c.docker ? dockerFields() : []),
+      ...(c.docker ? dockerFields().filter((x): x is HTMLElement => !!x) : []),
       preview,
     );
     update();

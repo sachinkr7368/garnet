@@ -5,6 +5,7 @@ import { allCommands, keymap } from "./commands";
 import { importJetBrainsKeymap, jetbrainsKeystroke } from "./keymapref";
 import { breakpointsIn, debugSessions, debugState, evaluate, flushBreakpoints, loadBreakpoints, resume, resumeSession, selectDebugSession, smokeHooks, stopAllSessions, stopDebug, toggleBreakpoint } from "./debug";
 import { rerunFailed, testRunState, testStatusAt } from "./testresults";
+import { defaultDocker } from "./docker";
 import { editor, openFile } from "./editor";
 import { refreshGit } from "./git";
 import { api, Channel, invoke, type PtyEvent } from "./ipc";
@@ -300,7 +301,7 @@ async function dockerChecks(report: Report, check: (n: string, ok: boolean | str
   const why = await dockerUnavailable();
   report.docker = why || "available";
   if (why) return check("docker compose run", `untested: ${why}`);
-  const cfg: RunConfig = { ...newConfig("ruby", "Smoke docker", SMOKE_SCRIPT), bundler: false, rubyManager: "none", docker: { service: "app", mode: "run", composeFile: "docker-compose.yml", containerRoot: "/app", debugPort: 12345 } };
+  const cfg: RunConfig = { ...newConfig("ruby", "Smoke docker", SMOKE_SCRIPT), bundler: false, rubyManager: "none", docker: { ...defaultDocker(), service: "app", composeFile: "docker-compose.yml" } };
   report.dockerCommand = buildCommand(cfg);
   launch(cfg, "run");
   const item = await until(() => runs.items.find((i) => i.title === cfg.name && i.view.exited), 300000, 500);

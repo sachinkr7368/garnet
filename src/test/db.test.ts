@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fake } from "./fakeIpc";
 
 vi.mock("../editor", () => import("./fakeEditor"));
-const { mergeConnections, overrideFrom, runBatch, completions, unresolvedFields } = await import("../db");
+const { mergeConnections, overrideFrom, runBatch, completions, unresolvedFields, exportResult } = await import("../db");
 type Detected = import("../db").Detected;
 type Conn = import("../db").Conn;
 
@@ -124,5 +124,19 @@ describe("completions", () => {
     expect(completions(schema).map((c) => c.label)).toEqual(["users", "posts", "id", "email"]);
     expect(completions(schema, "Users").map((c) => c.label)).toEqual(["id", "email"]);
     expect(completions(schema, "public").map((c) => c.label)).toEqual(["users", "posts"]);
+  });
+});
+
+describe("export", () => {
+  beforeEach(() => fake.reset());
+
+  it("lets the backend pick the path in its own save dialog; the webview never sends one", async () => {
+    const seen: any[] = [];
+    fake.invokeResult = (cmd, args) => (cmd === "export_file" ? (seen.push(args), "/Users/x/result.csv") : null);
+    await exportResult({ columns: ["id", "name"], rows: [["1", "a,b"], ["2", null]], rowsAffected: null, truncated: false, elapsedMs: 1 }, "csv");
+    expect(seen).toHaveLength(1);
+    expect(Object.keys(seen[0]).sort()).toEqual(["content", "defaultName", "format"]);
+    expect(seen[0]).toMatchObject({ format: "csv", defaultName: "result.csv" });
+    expect(seen[0].content).toContain('"a,b"');
   });
 });

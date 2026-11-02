@@ -1,5 +1,5 @@
 import "./db.css";
-import { ask, save } from "@tauri-apps/plugin-dialog";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { commands } from "./commands";
 import { monaco } from "./editor";
 import { api, invoke } from "./ipc";
@@ -791,12 +791,10 @@ function needLive(id: string): Conn | null {
   return null;
 }
 
-async function exportResult(r: QueryResult, format: "csv" | "json") {
-  const path = await save({ defaultPath: `result.${format}`, filters: [{ name: format.toUpperCase(), extensions: [format] }] });
-  if (!path) return;
+export async function exportResult(r: QueryResult, format: "csv" | "json") {
   try {
-    await invoke("export_file", { path, content: format === "csv" ? toCsv(r.columns, r.rows) : toJson(r.columns, r.rows) });
-    toast(`Exported ${r.rows.length} rows to ${path}`);
+    const path = await invoke<string | null>("export_file", { format, defaultName: `result.${format}`, content: format === "csv" ? toCsv(r.columns, r.rows) : toJson(r.columns, r.rows) });
+    if (path) toast(`Exported ${r.rows.length} rows to ${path}`);
   } catch (e) {
     toast(`Export failed: ${e}`, "error");
   }

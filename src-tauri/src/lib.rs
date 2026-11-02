@@ -8,6 +8,7 @@ mod lsp;
 mod project;
 mod pty;
 mod rpc;
+mod ruby;
 mod search;
 mod watch;
 

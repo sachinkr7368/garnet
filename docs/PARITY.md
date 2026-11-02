@@ -18,7 +18,7 @@ partial row is meant to become a GitHub issue.
 | Live templates / snippets | planned | |
 | HAML and Slim highlighting | planned | |
 | Spell checking | planned | |
-| Semantic highlighting from ruby-lsp | planned | disabled for speed; needs a token legend mapping |
+| Semantic highlighting from ruby-lsp | planned | both themes already color the semantic token types; the request stays disabled for speed until the legend mapping lands |
 | Inlay hints | planned | |
 
 ## Navigation
@@ -27,6 +27,7 @@ partial row is meant to become a GitHub issue.
 | --- | --- | --- |
 | Go to File (fuzzy, double Shift, `file:line`) | done | Rust index, ≤1 ms per keystroke on 5k files |
 | Go to Symbol in project, File Structure popup and panel | done | ruby-lsp |
+| ruby-lsp startup: global `ruby-lsp --use-launcher` through the detected version manager (mise, rbenv, asdf, chruby, rvm; Settings override), survives a broken project bundle; failures show the reason from stderr with Run bundle install in terminal / Show Log / Restart | done | ruby-lsp itself may install the composed bundle's gems, as in VS Code |
 | Go to Declaration (⌘B / ⌘-click), Quick Definition | done | |
 | Find Usages (panel) and inline usages | done | |
 | Find in Files (regex, case, word, include globs) | done | |
@@ -69,7 +70,7 @@ partial row is meant to become a GitHub issue.
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Run configurations: Rails server, Rails console, RSpec, Minitest, Rake, Ruby script, Sidekiq, custom | done | stored in `.garnet/run.json`, Rails defaults auto-created |
+| Run configurations: Rails server, Rails console, RSpec, Minitest, Rake, Ruby script, Sidekiq, custom | done | kept in Garnet's config dir by default (nothing written to the repo); per-configuration "Store as project file (share via VCS)" writes `.garnet/run.json`, which is read only for trusted projects; Rails defaults auto-created |
 | Env vars, `.env` file, working directory, version manager (rbenv/asdf/chruby/rvm/mise), bundler toggle | done | |
 | Toolbar selector with Run / Debug / Stop, several configurations running at once | done | one console tab each, ANSI colors, restart/stop |
 | Debug any configuration under rdbg (DAP), fix hint when `debug` is not bundled | done | verified end-to-end on a Rails request |
@@ -98,7 +99,7 @@ partial row is meant to become a GitHub issue.
 | Stashes: list, stash with message and untracked files, apply, pop, drop (confirmed), view a stash's changes | done | |
 | Merge conflicts (merge, rebase, cherry-pick, revert, stash pop): Conflicts list, 3-pane resolver (yours / result / theirs) with accept yours/theirs/both per chunk, mark resolved, abort/continue | done | symlink conflicts resolve by taking one side; binary files resolve with Accept Yours/Theirs |
 | Branch switcher: local/remote, checkout (stash or carry changes), new, rename, delete, fetch/pull/push, ahead/behind | done | |
-| Worktrees: toolbar switcher and Commit panel section (folder, branch, dirty marker, current), open here / new window, create from branch, remove, reveal | done | |
+| Worktrees: toolbar switcher and Commit panel section (folder, branch, dirty marker, current), open here / new window, create from branch, remove, reveal | done | toolbar shows the current worktree (main checkout: repo name + "main worktree" tag); count in the dropdown header |
 | Line-level staging, interactive rebase | planned | |
 
 ## GitHub
@@ -143,7 +144,7 @@ partial row is meant to become a GitHub issue.
 | Settings window (searchable tree, global + `.garnet/settings.json` overrides, JSON stays editable) | done | |
 | JetBrains macOS default keymap for every implemented action; keymap editor (search, rebind, conflict prompt, find by shortcut), VS Code preset, JetBrains keymap XML import, Help › Keymap Reference | done | XML import skips two-keystroke shortcuts and actions Garnet does not have |
 | Command palette, recent projects, session restore, multiple windows (one process per window) | done | |
-| Light / dark / system theme, UI font size, zoom | done | |
+| Light / dark / system theme, UI font size, zoom | done | System (default) follows macOS live; Toggle Theme in the toolbar and palette; chrome, editor, diff, terminal ANSI and semantic-token colors switch without restart; contrast checked by tests (text ≥ 4.5:1) |
 | Signed and notarized releases | partial | workflow supports it once Apple secrets are added |
 | Auto-update check (opt-in) | planned | |
 | Plugin API | planned | |

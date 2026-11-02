@@ -208,6 +208,8 @@ const diffOptions = () => ({
   renderSideBySide: setting<boolean>("diff.sideBySide"),
   hideUnchangedRegions: { enabled: setting<boolean>("diff.collapseUnchanged") },
 });
+/// Editor and diff settings for other diff views (the pull request Files tab), so they look like diff tabs.
+export const diffEditorOptions = () => ({ ...editorOptions(), ...diffOptions() });
 function getDiffEditor() {
   diffEditor ??= monaco.editor.createDiffEditor(diffEl, {
     ...editorOptions(),

@@ -4,11 +4,16 @@ export const fake = {
   config: new Map<string, string>(),
   trustedFlag: false,
   calls: [] as string[],
+  /// Per-command handlers for `invoke`, and every invoke with its arguments.
+  handlers: new Map<string, (args: any) => unknown>(),
+  invocations: [] as { cmd: string; args: any }[],
   /// Stdout for `api.runCapture(root, command)`; defaults to "".
   capture: (_command: string): string => "",
   /// Result for `invoke(cmd, args)`; defaults to null.
   invokeResult: (_cmd: string, _args?: any): unknown => null,
   reset() {
+    this.handlers.clear();
+    this.invocations.length = 0;
     this.files.clear();
     this.config.clear();
     this.calls.length = 0;
@@ -25,7 +30,9 @@ export class Channel<T> {
 }
 export const invoke = async (cmd: string, args?: any): Promise<any> => {
   fake.calls.push(cmd);
-  return fake.invokeResult(cmd, args);
+  fake.invocations.push({ cmd, args });
+  const handler = fake.handlers.get(cmd);
+  return handler ? handler(args) : fake.invokeResult(cmd, args);
 };
 
 export const api = new Proxy(

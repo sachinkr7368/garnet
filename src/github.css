@@ -1,0 +1,601 @@
+/* GitHub: dialogs, Pull Requests tool window, pull request view */
+
+.gh-dialog .gh-dialog-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+.gh-dialog.gh-small {
+  height: auto;
+  max-height: 80vh;
+  width: min(620px, 94vw);
+}
+.gh-dialog.gh-pr-create {
+  width: min(760px, 94vw);
+  height: min(680px, 86vh);
+}
+.gh-input,
+.gh-textarea {
+  background: var(--input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font: inherit;
+  outline: none;
+  min-width: 0;
+}
+.gh-input:focus,
+.gh-textarea:focus {
+  border-color: var(--accent);
+}
+.gh-textarea {
+  resize: vertical;
+  font: 12.5px/1.5 ui-monospace, Menlo, monospace;
+  width: 100%;
+  box-sizing: border-box;
+}
+.gh-textarea.small {
+  font-size: 12px;
+}
+.gh-error {
+  color: var(--deleted);
+  white-space: pre-wrap;
+}
+.gh-error:empty {
+  display: none;
+}
+.gh-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.gh-row .gh-input {
+  flex: 1;
+}
+.gh-row .gh-name {
+  flex: 0 1 180px;
+}
+.gh-grow {
+  flex: 1;
+  min-height: 0;
+}
+.gh-badge {
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--dim);
+  white-space: nowrap;
+}
+.gh-badge.review-approved {
+  color: var(--added);
+}
+.gh-badge.review-changes_requested {
+  color: var(--deleted);
+}
+
+/* sign in */
+.gh-signin {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.gh-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+}
+.gh-option.column {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+.gh-option .dim {
+  font-size: 12px;
+}
+.gh-device {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+}
+.gh-code {
+  font: 600 28px ui-monospace, Menlo, monospace;
+  letter-spacing: 4px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* markdown editor and rendered markdown */
+.gh-md {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 180px;
+}
+.gh-md .gh-textarea {
+  flex: 1;
+  border-top-left-radius: 0;
+}
+.gh-tabs {
+  display: flex;
+  gap: 2px;
+}
+.gh-tab {
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: none;
+  padding: 4px 12px;
+  border-radius: 6px 6px 0 0;
+  color: var(--dim);
+  cursor: pointer;
+}
+.gh-tab.active {
+  color: var(--text);
+  background: var(--input);
+  border-color: var(--border);
+}
+.gh-preview {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 0 6px 6px 6px;
+  padding: 8px 12px;
+  background: var(--input);
+}
+.gh-markdown {
+  user-select: text;
+  -webkit-user-select: text;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.gh-markdown > :first-child {
+  margin-top: 0;
+}
+.gh-markdown > :last-child {
+  margin-bottom: 0;
+}
+.gh-markdown a {
+  color: var(--modified);
+  cursor: pointer;
+}
+.gh-markdown code {
+  background: var(--panel-2);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font: 12px ui-monospace, Menlo, monospace;
+}
+.gh-markdown pre {
+  background: var(--panel-2);
+  border-radius: 6px;
+  padding: 8px 10px;
+  overflow: auto;
+}
+.gh-markdown pre code {
+  background: none;
+  padding: 0;
+}
+.gh-markdown img {
+  max-width: 100%;
+}
+.gh-markdown blockquote {
+  margin: 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--border);
+  color: var(--dim);
+}
+.gh-markdown table {
+  border-collapse: collapse;
+}
+.gh-markdown td,
+.gh-markdown th {
+  border: 1px solid var(--border);
+  padding: 3px 8px;
+}
+
+/* clone */
+.gh-clone-dialog .gh-clone {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+}
+.gh-repo-list {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input);
+}
+.gh-repo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  cursor: default;
+  white-space: nowrap;
+}
+.gh-repo:hover {
+  background: var(--hover);
+}
+.gh-repo.selected {
+  background: var(--selected);
+}
+.gh-repo-name {
+  flex: none;
+}
+.gh-repo-desc {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+.gh-hint {
+  padding: 8px 10px;
+  color: var(--dim);
+}
+.gh-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.gh-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.gh-bar-fill {
+  height: 100%;
+  width: 2%;
+  background: var(--accent);
+  transition: width 0.2s;
+}
+.gh-progress-text {
+  font: 11px ui-monospace, Menlo, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Pull Requests tool window */
+.pr-tool .pr-filter {
+  flex: 1;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.pr-list {
+  flex: 1;
+  overflow: auto;
+}
+.pr-section-head {
+  cursor: default;
+  gap: 4px;
+}
+.pr-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 14px;
+  cursor: default;
+}
+.pr-row:hover {
+  background: var(--hover);
+}
+.pr-row-main {
+  flex: 1;
+  min-width: 0;
+}
+.pr-row-title,
+.pr-row-meta {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pr-row-meta {
+  font-size: 11px;
+}
+.pr-open {
+  color: var(--added);
+}
+.pr-draft {
+  color: var(--dim);
+}
+.pr-ci.ci-success {
+  color: var(--added);
+}
+.pr-ci.ci-failure,
+.pr-ci.ci-error {
+  color: var(--deleted);
+}
+.pr-ci.ci-pending,
+.pr-ci.ci-expected {
+  color: var(--warn);
+}
+.pr-ci.ci-none {
+  color: var(--dim);
+  opacity: 0.6;
+}
+.pr-pad {
+  padding: 4px 14px;
+}
+.pr-more {
+  margin: 4px 14px 8px;
+}
+
+/* pull request view (over the editor area) */
+.pr-view {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.pr-header {
+  padding: 10px 14px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.pr-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pr-title {
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.pr-state {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 10px;
+  color: #fff;
+  background: var(--added);
+}
+.pr-state.state-draft,
+.pr-state.state-closed {
+  background: var(--dim);
+}
+.pr-state.state-merged {
+  background: #8957e5;
+}
+.pr-sub code {
+  font: 12px ui-monospace, Menlo, monospace;
+  background: var(--panel-2);
+  padding: 0 4px;
+  border-radius: 4px;
+}
+.pr-actions {
+  display: flex;
+  gap: 6px;
+}
+.pr-actions .btn,
+.btn.small {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.btn.small {
+  padding: 1px 8px;
+  font-size: 12px;
+}
+.pr-tabs {
+  padding: 6px 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+.pr-tabs .gh-tab.active {
+  background: var(--bg);
+  margin-bottom: -1px;
+}
+.pr-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+.pr-overview {
+  padding: 12px 16px;
+  max-width: 980px;
+}
+.pr-description {
+  margin: 12px 0 18px;
+}
+.pr-heading {
+  font-weight: 600;
+  margin: 8px 0 6px;
+}
+.pr-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+.pr-check.check-success .codicon {
+  color: var(--added);
+}
+.pr-check.check-failure .codicon {
+  color: var(--deleted);
+}
+.pr-check.check-pending .codicon {
+  color: var(--warn);
+}
+.pr-commits {
+  padding: 6px 0;
+}
+.pr-commit {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 16px;
+  cursor: pointer;
+}
+.pr-commit:hover {
+  background: var(--hover);
+}
+.pr-commit code {
+  font: 12px ui-monospace, Menlo, monospace;
+  color: var(--dim);
+}
+.pr-commit-msg {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-files {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.pr-tree {
+  width: 260px;
+  flex: none;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  padding: 4px 0;
+  background: var(--panel);
+}
+.pr-file,
+.pr-dir {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  white-space: nowrap;
+  cursor: default;
+}
+.pr-file:hover,
+.pr-dir:hover {
+  background: var(--hover);
+}
+.pr-file.selected {
+  background: var(--selected);
+}
+.pr-file .change-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pr-stat {
+  font-size: 11px;
+}
+.pr-stat .add {
+  color: var(--added);
+}
+.pr-stat .del {
+  color: var(--deleted);
+}
+.pr-diff {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pr-file-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.pr-file-path {
+  font: 12px ui-monospace, Menlo, monospace;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.pr-outdated {
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  max-height: 40%;
+  overflow: auto;
+}
+.pr-diff-editor {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+.pr-add-comment {
+  color: #fff;
+  background: var(--accent);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px !important;
+}
+.pr-zone {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 3;
+  font: var(--ui-font-size, 13px)/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  color: var(--text);
+}
+.pr-thread {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  white-space: normal;
+}
+.pr-thread.pending {
+  border-color: var(--warn);
+}
+.pr-thread.composer {
+  border-color: var(--accent);
+}
+.pr-thread.resolved {
+  opacity: 0.8;
+}
+.pr-thread-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.pr-comment-head {
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+.pr-comment + .pr-comment {
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+.pr-pending-body {
+  white-space: pre-wrap;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.pr-reply {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  align-items: flex-start;
+}
+.pr-reply .gh-textarea {
+  flex: 1;
+}
+.pr-review-opt b {
+  margin-right: 2px;
+}

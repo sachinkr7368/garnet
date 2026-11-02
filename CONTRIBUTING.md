@@ -8,14 +8,15 @@ judged on two things: does it fully work, and does it keep the app fast.
 - `src-tauri/src/` Rust backend: file system and index (`fsops.rs`, `index.rs`),
   search (`search.rs`), file watching (`watch.rs`), terminals (`pty.rs`),
   ruby-lsp transport (`lsp.rs`), rdbg/DAP transport (`dap.rs`), git (`git.rs`),
-  GitHub (`github.rs`), project/env/config (`project.rs`, `env.rs`).
+  GitHub REST/GraphQL, auth and clone (`github.rs`), project/env/config (`project.rs`, `env.rs`).
 - `src/` TypeScript frontend (no framework): `editor.ts` (Monaco, tabs),
   `tree.ts`, `search.ts`, `terminal.ts`, `lsp.ts` (LSP client and Monaco
   providers), `run.ts` (run configurations), `debug.ts` (DAP client and
   debugger UI), `git.ts` (Commit panel, gutter hunks), `gitlog.ts` (Git log,
   stashes), `merge.ts` (conflict resolver), `difflogic.ts` + `diffworker.ts`
-  (line diff, patches), `toolbar.ts` (project/worktree/branch switchers,
-  GitHub), `rails.ts`, `settings.ts` + `settingsui.ts`, `commands.ts` (keymap,
+  (line diff, patches), `toolbar.ts` (project/worktree/branch switchers),
+  `github.ts` (sign-in, create PR, gist, clone), `prs.ts` (Pull Requests tool
+  window and PR review), `ghmodel.ts` (pure GitHub logic), `rails.ts`, `settings.ts` + `settingsui.ts`, `commands.ts` (keymap,
   palette), `languages/` (HAML/Slim grammars, live templates), `replace.ts`,
   `breadcrumbs.ts`, `semantic.ts` (pure helpers), `smoke.ts` (end-to-end harness).
 

@@ -1,9 +1,10 @@
 import { ask, message, open } from "@tauri-apps/plugin-dialog";
-import { activeTab, editor, saveAll } from "./editor";
+import { saveAll } from "./editor";
 import { refreshGit } from "./git";
+import { cloneDialog, createPullRequest } from "./github";
 import { api, invoke } from "./ipc";
 import { isDarkTheme, isTrusted, onSettingsChange, recentProjects, toggleTheme } from "./settings";
-import { basename, dirname, rel, root, state } from "./state";
+import { basename, dirname, root, state } from "./state";
 import { h, icon, iconButton, inputBox, quickPick, toast, type PickItem } from "./ui";
 
 const switchers = document.getElementById("switchers")!;
@@ -114,7 +115,7 @@ projectBtn.onclick = async () => {
     onAccept: async (item) => {
       const d = item?.data as { path?: string; newWindow?: boolean; clone?: boolean } | undefined;
       if (!d) return;
-      if (d.clone) return cloneRepo();
+      if (d.clone) return cloneDialog(openProjectHere);
       let path = d.path;
       if (!path) {
         const picked = await open({ directory: true });
@@ -126,22 +127,6 @@ projectBtn.onclick = async () => {
     },
   });
 };
-
-async function cloneRepo() {
-  const url = await inputBox("Repository URL or owner/name (e.g. rails/rails)");
-  if (!url) return;
-  const full = /^[\w.-]+\/[\w.-]+$/.test(url.trim()) ? `https://github.com/${url.trim()}.git` : url.trim();
-  const parent = await open({ directory: true, title: "Clone into folder" });
-  if (typeof parent !== "string") return;
-  const target = `${parent}/${basename(full).replace(/\.git$/, "")}`;
-  toast(`Cloning ${full}…`);
-  try {
-    await api.runCapture(parent, `GIT_TERMINAL_PROMPT=0 git clone ${JSON.stringify(full)} ${JSON.stringify(target)}`, 900);
-    openProjectHere(target);
-  } catch (e) {
-    toast(`Clone failed: ${e}`, "error");
-  }
-}
 
 /// Branch switcher
 
@@ -363,123 +348,6 @@ export async function newWorktree() {
       if (await ask(`Open ${basename(path)} in a new window?`, { okLabel: "Open", cancelLabel: "Not now" })) invoke("open_new_window", { path });
     },
   });
-}
-
-/// GitHub
-
-async function remoteRepo(): Promise<{ owner: string; repo: string } | null> {
-  const url = (await git("remote", "get-url", "origin").catch(() => "")).trim();
-  const m = url.match(/github\.com[:/]([^/]+)\/(.+?)(?:\.git)?$/);
-  return m ? { owner: m[1], repo: m[2] } : null;
-}
-
-const gh = <T = any>(method: string, path: string, body?: unknown) =>
-  invoke<string>("github_api", { method, path, body: body === undefined ? null : JSON.stringify(body) }).then((r) => (r ? (JSON.parse(r) as T) : (null as T)));
-
-export async function githubSignIn() {
-  if (await invoke<boolean>("github_signed_in")) {
-    if (await ask("Garnet is signed in to GitHub. Sign out (removes the token from the Keychain)?", { okLabel: "Sign Out", cancelLabel: "Cancel" })) {
-      await invoke("github_sign_out");
-      toast("Signed out of GitHub.");
-    }
-    return;
-  }
-  const fromGh = state.project ? await api.runCapture(root(), "gh auth token 2>/dev/null", 20).catch(() => "") : "";
-  let token = fromGh.trim();
-  if (token) {
-    if (!(await ask("Use the GitHub token from the GitHub CLI (gh auth token)? It is copied into your macOS Keychain.", { okLabel: "Use gh token", cancelLabel: "Cancel" }))) return;
-  } else {
-    const typed = await inputBox("GitHub CLI not found. Paste a personal access token (scopes: repo, gist); it is stored in the macOS Keychain");
-    if (!typed) return;
-    token = typed.trim();
-  }
-  await invoke("github_store_token", { token });
-  try {
-    const me = await gh<{ login: string }>("GET", "/user");
-    toast(`Signed in to GitHub as ${me.login}.`);
-  } catch (e) {
-    await invoke("github_sign_out");
-    toast(`GitHub rejected the token: ${e}`, "error");
-  }
-}
-
-async function requireGitHub(): Promise<{ owner: string; repo: string } | null> {
-  if (!(await invoke<boolean>("github_signed_in"))) {
-    await githubSignIn();
-    if (!(await invoke<boolean>("github_signed_in"))) return null;
-  }
-  const repo = await remoteRepo();
-  if (!repo) toast("The origin remote is not a GitHub repository.", "error");
-  return repo;
-}
-
-export async function createPullRequest() {
-  const repo = await requireGitHub();
-  if (!repo) return;
-  const branch = (await git("rev-parse", "--abbrev-ref", "HEAD")).trim();
-  const info = await gh<{ default_branch: string }>("GET", `/repos/${repo.owner}/${repo.repo}`);
-  if (branch === info.default_branch) return toast(`You are on ${branch}; create a feature branch first.`, "error");
-  const upstream = await git("rev-parse", "--abbrev-ref", "@{upstream}").catch(() => "");
-  if (!upstream.trim()) {
-    if (!(await ask(`${branch} has not been pushed. Push it to origin now?`, { okLabel: "Push", cancelLabel: "Cancel" }))) return;
-    try {
-      await git("push", "--set-upstream", "origin", branch);
-    } catch (e) {
-      return toast(`Push failed: ${e}`, "error");
-    }
-  }
-  const lastSubject = (await git("log", "-1", "--format=%s")).trim();
-  const title = await inputBox(`Pull request title (${branch} → base)`, lastSubject);
-  if (!title) return;
-  const base = await inputBox("Base branch", info.default_branch);
-  if (!base) return;
-  const body = await inputBox("Description (optional, single line; edit more on GitHub)", "");
-  if (body === null) return;
-  const draft = await message("Create as a draft pull request?", { buttons: { yes: "Ready for Review", no: "Draft", cancel: "Cancel" } });
-  if (draft === "Cancel") return;
-  try {
-    const pr = await gh<{ html_url: string; number: number }>("POST", `/repos/${repo.owner}/${repo.repo}/pulls`, {
-      title,
-      head: branch,
-      base,
-      body,
-      draft: draft === "Draft" || draft === "No",
-    });
-    toast(`Created pull request #${pr.number}.`, "info", [{ label: "Open on GitHub", run: () => invoke("open_url", { url: pr.html_url }) }]);
-  } catch (e) {
-    toast(String(e), "error");
-  }
-}
-
-export async function openOnGitHub() {
-  const t = activeTab();
-  if (!t) return;
-  const repo = await remoteRepo();
-  if (!repo) return toast("The origin remote is not a GitHub repository.", "error");
-  const sha = (await git("rev-parse", "HEAD")).trim();
-  const sel = editor.getSelection();
-  const lines = sel ? (sel.startLineNumber === sel.endLineNumber ? `#L${sel.startLineNumber}` : `#L${sel.startLineNumber}-L${sel.endLineNumber}`) : "";
-  invoke("open_url", { url: `https://github.com/${repo.owner}/${repo.repo}/blob/${sha}/${rel(t.path).split("/").map(encodeURIComponent).join("/")}${lines}` });
-}
-
-export async function createGist() {
-  const model = editor.getModel();
-  const sel = editor.getSelection();
-  if (!model || !sel || sel.isEmpty()) return toast("Select some code first.");
-  if (!(await invoke<boolean>("github_signed_in"))) await githubSignIn();
-  if (!(await invoke<boolean>("github_signed_in"))) return;
-  const name = basename(model.uri.fsPath);
-  const visibility = await message(`Create a gist from the selection in ${name}?`, { buttons: { yes: "Secret Gist", no: "Public Gist", cancel: "Cancel" } });
-  if (visibility === "Cancel") return;
-  try {
-    const gist = await gh<{ html_url: string }>("POST", "/gists", {
-      public: visibility === "Public Gist" || visibility === "No",
-      files: { [name]: { content: model.getValueInRange(sel) } },
-    });
-    toast("Gist created.", "info", [{ label: "Open", run: () => invoke("open_url", { url: gist.html_url }) }]);
-  } catch (e) {
-    toast(String(e), "error");
-  }
 }
 
 export const showBranches = () => branchBtn.click();

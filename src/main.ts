@@ -29,7 +29,9 @@ import { findInFiles, replaceInFiles, searchView } from "./search";
 import { loadCodeStyle } from "./codestyle";
 import { addRecentProject, askTrust, checkTrust, isTrusted, loadSession, trustProject, loadSettings, recentProjects, saveSession, setting, settingsPath, toggleTheme, updateSetting } from "./settings";
 import { openSettingsWindow } from "./settingsui";
-import { createGist, createPullRequest, githubSignIn, initToolbar, openOnGitHub, pullCurrent, pushCurrent, refreshToolbar, showBranches, showProjects, showWorktrees } from "./toolbar";
+import { cloneDialog, createGist, createPullRequest, githubSignIn, openOnGitHub, refreshAccount } from "./github";
+import { openPullRequestByNumber, pullRequestsView, showPullRequests } from "./prs";
+import { initToolbar, pullCurrent, pushCurrent, refreshToolbar, showBranches, showProjects, showWorktrees } from "./toolbar";
 import { abs, debounce, rel, state } from "./state";
 import { newTerminal, showTerminalPanel, terminals } from "./terminal";
 import { expandedPaths, initTree, refreshTree, revealInTree, toggleRailsView, treeView } from "./tree";
@@ -43,6 +45,7 @@ const PENDING_ROOT = "open";
 sidebar.add({ id: "project", title: "Project", icon: "files", el: treeView });
 sidebar.add({ id: "commit", title: "Commit", icon: "source-control", el: commitView, onShow: () => refreshGit() });
 sidebar.add({ id: "structure", title: "Structure", icon: "symbol-structure", el: outlineView });
+sidebar.add({ id: "pullRequests", title: "Pull Requests", icon: "git-pull-request", el: pullRequestsView, onShow: () => showPullRequests() });
 
 bottom.add({ id: "terminal", title: "Terminal", icon: "terminal", el: terminals.el, onShow: showTerminalPanel });
 bottom.add({ id: "run", title: "Run", icon: "play", el: runs.el, onShow: () => runs.fitActive() });
@@ -312,6 +315,9 @@ commands(
   { id: "githubPr", title: "GitHub: Create Pull Request…", run: needProject(createPullRequest) },
   { id: "githubOpen", title: "GitHub: Open File on GitHub", run: needProject(openOnGitHub) },
   { id: "githubGist", title: "GitHub: Create Gist from Selection…", run: needProject(createGist) },
+  { id: "githubPullRequests", title: "View: Pull Requests", run: () => sidebar.toggle("pullRequests") },
+  { id: "githubOpenPr", title: "GitHub: Open Pull Request…", run: needProject(openPullRequestByNumber) },
+  { id: "githubClone", title: "GitHub: Clone Repository…", run: () => cloneDialog(switchProject) },
   { id: "restartLsp", title: "Ruby LSP: Restart", run: needProject(startLsp) },
   { id: "trustProject", title: "File: Trust Project…", run: needProject(askTrust) },
   { id: "toggleBreadcrumbs", title: "View: Toggle Breadcrumbs", run: () => updateSetting("editor.breadcrumbs", !setting("editor.breadcrumbs")) },
@@ -348,6 +354,7 @@ async function renderWelcome() {
       h("div", { class: "welcome-title" }, "Garnet"),
       h("div", { class: "dim" }, "A fast Ruby and Rails IDE"),
       h("button", { class: "btn primary big", onclick: openFolder }, "Open Folder…"),
+      h("button", { class: "btn big", onclick: () => cloneDialog(switchProject) }, "Clone Repository…"),
       recent.length ? h("div", { class: "welcome-recent-title" }, "Recent projects") : null,
       ...recent.map((p) => h("div", { class: "welcome-recent", onclick: () => openProject(p) }, h("span", {}, p.split("/").pop()!), h("span", { class: "dim" }, p))),
     ),
@@ -423,6 +430,7 @@ window.addEventListener("garnet:trusted", () => {
 
 async function boot() {
   installKeyHandler();
+  refreshAccount();
   initToolbar(switchProject);
   await loadSettings();
   initUpdateCheck().catch(() => {});

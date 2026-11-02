@@ -112,13 +112,16 @@ partial row is meant to become a GitHub issue.
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Sign in by reusing `gh auth token` or a personal access token; token in Keychain | done | |
-| OAuth device flow | planned | needs a registered Garnet OAuth app client id |
-| Create pull request from the current branch (title, body, base, draft), push with upstream | done | body is a single-line field; edit more on GitHub |
-| Open file/line on GitHub, create gist from selection | done | |
-| Clone by URL or `owner/name` | done | |
-| Clone with repository search | planned | |
-| PR list (mine / review requested, CI status), PR diff and inline review comments, check out PR branch | planned | |
+| Sign in without a Garnet account: reuse `gh auth token`, browser (OAuth device flow), or a fine-grained personal access token; token in the macOS Keychain only; account indicator in the status bar, switch account, sign out | done | browser sign-in appears only when a client id is set at build time (`GARNET_GITHUB_CLIENT_ID`) or in Settings › Version Control › GitHub; no client secret is used |
+| API errors: re-auth prompt on 401, rate-limit wait time, offline message, Link pagination | done | REST and GraphQL from Rust (reqwest + rustls) |
+| Create pull request (title, base picker, multi-line Markdown description with GitHub-rendered preview, draft), push with upstream first | done | |
+| Open file/line on GitHub, create gist from selection (secret or public, description) | done | |
+| Clone dialog: your, your organizations' and global repository search, URL or `owner/name`, destination picker, progress, then open (trust prompt) | done | no cancel while git is cloning |
+| Pull Requests tool window: review requested, mine, current repo's open PRs; CI status, review state, draft; filter (`is:draft`, `ci:failing`, `review:approved`, `author:`, `#n`, text); load more | done | |
+| PR view: rendered description, checks, commits, Files tab (changed-files tree + side-by-side diff) | done | last 100 commits and 100 review threads per PR; binary or very large files link to GitHub |
+| Review: existing threads inline on the diff, comment on a line or range (either side), reply, resolve/unresolve, pending comments submitted as a review (comment / approve / request changes) | done | pending comments live in memory until submitted or the app closes |
+| Check out a PR branch (same repo or fork), open on GitHub, merge (merge / squash / rebase as the repo allows) with a confirm dialog | done | fork PRs check out as `pr/<n>-<owner>-<branch>` without a push target |
+| Edit PR title/description, request reviewers, labels, PR timeline (issue comments, review summaries), suggested changes | planned | |
 
 ## Database
 
@@ -164,8 +167,8 @@ partial row is meant to become a GitHub issue.
 Independent chunks that touch separate files, so they can be built in parallel:
 
 1. ~~**Test results tree**~~ done.
-2. **GitHub PR panel** — new `src/github-prs.ts` + `github_api` (exists): PR list (search API), CI status (check-runs), PR diff (Monaco diff per file), review comments as editor view zones, checkout PR branch (`git fetch origin pull/N/head`).
-3. **OAuth device flow** — `src-tauri/src/github.rs`: device code + polling; requires registering an OAuth app and embedding its client id.
+2. ~~**GitHub PR panel**~~ done (`src/prs.ts`). Follow-up: PR timeline, reviewers, labels, suggested changes.
+3. ~~**OAuth device flow**~~ done; needs a registered Garnet OAuth app client id (device flow enabled) for release builds.
 4. **Interactive rebase** — `src/gitlog.ts`: reorder/squash/fixup/reword from the log, driving `git rebase -i` with a generated todo via `GIT_SEQUENCE_EDITOR`.
 5. **Line-level staging** — `src/git.ts`: select lines inside a hunk in the Commit panel and build the patch from those lines only.
 6. **Method implementations** — `src/lsp.ts`: find overrides of a method in subtypes from the type hierarchy plus document symbols.

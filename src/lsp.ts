@@ -266,12 +266,12 @@ function initializeParams() {
 
 /// Document sync
 
-const lspPos = (p: monaco.IPosition): Pos => ({ line: p.lineNumber - 1, character: p.column - 1 });
-const lspRange = (r: monaco.IRange): LspRange => ({
+export const lspPos = (p: monaco.IPosition): Pos => ({ line: p.lineNumber - 1, character: p.column - 1 });
+export const lspRange = (r: monaco.IRange): LspRange => ({
   start: { line: r.startLineNumber - 1, character: r.startColumn - 1 },
   end: { line: r.endLineNumber - 1, character: r.endColumn - 1 },
 });
-const toRange = (r: LspRange) => new monaco.Range(r.start.line + 1, r.start.character + 1, r.end.line + 1, r.end.character + 1);
+export const toRange = (r: LspRange) => new monaco.Range(r.start.line + 1, r.start.character + 1, r.end.line + 1, r.end.character + 1);
 const docId = (m: monaco.editor.ITextModel) => ({ uri: m.uri.toString() });
 const docPos = (m: monaco.editor.ITextModel, p: monaco.IPosition) => ({ textDocument: docId(m), position: lspPos(p) });
 
@@ -355,7 +355,7 @@ async function pullDiagnostics(model: monaco.editor.ITextModel) {
 
 /// Workspace edits
 
-function applyTextEdits(text: string, edits: TextEdit[]): string {
+export function applyTextEdits(text: string, edits: TextEdit[]): string {
   const starts = [0];
   for (let i = 0; i < text.length; i++) if (text[i] === "\n") starts.push(i + 1);
   const offset = (p: Pos) => Math.min(text.length, (starts[p.line] ?? text.length) + p.character);

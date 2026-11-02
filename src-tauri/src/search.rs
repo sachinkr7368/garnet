@@ -72,6 +72,21 @@ pub fn search_text(
     if opts.query.is_empty() {
         return Ok(());
     }
+    let current = state.generation.clone();
+    search(root, opts, generation, current, move |ev| {
+        let _ = on_event.send(ev);
+    })?;
+    Ok(())
+}
+
+/// Searches `root` on a background thread; stops early once `current` moves past `generation`.
+fn search(
+    root: std::path::PathBuf,
+    opts: SearchOpts,
+    generation: u64,
+    current: Arc<AtomicU64>,
+    emit: impl Fn(SearchEvent) + Clone + Send + Sync + 'static,
+) -> Result<std::thread::JoinHandle<()>, String> {
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(!opts.case_sensitive)
         .word(opts.whole_word)
@@ -90,14 +105,13 @@ pub fn search_text(
         }
         walker.overrides(ob.build().map_err(e2s)?);
     }
-    let current = state.generation.clone();
     let replace = opts.replace.map(|r| (r, opts.regex));
-    std::thread::spawn(move || {
+    Ok(std::thread::spawn(move || {
         let total = AtomicUsize::new(0);
         walker.build_parallel().run(|| {
             let matcher = matcher.clone();
             let replace = replace.clone();
-            let chan = on_event.clone();
+            let emit = emit.clone();
             let (current, total) = (&current, &total);
             let mut searcher = SearcherBuilder::new()
                 .binary_detection(BinaryDetection::quit(0))
@@ -125,7 +139,7 @@ pub fn search_text(
                 );
                 if !matches.is_empty() {
                     total.fetch_add(matches.len(), Ordering::Relaxed);
-                    let _ = chan.send(SearchEvent::File {
+                    emit(SearchEvent::File {
                         path: entry.path().to_string_lossy().into_owned(),
                         matches,
                     });
@@ -135,10 +149,98 @@ pub fn search_text(
         });
         if current.load(Ordering::SeqCst) == generation {
             let total = total.load(Ordering::SeqCst);
-            let _ = on_event.send(SearchEvent::Done { total, truncated: total >= MAX_MATCHES });
+            emit(SearchEvent::Done { total, truncated: total >= MAX_MATCHES });
         }
-    });
-    Ok(())
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    fn project(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("garnet-search-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app/models")).unwrap();
+        std::fs::create_dir_all(dir.join("log")).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".gitignore"), "log/\n").unwrap();
+        std::fs::write(dir.join("app/models/post.rb"), "class Post\n  # héllo Post\n  def postal; end\nend\n").unwrap();
+        std::fs::write(dir.join("app/models/user.rb"), "class User\nend\n").unwrap();
+        std::fs::write(dir.join("README.md"), "Post docs\n").unwrap();
+        std::fs::write(dir.join("log/dev.log"), "Post\n").unwrap();
+        std::fs::write(dir.join(".git/config"), "Post\n").unwrap();
+        std::fs::write(dir.join("bin.dat"), b"Post\0\x01\x02").unwrap();
+        dir
+    }
+
+    fn opts(query: &str) -> SearchOpts {
+        SearchOpts { query: query.into(), regex: false, case_sensitive: true, whole_word: false, include: None, replace: None }
+    }
+
+    type Hits = Vec<(String, Vec<(u64, Vec<(usize, usize)>)>)>;
+
+    fn run(root: &Path, o: SearchOpts) -> (Hits, usize) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        search(root.to_path_buf(), o, 1, Arc::new(AtomicU64::new(1)), move |e| sink.lock().unwrap().push(e)).unwrap().join().unwrap();
+        let mut files = Vec::new();
+        let mut done = None;
+        for e in events.lock().unwrap().drain(..) {
+            match e {
+                SearchEvent::File { path, matches } => files.push((
+                    Path::new(&path).strip_prefix(root).unwrap().to_string_lossy().into_owned(),
+                    matches.into_iter().map(|m| (m.line, m.ranges)).collect(),
+                )),
+                SearchEvent::Done { total, .. } => done = Some(total),
+            }
+        }
+        files.sort();
+        (files, done.expect("search finished with a Done event"))
+    }
+
+    #[test]
+    fn literal_search_skips_ignored_git_and_binary_files() {
+        let root = project("literal");
+        let (files, total) = run(&root, opts("Post"));
+        let names: Vec<_> = files.iter().map(|f| f.0.as_str()).collect();
+        assert_eq!(names, vec!["README.md", "app/models/post.rb"]);
+        assert_eq!(total, 3);
+        // utf-16 columns: "  # héllo Post" puts Post at 10..14
+        assert_eq!(files[1].1, vec![(1, vec![(6, 10)]), (2, vec![(10, 14)])]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn case_word_regex_and_include_options() {
+        let root = project("options");
+        let mut o = opts("post");
+        o.case_sensitive = false;
+        o.whole_word = true;
+        o.include = Some("*.rb".into());
+        let (files, total) = run(&root, o);
+        assert_eq!(files.len(), 1);
+        assert_eq!(total, 2);
+        let mut o = opts(r"def \w+");
+        o.regex = true;
+        assert_eq!(run(&root, o).1, 1);
+        let mut bad = opts("(");
+        bad.regex = true;
+        assert!(search(root.clone(), bad, 1, Arc::new(AtomicU64::new(1)), |_| {}).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_newer_search_cancels_the_old_one() {
+        let root = project("cancel");
+        let events = Arc::new(Mutex::new(0));
+        let sink = events.clone();
+        search(root.clone(), opts("Post"), 1, Arc::new(AtomicU64::new(2)), move |_| *sink.lock().unwrap() += 1).unwrap().join().unwrap();
+        assert_eq!(*events.lock().unwrap(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// One matching line. With a replacement, the full line is kept (so edits can be verified against it) and each
@@ -231,7 +333,7 @@ pub async fn replace_in_file(path: String, edits: Vec<ReplaceEdit>) -> Result<us
 }
 
 #[cfg(test)]
-mod tests {
+mod replace_tests {
     use super::*;
 
     fn matcher(q: &str, regex: bool, word: bool) -> RegexMatcher {

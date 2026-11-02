@@ -55,4 +55,19 @@ mod tests {
         read_messages(io::Cursor::new(buf), |m| got.push(m));
         assert_eq!(got, vec![r#"{"id":1}"#, r#"{"jsonrpc":"2.0","method":"é"}"#]);
     }
+
+    #[test]
+    fn tolerates_extra_headers_and_stops_on_truncated_body() {
+        let input = "Content-Type: application/vscode-jsonrpc\r\nContent-Length: 2\r\n\r\n{}X-Junk: 1\r\n\r\nContent-Length:3\r\n\r\n[1]Content-Length: 10\r\n\r\n{\"a\"";
+        let mut got = Vec::new();
+        read_messages(io::Cursor::new(input), |m| got.push(m));
+        assert_eq!(got, vec!["{}", "[1]"]);
+    }
+
+    #[test]
+    fn length_counts_bytes_not_chars() {
+        let mut buf = Vec::new();
+        write_message(&mut buf, "\"é\"").unwrap();
+        assert!(buf.starts_with(b"Content-Length: 4\r\n\r\n"));
+    }
 }

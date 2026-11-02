@@ -83,8 +83,13 @@ pub fn initial_path() -> Option<String> {
     std::env::args().skip(1).find(|a| !a.starts_with('-'))
 }
 
+/// Config files are flat names inside Garnet's own config dir; anything that could escape it is refused.
+fn valid_config_name(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with('.') && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+}
+
 fn config_file(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') {
+    if !valid_config_name(name) {
         return Err("invalid config name".into());
     }
     let dir = app.path().app_config_dir().map_err(e2s)?;
@@ -133,4 +138,39 @@ pub fn smoke_finish(app: AppHandle, report: String) -> Result<(), String> {
     std::fs::write(path, report).map_err(e2s)?;
     app.exit(0);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_names_cannot_escape_the_config_dir() {
+        for ok in ["settings.json", "run-configs.json", "trusted.json"] {
+            assert!(valid_config_name(ok), "{ok}");
+        }
+        for bad in ["", "..", "../x.json", "a/b.json", "/etc/passwd", ".hidden", "a b.json", "x\\y"] {
+            assert!(!valid_config_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn detects_rails_rspec_minitest_and_bundled_gems() {
+        let dir = std::env::temp_dir().join(format!("garnet-detect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::create_dir_all(dir.join("test")).unwrap();
+        std::fs::write(dir.join("config/application.rb"), "").unwrap();
+        std::fs::write(dir.join("bin/rails"), "").unwrap();
+        std::fs::write(dir.join("Gemfile.lock"), "GEM\n  specs:\n    debug (1.9.2)\n    debugger-x (1.0)\n    rspec-core (3.13.0)\n").unwrap();
+        let p = detect(&dir);
+        assert!(p.rails && p.rspec && p.minitest && p.debug_bundled);
+        assert!(!p.git && !p.bin_rspec);
+        std::fs::remove_file(dir.join("bin/rails")).unwrap();
+        std::fs::write(dir.join("Gemfile.lock"), "GEM\n  specs:\n    debugger-x (1.0)\n").unwrap();
+        let p = detect(&dir);
+        assert!(!p.rails && !p.rspec && !p.debug_bundled);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

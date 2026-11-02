@@ -556,8 +556,12 @@ pub async fn git_blame_line(root: String, path: String, line: u32) -> Result<Bla
 mod tests {
     use super::*;
 
+    /// GIT and TRUSTED are process-wide; tests that touch them take this lock.
+    static GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn git_path_must_be_absolute_executable() {
+        let _g = GLOBALS.lock().unwrap();
         assert!(git_set_path("git".into()).is_ok());
         assert!(git_set_path("./git".into()).is_err());
         assert!(git_set_path("bin/git".into()).is_err());
@@ -607,6 +611,93 @@ mod tests {
         assert!(check_rev("--output=/tmp/x").is_err());
         assert!(check_rev("stash@{0}").is_ok());
         assert!(check_rev(":2").is_ok());
+    }
+
+    #[test]
+    fn git_is_gated_on_trust_and_ignores_repo_fsmonitor() {
+        let _g = GLOBALS.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("garnet-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_str().unwrap();
+        let sh = |c: &str| assert!(Command::new("/bin/sh").args(["-c", c]).current_dir(&dir).status().unwrap().success());
+        sh("git init -q && git config user.email t@example.com && git config user.name t && echo a > a.rb && git add a.rb && git commit -qm init");
+        let pwned = dir.join("pwned");
+        std::fs::write(dir.join("hook.sh"), format!("#!/bin/sh\ntouch {}\n", pwned.display())).unwrap();
+        sh("chmod +x hook.sh && git config core.fsmonitor \"$PWD/hook.sh\" && echo b >> a.rb");
+
+        TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(git(root, &["status"]).unwrap_err(), "Trust project to enable Git");
+        TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let status = git(root, &["status", "--porcelain=v1", "-z"]).unwrap();
+        let entries = parse_status(&status);
+        assert!(entries.iter().any(|e| e.path == "a.rb" && e.worktree == 'M'));
+        assert!(!pwned.exists(), "core.fsmonitor from .git/config must not run");
+        assert!(git(root, &["show", "no-such-revision"]).unwrap_err().contains("no-such-revision"));
+        TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn block<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(f)
+    }
+
+    #[test]
+    fn real_repo_log_details_stage_stash_and_conflict() {
+        let _g = GLOBALS.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("garnet-git-ops-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_str().unwrap().to_string();
+        let sh = |c: &str| assert!(Command::new("/bin/sh").args(["-c", c]).current_dir(&dir).status().unwrap().success(), "{c}");
+        sh("git init -q -b main && git config user.email t@example.com && git config user.name t \
+            && printf 'a\\nb\\nc\\n' > f.rb && git add f.rb && git commit -qm init \
+            && git checkout -qb feature && printf 'a\\nTHEIRS\\nc\\n' > f.rb && git commit -qam theirs \
+            && git checkout -q main && printf 'a\\nOURS\\nc\\n' > f.rb && git commit -qam ours");
+        TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let log = block(git_log(root.clone(), LogOpts { limit: 10, ..Default::default() })).unwrap();
+        assert_eq!(log.len(), 3);
+        assert_eq!(log.iter().filter(|c| c.subject == "init").count(), 1);
+        let d = block(git_commit_details(root.clone(), "HEAD".into())).unwrap();
+        assert_eq!((d.files.len(), d.files[0].path.as_str(), d.files[0].added, d.files[0].deleted), (1, "f.rb", Some(1), Some(1)));
+        let first = block(git_commit_details(root.clone(), log.last().unwrap().hash.clone())).unwrap();
+        assert_eq!(first.files[0].status, "A");
+        let hist = block(git_log(root.clone(), LogOpts { limit: 10, path: format!("{root}/f.rb"), branch: "main".into(), ..Default::default() })).unwrap();
+        assert_eq!(hist.len(), 2);
+        assert!(block(git_log(root.clone(), LogOpts { limit: 10, branch: "--output=x".into(), ..Default::default() })).is_err());
+
+        // Hunk staging writes the index only.
+        block(git_stage_content(root.clone(), format!("{root}/f.rb"), "a\nSTAGED\nc\n".into())).unwrap();
+        assert_eq!(block(git_file_at(root.clone(), String::new(), "f.rb".into())).unwrap().as_deref(), Some("a\nSTAGED\nc\n"));
+        assert_eq!(std::fs::read_to_string(dir.join("f.rb")).unwrap(), "a\nOURS\nc\n");
+        sh("git reset -q");
+
+        // Stash with an untracked file lists it in the stash's details.
+        sh("echo x >> f.rb && echo new > u.rb && git stash push -q --include-untracked -m wip");
+        let st = block(git_commit_details(root.clone(), "stash@{0}".into())).unwrap();
+        assert!(st.files.iter().any(|f| f.path == "f.rb" && f.status == "M"));
+        assert!(st.files.iter().any(|f| f.path == "u.rb" && f.status == "?"));
+        sh("git stash drop -q");
+
+        // A real merge conflict: op state, the three stages and a diff3 merge for the resolver.
+        assert!(git(&root, &["merge", "feature"]).is_err());
+        let op = block(git_op_state(root.clone())).unwrap();
+        assert_eq!((op.op, op.conflicts.clone()), ("merge", vec!["f.rb".to_string()]));
+        let m = block(git_merge_input(root.clone(), format!("{root}/f.rb"))).unwrap();
+        assert_eq!((m.base.as_deref(), m.ours.as_deref(), m.theirs.as_deref()), (Some("a\nb\nc\n"), Some("a\nOURS\nc\n"), Some("a\nTHEIRS\nc\n")));
+        assert!(m.merged.contains("<<<<<<< Yours\nOURS\n||||||| Base\nb\n=======\nTHEIRS\n>>>>>>> Theirs\n"), "{}", m.merged);
+        std::fs::write(dir.join("f.rb"), "a\nOURS\nTHEIRS\nc\n").unwrap();
+        git(&root, &["add", "--", "f.rb"]).unwrap();
+        assert!(block(git_op_state(root.clone())).unwrap().conflicts.is_empty());
+        git(&root, &["commit", "--no-edit"]).unwrap();
+        assert_eq!(block(git_op_state(root.clone())).unwrap().op, "");
+        let merged = block(git_log(root.clone(), LogOpts { limit: 10, ..Default::default() })).unwrap();
+        assert_eq!(merged[0].parents.len(), 2);
+        assert_eq!(merged[0].edges.iter().filter(|e| e.kind == 2).count(), 2);
+
+        TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

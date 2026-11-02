@@ -26,7 +26,7 @@ onSettingsChange(() => {
   }
 });
 
-const FILE_LINE = /((?:\.{0,2}\/)?[\w@.\-/]+\.(?:rb|erb|rake|ru|ya?ml|haml|slim|jbuilder|js|ts|css|scss|json)):(\d+)(?::(\d+))?/g;
+export const FILE_LINE = /((?:\.{0,2}\/)?[\w@.\-/]+\.(?:rb|erb|rake|ru|ya?ml|haml|slim|jbuilder|js|ts|css|scss|json)):(\d+)(?::(\d+))?/g;
 
 export interface PtyOptions {
   command?: string;

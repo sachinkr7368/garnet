@@ -76,3 +76,25 @@ pub fn tokio_command(cwd: &Path, program: &str) -> tokio::process::Command {
     cmd.current_dir(cwd).env_clear().envs(shell_env(cwd)).kill_on_drop(true);
     cmd
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn captures_the_login_shell_environment_and_resolves_programs() {
+        let dir = std::env::temp_dir().join(format!("garnet-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let env = capture(&dir).expect("login shell environment");
+        assert!(env.get("PATH").is_some_and(|p| p.contains("/usr/bin")));
+        assert!(env.contains_key("HOME"));
+        assert!(env.keys().all(|k| !k.is_empty() && !k.contains('\n')));
+        let cached = shell_env(&dir);
+        assert_eq!(cached.get("LANG").map(String::is_empty), Some(false));
+        assert_eq!(which(&dir, "sh").as_deref(), Some(std::path::Path::new("/bin/sh")));
+        assert!(which(&dir, "definitely-not-a-program-xyz").is_none());
+        let out = command(&dir, "/bin/sh").args(["-c", "pwd -P"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), std::fs::canonicalize(&dir).unwrap().to_string_lossy());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

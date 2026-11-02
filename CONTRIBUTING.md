@@ -21,9 +21,31 @@ judged on two things: does it fully work, and does it keep the app fast.
 ```sh
 pnpm install
 pnpm tauri dev
-pnpm typecheck
-cd src-tauri && cargo clippy --all-targets && cargo test
 ```
+
+## Tests
+
+Every feature ships with tests. A pull request that adds or changes behaviour
+adds or updates the tests that cover it; CI runs all of them on every PR and on
+`main`, and a release only builds after they pass.
+
+```sh
+pnpm typecheck                     # TypeScript
+pnpm test                          # vitest, frontend logic (jsdom)
+pnpm test:watch                    # vitest in watch mode
+cd src-tauri
+cargo clippy --all-targets -- -D warnings
+cargo test                         # Rust: search, index, git, shell env, config
+```
+
+- Frontend tests live in `src/test/*.test.ts`. `src/test/setup.ts` loads
+  `index.html` into jsdom and replaces the Tauri backend with an in-memory fake
+  (`src/test/fakeIpc.ts`: files, config dir, trust flag). Modules that touch
+  Monaco at import time load with `vi.mock("../editor", () => import("./fakeEditor"))`.
+- Test pure logic directly; export a helper rather than reaching into a module.
+- Rust tests sit next to the code (`#[cfg(test)] mod tests`). Use a temp dir per
+  test (they run in parallel) and a real git repo where git behaviour matters.
+- UI-level behaviour that needs the real app goes into `src/smoke.ts`.
 
 Stop `pnpm tauri dev` when you are done; it keeps Vite and the app running.
 

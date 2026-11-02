@@ -181,38 +181,66 @@ const RUN_ALLOWED: &[(&str, &[&str])] = &[
     ("worktree", &["-b", "--porcelain", "--force"]),
 ];
 
+const NETWORK: &[&str] = &["fetch", "pull", "push"];
+
 /// git_run is reachable from the webview, so it runs only the subcommands and exact options the UI uses: no global
-/// options (`-c`, `--config-env`), no abbreviations (`--e` for `--exec`), nothing that executes code.
-fn check_run_args(args: &[String]) -> Result<(), String> {
+/// options (`-c`, `--config-env`), no abbreviations (`--e` for `--exec`), nothing that executes code. Every argument is
+/// checked, including those after `--` (stash forwards its argv). Network subcommands only talk to a configured
+/// remote (`remotes`), never a URL or path given as a positional.
+fn check_run_args(args: &[String], remotes: &[String]) -> Result<(), String> {
     let sub = args.first().map(String::as_str).unwrap_or("");
     let Some((_, opts)) = RUN_ALLOWED.iter().find(|(name, _)| *name == sub) else {
         return Err(format!("git {sub} is not allowed here"));
     };
-    if sub == "remote" && !matches!(args.get(1).map(String::as_str), Some("get-url")) {
+    let second = args.get(1).map(String::as_str);
+    if sub == "remote" && second != Some("get-url") {
         return Err("only git remote get-url is allowed here".into());
     }
-    for a in args[1..].iter().take_while(|a| *a != "--") {
+    if sub == "stash" && !matches!(second, Some("push" | "list" | "pop" | "apply" | "drop")) {
+        return Err("only git stash push/list/pop/apply/drop are allowed here".into());
+    }
+    let mut after_dashes = false;
+    let mut positionals = 0;
+    for a in &args[1..] {
         if a.contains('\0') {
             return Err("invalid argument".into());
         }
-        if !a.starts_with('-') {
+        if a == "--" && !after_dashes {
+            after_dashes = true;
             continue;
         }
-        let name = if a.starts_with("--") { a.split('=').next().unwrap_or_default() } else { a.as_str() };
-        if !opts.contains(&name) {
-            return Err(format!("git {sub} option {name} is not allowed here"));
+        if a.starts_with('-') {
+            let name = if a.starts_with("--") { a.split('=').next().unwrap_or_default() } else { a.as_str() };
+            if after_dashes || !opts.contains(&name) {
+                return Err(format!("git {sub} argument {a} is not allowed here"));
+            }
+            continue;
+        }
+        if NETWORK.contains(&sub) {
+            let ok = if positionals == 0 { remotes.iter().any(|r| r == a) } else { !a.contains(':') && !a.starts_with('/') && !a.starts_with('.') };
+            if !ok {
+                return Err(format!("git {sub}: {a} is not a configured remote or a plain ref"));
+            }
+            positionals += 1;
         }
     }
     Ok(())
 }
 
-/// Runs a git subcommand from the allow list in the project (branch/worktree/stash/push/pull UI).
+/// Runs a git subcommand from the allow list in the project (branch/worktree/stash/push/pull UI). The repo's own hooks
+/// (pre-commit, pre-push) still run, as in RubyMine; the project is already gated by trust, so hooksPath is left alone.
 #[tauri::command]
 pub async fn git_run(root: String, args: Vec<String>) -> Result<String, String> {
-    check_run_args(&args)?;
     off(move || {
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        git(&root, &args)
+        let remotes: Vec<String> = if args.first().is_some_and(|s| NETWORK.contains(&s.as_str())) {
+            git(&root, &["remote"])?.lines().map(String::from).collect()
+        } else {
+            Vec::new()
+        };
+        check_run_args(&args, &remotes)?;
+        let mut full = vec!["-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=user", "--literal-pathspecs"];
+        full.extend(args.iter().map(String::as_str));
+        git(&root, &full)
     })
     .await
 }
@@ -972,7 +1000,7 @@ mod tests {
     fn git_run_allows_ui_subcommands_and_rejects_code_execution() {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         for ok in [
-            &["status"][..], &["status", "--porcelain", "--untracked-files=no"], &["stash", "push", "--include-untracked", "-m", "x", "--", "-x", "--exec=y"],
+            &["status"][..], &["status", "--porcelain", "--untracked-files=no"], &["stash", "push", "--include-untracked", "-m", "x", "--", "app/a.rb", "b.rb"],
             &["stash", "push", "-m", "garnet: before checkout x"], &["stash", "list", "--format=%gd%x1f%s"], &["stash", "pop"], &["stash", "apply", "stash@{0}"], &["stash", "drop", "stash@{1}"],
             &["remote", "get-url", "origin"], &["rebase", "--continue"], &["rebase", "--abort"], &["merge", "--abort"], &["merge", "feature"], &["merge", "--ff-only", "FETCH_HEAD"],
             &["log", "-1", "--format=%B"], &["branch", "-D", "x"], &["branch", "-d", "x"], &["branch", "-m", "a", "b"], &["branch", "--list", "x"], &["branch", "x", "abc"],
@@ -983,7 +1011,7 @@ mod tests {
             &["worktree", "add", "-b", "x", "/p", "origin/x"], &["worktree", "remove", "--force", "/p"], &["merge-base", "main", "HEAD"], &["cherry-pick", "-m", "1", "abc"],
             &["revert", "--no-edit", "abc"], &["cherry-pick", "--continue"], &["commit", "--no-edit"], &["reset", "--hard", "abc"], &["rm", "-q", "--", "a.rb"], &["add", "--", "a.rb"], &["tag", "v1", "abc"],
         ] {
-            assert!(check_run_args(&s(ok)).is_ok(), "{ok:?}");
+            assert!(check_run_args(&s(ok), &s(&["origin"])).is_ok(), "{ok:?}");
         }
         for bad in [
             &["-c", "core.pager=sh", "log"][..], &["-ccore.sshCommand=x", "fetch"], &["--config-env=core.sshCommand=X", "fetch"], &["fetch", "-c", "x"], &["fetch", "-ccore.x=y"],
@@ -991,14 +1019,25 @@ mod tests {
             &["pull", "--upload-pack", "x"], &["push", "--receive-pack=x"], &["push", "--exec", "x"], &["push", "--e=x", "."], &["push", "--ex=x"], &["rebase", "-x", "make"],
             &["rebase", "-ix", "make"], &["rebase", "--exec=make"], &["log", "--output=/tmp/x"], &["log", "--ext-diff"], &["remote", "add", "x", "ext::sh"], &["remote"], &["commit", "-C", "HEAD"],
             &["status", "--git-dir=/x"], &["show", "HEAD"], &["stash", "push", "-m", "x", "--pathspec-from-file=/etc/passwd"],
+            &["stash", "list", "--", "--output=x"], &["stash", "push", "--", "-x"], &["stash", "show", "-p"], &["stash", "--output=x"], &["stash"],
+            &["push", "ext::sh -c touch /tmp/x"], &["fetch", "../other"], &["pull", "file:///tmp/r"], &["push", "origin", "a::b"], &["push", "origin", "src:dst"],
+            &["fetch", "upstream", "main"], &["fetch", "origin", "/tmp/x"], &["fetch", "origin", "--", "--upload-pack=x"],
         ] {
-            assert!(check_run_args(&s(bad)).is_err(), "{bad:?}");
+            assert!(check_run_args(&s(bad), &s(&["origin"])).is_err(), "{bad:?}");
         }
         let _g = GLOBALS.lock().unwrap();
         let (dir, root, _sh) = repo("run");
         TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(block(git_run(root.clone(), s(&["fetch", "--upload-pack=touch pwned", "."]))).is_err());
+        let other = dir.with_extension("other");
+        let _ = std::fs::remove_dir_all(&other);
+        assert!(Command::new("git").args(["init", "-q", "--bare", other.to_str().unwrap()]).status().unwrap().success());
+        assert!(block(git_run(root.clone(), s(&["fetch", other.to_str().unwrap()]))).is_err(), "a path is not a remote");
+        _sh(&format!("git remote add origin {}", other.display()));
+        assert!(block(git_run(root.clone(), s(&["fetch", "--all", "--prune"]))).is_ok());
+        assert!(block(git_run(root.clone(), s(&["fetch", "origin"]))).is_ok(), "configured remotes work");
         assert!(!dir.join("pwned").exists());
+        std::fs::remove_dir_all(&other).unwrap();
         TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
         std::fs::remove_dir_all(&dir).unwrap();
     }

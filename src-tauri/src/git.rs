@@ -6,13 +6,26 @@ use std::process::Command;
 static GIT: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
 
 #[tauri::command]
-pub fn git_set_path(path: String) {
+pub fn git_set_path(path: String) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = path.trim().to_string();
+    let path = if path == "git" { String::new() } else { path };
+    if !path.is_empty() {
+        let p = std::path::Path::new(&path);
+        let executable = p.is_absolute() && std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false);
+        if !executable {
+            *GIT.write().unwrap() = String::new();
+            return Err(format!("git.path must be an absolute path to an executable: {path}"));
+        }
+    }
     *GIT.write().unwrap() = path;
+    Ok(())
 }
 
 fn git(root: &str, args: &[&str]) -> Result<String, String> {
     let bin = GIT.read().unwrap().clone();
     let out = Command::new(if bin.is_empty() { "git" } else { bin.as_str() })
+        .args(["-c", "core.fsmonitor=false"])
         .args(args)
         .current_dir(root)
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -178,6 +191,16 @@ pub async fn git_blame_line(root: String, path: String, line: u32) -> Result<Bla
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_path_must_be_absolute_executable() {
+        assert!(git_set_path("git".into()).is_ok());
+        assert!(git_set_path("./git".into()).is_err());
+        assert!(git_set_path("bin/git".into()).is_err());
+        assert!(git_set_path("/etc/hosts".into()).is_err());
+        assert!(git_set_path("/bin/sh".into()).is_ok());
+        assert!(git_set_path(String::new()).is_ok());
+    }
 
     #[test]
     fn parses_hunks() {

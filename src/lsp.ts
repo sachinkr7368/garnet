@@ -1,7 +1,7 @@
 import { allTabs, editor, ensureModel, events, handlePathMoved, monaco, openFile, uriFor, activeTab } from "./editor";
 import { api, Channel, invoke, type RpcEvent } from "./ipc";
 import { runInPanel } from "./run";
-import { setting } from "./settings";
+import { askTrust, setting } from "./settings";
 import { showLocations, type Loc } from "./search";
 import { debounce, rel, root, state } from "./state";
 import { bottom, h, icon, quickPick, statusSlot, toast, type PickItem } from "./ui";
@@ -142,7 +142,7 @@ function onEvent(ev: RpcEvent) {
 /// Lifecycle
 
 export async function startLsp() {
-  if (!state.project) return;
+  if (!state.project || !(await askTrust())) return;
   await stopLsp();
   stopping = false;
   setStatus("Ruby LSP: starting", "busy");

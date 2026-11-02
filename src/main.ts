@@ -16,7 +16,7 @@ import { importJetBrainsKeymap, showKeymapReference } from "./keymapref";
 import { editConfigurations, launch, loadRunConfigs, newConfig, pickConfiguration, rakeTask, rerun, runs, runTests, selected } from "./run";
 import { findInFiles, searchView } from "./search";
 import { loadCodeStyle } from "./codestyle";
-import { addRecentProject, loadSession, loadSettings, recentProjects, saveSession, setting, settingsPath } from "./settings";
+import { addRecentProject, askTrust, checkTrust, isTrusted, loadSession, trustProject, loadSettings, recentProjects, saveSession, setting, settingsPath } from "./settings";
 import { openSettingsWindow } from "./settingsui";
 import { createGist, createPullRequest, githubSignIn, initToolbar, openOnGitHub, pullCurrent, pushCurrent, refreshToolbar, showBranches, showProjects, showWorktrees } from "./toolbar";
 import { abs, debounce, rel, state } from "./state";
@@ -270,6 +270,7 @@ commands(
   { id: "githubOpen", title: "GitHub: Open File on GitHub", run: needProject(openOnGitHub) },
   { id: "githubGist", title: "GitHub: Create Gist from Selection…", run: needProject(createGist) },
   { id: "restartLsp", title: "Ruby LSP: Restart", run: needProject(startLsp) },
+  { id: "trustProject", title: "File: Trust Project…", run: needProject(askTrust) },
   { id: "lspLog", title: "Ruby LSP: Show Log", run: () => bottom.show("log") },
 );
 
@@ -324,7 +325,9 @@ async function openProject(path: string) {
     return renderWelcome();
   }
   state.project = info;
-  await Promise.all([loadSettings(info.root), loadCodeStyle(info.root)]);
+  const smoke = await invoke<[string, boolean] | null>("smoke_target");
+  if (smoke && !(await checkTrust(info.root))) await trustProject(info.root, true);
+  await Promise.all([loadSettings(info.root), loadCodeStyle(info.root), checkTrust(info.root)]);
   document.body.classList.add("has-project");
   getCurrentWindow().setTitle(`${info.name} — Garnet`).catch(() => {});
   addRecentProject(info.root);
@@ -334,9 +337,11 @@ async function openProject(path: string) {
   renderWelcome();
   refreshGit();
   refreshToolbar();
-  loadRunConfigs();
-  if (setting("ruby.lspEnabled")) startLsp();
-  if (session?.bottom && setting("appearance.restoreBottomPanel")) bottom.show(session.bottom);
+  if (isTrusted()) {
+    loadRunConfigs();
+    if (setting("ruby.lspEnabled")) startLsp();
+  } else if (!(await askTrust())) loadRunConfigs();
+  if (isTrusted() && session?.bottom && setting("appearance.restoreBottomPanel")) bottom.show(session.bottom);
   for (const p of session?.tabs ?? []) await openFile(p).catch(() => {});
   if (session?.active) await openFile(session.active).catch(() => {});
   events.tabsChanged.on(persistSession);
@@ -361,6 +366,10 @@ listen<{ count: number; ms: number }>("index-ready", (e) => {
   indexSlot.title = `Indexed in ${e.payload.ms} ms`;
 });
 listen<string>("menu", (e) => runCommand(e.payload));
+window.addEventListener("garnet:trusted", () => {
+  loadRunConfigs();
+  if (setting("ruby.lspEnabled")) startLsp();
+});
 
 /// Boot
 

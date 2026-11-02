@@ -196,7 +196,7 @@ export async function blameCurrentLine() {
 export const onGitChanged = debounce(() => refreshGit(), 400);
 let fetchTimer = 0;
 onSettingsChange(() => {
-  invoke("git_set_path", { path: setting<string>("git.path") });
+  invoke("git_set_path", { path: setting<string>("git.path") }).catch((e) => toast(String(e), "error"));
   clearInterval(fetchTimer);
   const minutes = setting<number>("git.autoFetchMinutes");
   if (minutes > 0)

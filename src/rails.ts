@@ -1,3 +1,4 @@
+import { askTrust } from "./settings";
 import { activeTab, monaco, openFile } from "./editor";
 import { api } from "./ipc";
 import { abs, rel, root, state } from "./state";
@@ -131,6 +132,7 @@ export function parseExpandedRoutes(out: string): Route[] {
 
 export async function loadRoutes() {
   if (!state.project?.rails) return table.replaceChildren(h("div", { class: "empty" }, "Not a Rails project."));
+  if (!(await askTrust())) return;
   routesSummary.textContent = "Running bin/rails routes…";
   try {
     routes = parseExpandedRoutes(await api.runCapture(root(), "bin/rails routes --expanded", 180));

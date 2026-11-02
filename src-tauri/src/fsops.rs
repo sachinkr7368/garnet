@@ -97,3 +97,8 @@ pub async fn reveal_in_finder(path: String) -> Result<(), String> {
         .map(|_| ())
         .map_err(e2s)
 }
+
+#[tauri::command]
+pub fn canonical_path(path: String) -> Result<String, String> {
+    std::fs::canonicalize(&path).map(|p| p.to_string_lossy().into_owned()).map_err(e2s)
+}

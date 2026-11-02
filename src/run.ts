@@ -1,7 +1,7 @@
 import { debugSession, sessionFor, stopSession } from "./debug";
 import { activeTab, editor, events, monaco, saveAll } from "./editor";
 import { api } from "./ipc";
-import { setting } from "./settings";
+import { askTrust, isTrusted, setting } from "./settings";
 import { abs, rel, root, shellQuote, state } from "./state";
 import { PtyTabs, PtyView } from "./terminal";
 import { bottom, h, icon, iconButton, quickPick, toast } from "./ui";
@@ -65,15 +65,61 @@ function defaults(): RunConfig[] {
   return list;
 }
 
+const BLOCKED_ENV = /^(PATH|RUBYOPT|BASH_ENV|ENV|DYLD_\w*|LD_\w*)$/;
+
+/// Drops variables that would let a config hijack the interpreter or shell (PATH, RUBYOPT, BASH_ENV, DYLD_*, ...).
+export function safeEnv(env: Record<string, string>, source: string): Record<string, string> {
+  const blocked = Object.keys(env).filter((k) => BLOCKED_ENV.test(k));
+  if (blocked.length) toast(`${source}: ignored ${blocked.join(", ")}; set these in your shell instead.`, "error");
+  return Object.fromEntries(Object.entries(env).filter(([k]) => !BLOCKED_ENV.test(k)));
+}
+
+/// Accepts a run.json entry only when every field has the expected type.
+export function validateConfig(raw: unknown): RunConfig | null {
+  if (!raw || typeof raw !== "object") return null;
+  const c = raw as Record<string, unknown>;
+  const str = (v: unknown) => v === undefined || typeof v === "string";
+  if (typeof c.name !== "string" || !c.name.trim() || typeof c.type !== "string" || !(c.type in TYPE_LABELS)) return null;
+  if (!str(c.args) || !str(c.cwd) || !str(c.envFile)) return null;
+  if (c.rubyManager !== undefined && !(typeof c.rubyManager === "string" && c.rubyManager in MANAGER_PREFIX)) return null;
+  if (c.bundler !== undefined && typeof c.bundler !== "boolean") return null;
+  if (c.env !== undefined && (!c.env || typeof c.env !== "object" || Array.isArray(c.env) || Object.values(c.env).some((v) => typeof v !== "string"))) return null;
+  const base = newConfig(c.type as RunType, c.name);
+  return {
+    ...base,
+    args: (c.args as string) ?? "",
+    cwd: (c.cwd as string) ?? "",
+    envFile: (c.envFile as string) ?? "",
+    env: safeEnv((c.env as Record<string, string>) ?? {}, `run.json "${c.name}"`),
+    rubyManager: (c.rubyManager as RubyManager) ?? base.rubyManager,
+    bundler: (c.bundler as boolean) ?? base.bundler,
+  };
+}
+
 export async function loadRunConfigs() {
   gemfileLock = await api.readFile(`${root()}/Gemfile.lock`).catch(() => "");
-  try {
-    const parsed = JSON.parse(await api.readFile(CONFIG_FILE()));
-    configs = (parsed.configurations ?? []).map((c: Partial<RunConfig>) => ({ ...newConfig(c.type ?? "custom", c.name ?? "Unnamed"), ...c }));
-    selectedName = parsed.selected ?? "";
-  } catch {
-    configs = defaults();
-    if (configs.length) await saveRunConfigs();
+  // ponytail: an untrusted project gets in-memory defaults; its run.json is neither read nor written
+  if (!isTrusted()) configs = defaults();
+  else {
+    let raw: string | null = null;
+    try {
+      raw = await api.readFile(CONFIG_FILE());
+    } catch {
+      configs = defaults();
+      if (configs.length) await saveRunConfigs();
+    }
+    if (raw !== null) {
+      try {
+        const parsed = JSON.parse(raw);
+        const list: unknown[] = Array.isArray(parsed?.configurations) ? parsed.configurations : [];
+        configs = list.map(validateConfig).filter((c): c is RunConfig => !!c);
+        if (configs.length < list.length) toast(`.garnet/run.json: skipped ${list.length - configs.length} invalid configuration(s).`, "error");
+        selectedName = typeof parsed?.selected === "string" ? parsed.selected : "";
+      } catch (e) {
+        configs = defaults();
+        toast(`.garnet/run.json is not valid JSON (${e}); using defaults.`, "error");
+      }
+    }
   }
   if (!configs.some((c) => c.name === selectedName)) selectedName = configs[0]?.name ?? "";
   api
@@ -85,6 +131,7 @@ export async function loadRunConfigs() {
 
 export async function saveRunConfigs(list = configs) {
   configs = list;
+  if (!isTrusted()) return renderWidget();
   await api.createPath(`${root()}/.garnet`, true).catch(() => {});
   await api.writeFile(CONFIG_FILE(), JSON.stringify({ selected: selectedName, configurations: configs }, null, 2) + "\n");
   renderWidget();
@@ -140,13 +187,13 @@ async function resolveEnv(cfg: RunConfig): Promise<Record<string, string>> {
   let fileEnv = {};
   if (cfg.envFile.trim()) {
     try {
-      fileEnv = parseDotenv(await api.readFile(abs(cfg.envFile.trim())));
+      fileEnv = safeEnv(parseDotenv(await api.readFile(abs(cfg.envFile.trim()))), cfg.envFile.trim());
     } catch (e) {
       toast(`Cannot read env file ${cfg.envFile}: ${e}`, "error");
     }
   }
   const rails = cfg.type.startsWith("rails") || (cfg.type === "rake" && state.project?.rails);
-  return { ...(rails ? { RAILS_ENV: setting<string>("rails.environment") } : {}), ...fileEnv, ...cfg.env };
+  return { ...(rails ? { RAILS_ENV: setting<string>("rails.environment") } : {}), ...fileEnv, ...safeEnv(cfg.env, cfg.name) };
 }
 
 /// Run tool window: one console tab per launched configuration
@@ -202,7 +249,7 @@ export function runInPanel(title: string, command: string, opts: RunOptions = {}
 }
 
 export async function launch(cfg: RunConfig, mode: "run" | "debug", opts: { globalRdbg?: boolean } = {}) {
-  if (!state.project) return;
+  if (!state.project || !(await askTrust())) return;
   if (mode === "debug" && cfg.bundler && !debugBundled() && !opts.globalRdbg && !setting("debug.rdbgPath")) {
     toast(
       `The debug gem is not in this bundle. Add  gem "debug", group: [:development, :test]  to the Gemfile and run bundle install, or try the globally installed rdbg.`,
@@ -338,6 +385,7 @@ function renderWidget() {
 /// Pickers
 
 export async function rakeTask() {
+  if (!(await askTrust())) return;
   const p = state.project!;
   toast("Loading tasks…");
   let out: string;

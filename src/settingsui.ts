@@ -3,7 +3,7 @@ import { allCommands, captureNextKey, formatKey, keymap, keysFor, runCommand } f
 import { openFile } from "./editor";
 import { api } from "./ipc";
 import { managersDetected } from "./run";
-import { onSettingsChange, projectSettingsPath, SCHEMA, scopeValue, setting, settingsPath, updateSetting, type SettingDef } from "./settings";
+import { globalOnly, onSettingsChange, projectSettingsPath, SCHEMA, scopeValue, setting, settingsPath, updateSetting, type SettingDef } from "./settings";
 import { root, state } from "./state";
 import { fuzzyScore, h, icon, iconButton, toast } from "./ui";
 
@@ -147,6 +147,13 @@ function pageIntro(page: string): HTMLElement[] {
 }
 
 function row(d: SettingDef, scope: Scope): HTMLElement {
+  if (scope === "project" && globalOnly(d.key))
+    return h(
+      "div",
+      { class: "st-row", title: d.key },
+      h("div", { class: "st-label" }, h("span", {}, d.label)),
+      h("small", { class: "dim st-desc" }, "Global only: this setting controls which programs run, so a project cannot override it."),
+    );
   const own = scopeValue(scope, d.key);
   const value = own !== undefined ? own : setting(d.key);
   const commit = (v: unknown) => updateSetting(d.key, v, scope).catch((e) => toast(String(e), "error"));

@@ -60,6 +60,7 @@ pub fn which(cwd: &Path, program: &str) -> Option<PathBuf> {
     let env = shell_env(cwd);
     let path = env.get("PATH")?;
     std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(program))
         .find(|p| p.is_file())
 }

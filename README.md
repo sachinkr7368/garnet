@@ -17,6 +17,20 @@ trigger: GitHub actions (sign-in, pull requests, gists, clone, fetch/pull/push)
 and commands you run yourself (for example `gem install ruby-lsp`). Your GitHub
 token is stored in the macOS Keychain, never in a settings file.
 
+## Project trust
+
+Opening a folder never runs code from it until you trust it. The first time
+you open a folder, Garnet asks whether to trust it; your answer is kept in
+Garnet's own config, keyed by canonical path, never in the repository. In safe
+mode you can browse and edit files, but ruby-lsp (which loads the Gemfile),
+repository run configurations, `.env` files, Rake/routes listing and restored
+terminals stay off; use File: Trust Project to enable them later. Settings that
+choose which programs run (`ruby.lspCommand`, `git.path`, `terminal.shell`,
+`terminal.env`, `debug.rdbgPath`, `testing.*`, `rails.*`, Ruby version
+manager and bundler) are global-only and are ignored in `.garnet/settings.json`.
+Run configurations cannot override `PATH`, `RUBYOPT`, `BASH_ENV`, `ENV`,
+`DYLD_*` or `LD_*`.
+
 ## Status
 
 Speed budgets, measured on an Apple Silicon Mac with a 5,085-file Rails app

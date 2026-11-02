@@ -52,6 +52,7 @@ export const api = {
     invoke<string>("run_capture", { root, command, timeoutSecs }),
   initialPath: () => invoke<string | null>("initial_path"),
   configPath: (name: string) => invoke<string>("config_path", { name }),
+  canonicalPath: (path: string) => invoke<string>("canonical_path", { path }),
   configRead: (name: string) => invoke<string | null>("config_read", { name }),
   configWrite: (name: string, content: string) => invoke<void>("config_write", { name, content }),
   gitStatus: (root: string) => invoke<GitStatusEntry[]>("git_status", { root }),

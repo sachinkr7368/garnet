@@ -1,3 +1,4 @@
+import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "./ipc";
 import { toast } from "./ui";
 
@@ -95,6 +96,11 @@ export const SCHEMA: SettingDef[] = [
 
 const DEFAULTS: Record<string, unknown> = Object.fromEntries(SCHEMA.map((d) => [d.key, d.default]));
 
+/// Keys that decide which programs run or with what environment. A cloned repo must not be able to set them,
+/// so they are read from the global settings only.
+const GLOBAL_ONLY = /^(ruby\.(lspCommand|lspEnabled|versionManager|useBundler)|git\.path|terminal\.(shell|env)|debug\.rdbgPath|testing\.|rails\.)/;
+export const globalOnly = (key: string) => GLOBAL_ONLY.test(key);
+
 let globalValues: Record<string, unknown> = {};
 let projectValues: Record<string, unknown> = {};
 let projectRoot: string | null = null;
@@ -157,12 +163,18 @@ export async function loadSettings(root: string | null = projectRoot): Promise<v
   const global = await readJson(() => api.configRead("settings.json"), "settings.json");
   if (global) globalValues = global;
   const project = root ? await readJson(() => api.readFile(`${root}/.garnet/settings.json`), ".garnet/settings.json") : {};
-  if (project) projectValues = project;
+  if (project) {
+    const ignored = Object.keys(project).filter(globalOnly);
+    for (const k of ignored) delete project[k];
+    if (ignored.length) toast(`.garnet/settings.json: ignored ${ignored.join(", ")} (global-only settings that control which programs run).`, "error");
+    projectValues = project;
+  }
   notify();
 }
 
 /// Writes one key to the chosen scope; `undefined` resets it to the inherited value.
 export async function updateSetting(key: string, value: unknown, scope: "global" | "project" = "global") {
+  if (globalOnly(key)) scope = "global";
   const target = scope === "project" ? projectValues : globalValues;
   if (value === undefined) delete target[key];
   else target[key] = value;
@@ -227,4 +239,34 @@ export function globToRegExp(glob: string): RegExp {
     } else re += c.replace(/[.+^$()|[\]\\]/g, "\\$&");
   }
   return new RegExp(`^${re}$`);
+}
+
+/// Project trust, kept in the global config keyed by canonical path (never in the repo).
+let trusted = false;
+export const isTrusted = () => trusted;
+
+export async function checkTrust(root: string): Promise<boolean> {
+  const canonical = await api.canonicalPath(root).catch(() => root);
+  trusted = (await readConfig<string[]>("trusted.json", [])).includes(canonical);
+  return trusted;
+}
+
+export async function trustProject(root: string, silent = false) {
+  const canonical = await api.canonicalPath(root);
+  const list = (await readConfig<string[]>("trusted.json", [])).filter((p) => p !== canonical);
+  list.push(canonical);
+  await api.configWrite("trusted.json", JSON.stringify(list, null, 2));
+  trusted = true;
+  if (!silent) window.dispatchEvent(new Event("garnet:trusted"));
+}
+
+/// Asks once per untrusted root; returns whether the project is trusted afterwards.
+export async function askTrust(): Promise<boolean> {
+  if (trusted || !projectRoot) return trusted;
+  const ok = await ask(
+    `Trust and open "${projectRoot.split("/").pop()}"?\n\nA trusted project can run code: ruby-lsp loads its Gemfile, and run configurations, .env files and Rake tasks come from the repository. In safe mode Garnet only browses and edits files; ruby-lsp, run configurations and terminals stay off until you trust it.`,
+    { title: "Trust Project", kind: "warning", okLabel: "Trust Project", cancelLabel: "Safe Mode" },
+  );
+  if (ok) await trustProject(projectRoot);
+  return ok;
 }

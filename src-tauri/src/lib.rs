@@ -99,6 +99,7 @@ pub fn run() {
             fsops::rename_path,
             fsops::delete_path,
             fsops::reveal_in_finder,
+            fsops::canonical_path,
             index::find_files,
             index::index_files,
             search::search_text,

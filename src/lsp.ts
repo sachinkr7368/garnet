@@ -1,9 +1,11 @@
 import { allTabs, editor, ensureModel, events, handlePathMoved, monaco, openFile, uriFor, activeTab } from "./editor";
 import { api, Channel, invoke, type RpcEvent } from "./ipc";
 import { runInPanel } from "./run";
+import { diagnose, pushLine, type LspDiagnosis } from "./lspdiag";
 import { askTrust, setting } from "./settings";
 import { showLocations, type Loc } from "./search";
-import { debounce, rel, root, state } from "./state";
+import { debounce, rel, root, shellQuote, state } from "./state";
+import { runInTerminal } from "./terminal";
 import { bottom, h, icon, quickPick, statusSlot, toast, type PickItem } from "./ui";
 
 type Json = any;
@@ -19,6 +21,8 @@ let nextId = 1;
 const pending = new Map<number, { resolve: (v: Json) => void; reject: (e: Error) => void }>();
 const tracked = new Map<string, { model: monaco.editor.ITextModel; sub: monaco.IDisposable }>();
 const lspDiagnostics = new Map<string, Json[]>();
+const stderr: string[] = [];
+let launch: { prefix: string[]; launcher: boolean } = { prefix: [], launcher: true };
 
 /// Status bar + log
 
@@ -102,6 +106,13 @@ function onNotification(msg: Json) {
       log(p.message);
       if (p.type <= 2) toast(`Ruby LSP: ${p.message}`, p.type === 1 ? "error" : "info");
       break;
+    case "telemetry/event":
+      if (p?.type === "error" && typeof p.errorMessage === "string" && /bundle|gem/i.test(p.errorMessage)) {
+        const d = diagnose([...stderr, p.errorMessage], null);
+        log(`ruby-lsp is running without the project's bundle: ${p.errorMessage}`);
+        reportFailure(d, "Ruby LSP is running without your bundle");
+      }
+      break;
     case "$/progress": {
       const v = p.value;
       if (v.kind === "end") progress.delete(p.token);
@@ -119,14 +130,24 @@ function onNotification(msg: Json) {
 }
 
 function onEvent(ev: RpcEvent) {
-  if (ev.type === "stderr") return log(ev.line);
+  if (ev.type === "stderr") {
+    pushLine(stderr, ev.line);
+    return log(ev.line);
+  }
   if (ev.type === "exit") {
     ready = false;
     for (const p of pending.values()) p.reject(new Error("Ruby LSP exited"));
     pending.clear();
     setStatus("Ruby LSP stopped", "off");
     log(`ruby-lsp exited (${ev.code ?? "signal"})`);
-    if (!stopping) toast("Ruby LSP stopped unexpectedly.", "error", [{ label: "Restart", run: () => startLsp() }, { label: "Show Log", run: () => bottom.show("log") }]);
+    if (stopping) return;
+    const d = diagnose(stderr, ev.code);
+    if (d.fix === "noLauncher" && launch.launcher) {
+      log("Retrying without --use-launcher.");
+      return void startLsp({ launcher: false });
+    }
+    log(`--- ruby-lsp stderr (last ${stderr.length} lines) ---\n${stderr.join("\n")}\n--- end of stderr ---`);
+    reportFailure(d, "Ruby LSP stopped");
     return;
   }
   const msg = JSON.parse(ev.body);
@@ -141,16 +162,45 @@ function onEvent(ev: RpcEvent) {
 
 /// Lifecycle
 
-export async function startLsp() {
+/// Failure notification with the real reason; never runs bundle install by itself.
+function reportFailure(d: LspDiagnosis, title: string) {
+  const actions = [
+    d.fix === "installRubyLsp"
+      ? { label: "Install ruby-lsp", run: installLsp }
+      : { label: "Run bundle install in terminal", run: bundleInstall },
+    { label: "Show Log", run: () => bottom.show("log") },
+    { label: "Restart", run: () => startLsp() },
+  ];
+  toast(`${title}: ${d.reason}`, "error", actions);
+}
+
+function bundleInstall() {
+  runInTerminal("bundle install", [...launch.prefix.map(shellQuote), "bundle", "install"].join(" "), (code) => {
+    if (code === 0) toast("bundle install finished.", "info", [{ label: "Restart Ruby LSP", run: () => startLsp() }]);
+  });
+}
+
+export async function startLsp(opts: { launcher?: boolean } = {}) {
   if (!state.project || !(await askTrust())) return;
   await stopLsp();
   stopping = false;
+  stderr.length = 0;
   setStatus("Ruby LSP: starting", "busy");
   const channel = new Channel<RpcEvent>();
   channel.onmessage = onEvent;
+  const launcher = opts.launcher ?? true;
+  launch = { prefix: [], launcher };
   try {
-    const cmd = await invoke<string>("lsp_start", { root: root(), command: setting<string>("ruby.lspCommand") || null, onEvent: channel });
-    log(`$ ${cmd}`);
+    const res = await invoke<{ command: string; manager: string; reason: string; prefix: string[] }>("lsp_start", {
+      root: root(),
+      command: setting<string>("ruby.lspCommand") || null,
+      manager: setting<string>("ruby.versionManager"),
+      launcher,
+      onEvent: channel,
+    });
+    launch.prefix = res.prefix;
+    log(`Ruby version manager: ${res.manager} (${res.reason})`);
+    log(`$ ${res.command}`);
   } catch (e) {
     if (String(e).includes("ruby-lsp-missing")) {
       setStatus("Ruby LSP: not installed", "off");
@@ -188,7 +238,8 @@ export async function stopLsp() {
 }
 
 function installLsp() {
-  runInPanel("gem install ruby-lsp", "gem install ruby-lsp", {
+  const cmd = [...launch.prefix.map(shellQuote), "gem", "install", "ruby-lsp"].join(" ");
+  runInPanel("gem install ruby-lsp", cmd, {
     onExit: (code) => (code === 0 ? startLsp() : toast("gem install ruby-lsp failed; see the Run panel.", "error")),
   });
 }

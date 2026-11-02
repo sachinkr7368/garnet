@@ -5,7 +5,7 @@ import { openFile } from "./editor";
 import { Channel, invoke, type PtyEvent } from "./ipc";
 import { isDarkTheme, onSettingsChange, setting } from "./settings";
 import { abs, root } from "./state";
-import { h, icon, iconButton } from "./ui";
+import { bottom, h, icon, iconButton } from "./ui";
 
 const themes: Record<string, ITheme> = {
   dark: { background: "#141418", foreground: "#d4d4d8", cursor: "#e0476a", selectionBackground: "#3a3d4a" },
@@ -194,6 +194,13 @@ terminals.toolbar.append(iconButton("add", "New Terminal", () => newTerminal()))
 
 export function newTerminal() {
   terminals.add(`Local${++termCount > 1 ? ` (${termCount})` : ""}`, new PtyView());
+}
+
+/// Runs a command the user asked for in a new Terminal tab, so its output stays visible.
+export function runInTerminal(title: string, command: string, onExit?: (code: number | null) => void) {
+  const item = terminals.add(title, new PtyView({ command, onExit }));
+  bottom.show("terminal");
+  return item;
 }
 
 export function showTerminalPanel() {

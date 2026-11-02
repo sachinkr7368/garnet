@@ -68,9 +68,9 @@ export const SCHEMA: SettingDef[] = [
   { key: "git.autoFetchMinutes", page: "Version Control/Git", label: "Auto-fetch every N minutes (0 = off)", type: "number", min: 0, max: 240, default: 0 },
   { key: "git.checkProblemsBeforeCommit", page: "Version Control/Git", label: "Warn before committing files with errors", type: "boolean", default: true },
 
-  { key: "ruby.versionManager", page: "Languages/Ruby", label: "Default Ruby version manager for new run configurations", type: "enum", options: ["auto", "rbenv", "asdf", "chruby", "rvm", "mise", "none"], default: "auto" },
+  { key: "ruby.versionManager", page: "Languages/Ruby", label: "Ruby version manager", type: "enum", options: ["auto", "mise", "rbenv", "asdf", "chruby", "rvm", "none"], default: "auto", description: "Used to start ruby-lsp and as the default for new run configurations. auto picks the first installed manager that reads the project's mise.toml, .tool-versions or .ruby-version (in that order), else the first installed of mise, rbenv, asdf, chruby, rvm." },
   { key: "ruby.useBundler", page: "Languages/Ruby", label: "Use bundler for new run configurations", type: "boolean", default: true },
-  { key: "ruby.lspCommand", page: "Languages/Ruby", label: "ruby-lsp command (empty = auto)", type: "string", default: "", description: "Auto uses bundle exec ruby-lsp when the bundle includes it, else the global ruby-lsp. Restart Ruby LSP to apply." },
+  { key: "ruby.lspCommand", page: "Languages/Ruby", label: "ruby-lsp command (empty = auto)", type: "string", default: "", description: "Auto runs the global ruby-lsp with the project's Ruby (it builds its own bundle in .ruby-lsp/, so missing project gems don't stop it). Restart Ruby LSP to apply." },
   { key: "ruby.lspEnabled", page: "Languages/Ruby", label: "Start Ruby LSP when a project opens", type: "boolean", default: true },
 
   { key: "rails.environment", page: "Rails", label: "RAILS_ENV for Rails server/console/tasks", type: "string", default: "development" },

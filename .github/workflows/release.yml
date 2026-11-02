@@ -59,6 +59,7 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GARNET_GITHUB_CLIENT_ID: ${{ vars.GARNET_GITHUB_CLIENT_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Garnet ${{ github.ref_name }}

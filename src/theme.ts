@@ -104,6 +104,8 @@ const RULES: [string, keyof (typeof SYNTAX)["dark"], string?][] = [
   ["attribute.name", "attribute"],
   ["attribute.value", "string"],
   ["metatag.erb", "erb", "bold"],
+  ["metatag.haml", "erb", "bold"],
+  ["metatag.slim", "erb", "bold"],
   // ruby-lsp semantic token types
   ["namespace", "namespace"],
   ["class", "type"],
@@ -114,6 +116,7 @@ const RULES: [string, keyof (typeof SYNTAX)["dark"], string?][] = [
   ["parameter", "parameter"],
   ["property", "property"],
   ["variable", "variable"],
+  ["variable.defaultLibrary", "constant"],
   ["enumMember", "constant"],
 ];
 

@@ -7,6 +7,9 @@ import TsWorker from "monaco-editor/language/typescript/ts.worker?worker";
 import { conf as htmlConf, language as htmlLanguage } from "monaco-editor/languages/definitions/html/html";
 import { message } from "@tauri-apps/plugin-dialog";
 import { api } from "./ipc";
+import { hamlConf, hamlLanguage } from "./languages/haml";
+import { slimConf, slimLanguage } from "./languages/slim";
+import { snippetsFor } from "./languages/snippets";
 import { styleFor } from "./codestyle";
 import { monacoTheme } from "./theme";
 import { globToRegExp, isDarkTheme, loadSettings, onSettingsChange, projectSettingsPath, setting, settingsPath } from "./settings";
@@ -37,12 +40,47 @@ function registerErb() {
   monaco.languages.setLanguageConfiguration("erb", htmlConf);
 }
 
+function registerTemplates() {
+  monaco.languages.register({ id: "haml", extensions: [".haml"], aliases: ["HAML", "haml"] });
+  monaco.languages.setMonarchTokensProvider("haml", hamlLanguage);
+  monaco.languages.setLanguageConfiguration("haml", hamlConf);
+  monaco.languages.register({ id: "slim", extensions: [".slim"], aliases: ["Slim", "slim"] });
+  monaco.languages.setMonarchTokensProvider("slim", slimLanguage);
+  monaco.languages.setLanguageConfiguration("slim", slimConf);
+}
+
+function registerSnippets() {
+  for (const lang of ["ruby", "erb"]) {
+    monaco.languages.registerCompletionItemProvider(lang, {
+      provideCompletionItems(model, position) {
+        if (!setting("editor.liveTemplates")) return { suggestions: [] };
+        const word = model.getWordUntilPosition(position);
+        const bang = model.getValueInRange(new monaco.Range(position.lineNumber, word.endColumn, position.lineNumber, word.endColumn + 1)) === "!" ? 1 : 0;
+        const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn + bang);
+        return {
+          suggestions: snippetsFor(lang, model.uri.fsPath).map((s) => ({
+            label: { label: s.prefix, description: s.description },
+            kind: monaco.languages.CompletionItemKind.Snippet,
+            insertText: s.body,
+            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+            documentation: { value: "```" + lang + "\n" + s.body.replace(/\$\{\d+:([^}]*)\}|\$\d/g, "$1") + "\n```" },
+            range,
+            sortText: `~${s.prefix}`,
+          })),
+        };
+      },
+    });
+  }
+}
+
 function defineThemes() {
   monaco.editor.defineTheme("garnet-dark", monacoTheme("dark"));
   monaco.editor.defineTheme("garnet-light", monacoTheme("light"));
 }
 
 registerErb();
+registerTemplates();
+registerSnippets();
 defineThemes();
 
 const RUBY_FILES = new Set([
@@ -139,6 +177,8 @@ function editorOptions(): monaco.editor.IEditorOptions & monaco.editor.IGlobalEd
     scrollBeyondLastLine: setting("editor.scrollBeyondLastLine"),
     stickyScroll: { enabled: setting("editor.stickyScroll") },
     renderWhitespace: setting("editor.renderWhitespace"),
+    "semanticHighlighting.enabled": !!setting("editor.semanticHighlighting"),
+    inlayHints: { enabled: setting("editor.inlayHints") ? "on" : "off" },
     theme: editorTheme(),
   };
 }
@@ -156,7 +196,6 @@ export const editor = monaco.editor.create(editorEl, {
   fixedOverflowWidgets: true,
   padding: { top: 6 },
   cursorSmoothCaretAnimation: "on",
-  "semanticHighlighting.enabled": false,
   model: null,
 });
 

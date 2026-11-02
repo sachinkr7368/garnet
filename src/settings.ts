@@ -17,7 +17,7 @@ export interface SettingDef {
   max?: number;
 }
 
-const LANGS = ["ruby", "erb", "yaml", "javascript", "typescript", "css", "scss", "json", "markdown", "html"];
+const LANGS = ["ruby", "erb", "haml", "slim", "yaml", "javascript", "typescript", "css", "scss", "json", "markdown", "html"];
 
 /// Every setting Garnet understands. The settings window is generated from this list.
 export const SCHEMA: SettingDef[] = [
@@ -39,6 +39,10 @@ export const SCHEMA: SettingDef[] = [
   { key: "editor.wordWrap", page: "Editor/General", label: "Soft wrap", type: "enum", options: ["off", "on", "bounded"], default: "off" },
   { key: "editor.minimap", page: "Editor/General", label: "Show minimap", type: "boolean", default: false },
   { key: "editor.renderWhitespace", page: "Editor/General", label: "Show whitespace", type: "enum", options: ["none", "selection", "boundary", "trailing", "all"], default: "selection" },
+  { key: "editor.breadcrumbs", page: "Editor/General", label: "Show breadcrumbs above the editor", type: "boolean", default: true },
+  { key: "editor.semanticHighlighting", page: "Editor/General", label: "Semantic highlighting (ruby-lsp)", type: "boolean", default: true, description: "Colors methods, parameters, locals and constants from ruby-lsp's analysis." },
+  { key: "editor.inlayHints", page: "Editor/General", label: "Inlay hints (ruby-lsp)", type: "boolean", default: true, description: "Shows implicit rescue classes and hash shorthand values." },
+  { key: "editor.liveTemplates", page: "Editor/General", label: "Live templates (Ruby, RSpec, ERB snippets)", type: "boolean", default: true },
   { key: "editor.trimTrailingWhitespace", page: "Editor/General", label: "Strip trailing whitespace on save", type: "boolean", default: true },
   { key: "editor.insertFinalNewline", page: "Editor/General", label: "Ensure a final newline on save", type: "boolean", default: true },
   { key: "editor.formatOnSave", page: "Editor/General", label: "Reformat Ruby files on save (RuboCop via ruby-lsp)", type: "boolean", default: false },

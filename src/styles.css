@@ -1456,6 +1456,74 @@ body.sidebar-right #toolstrip {
   font-size: 11px;
 }
 
+.replace-bar .btn {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.result-line input[type="checkbox"],
+.result-file input[type="checkbox"] {
+  margin: 0;
+  flex: none;
+}
+.rep-match {
+  border-radius: 3px;
+  cursor: pointer;
+}
+.rep-match del {
+  background: color-mix(in srgb, var(--deleted) 30%, transparent);
+  text-decoration: line-through;
+}
+.rep-match ins {
+  background: color-mix(in srgb, var(--added) 30%, transparent);
+  text-decoration: none;
+}
+.rep-match.excluded del {
+  background: var(--mark);
+  text-decoration: none;
+}
+.rep-match.excluded ins {
+  display: none;
+}
+
+.breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 10px;
+  min-height: 22px;
+  font-size: 12px;
+  color: var(--dim);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex: none;
+}
+.breadcrumbs[hidden] {
+  display: none;
+}
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.crumb.file {
+  cursor: default;
+  color: var(--text);
+}
+.crumb:not(.file):hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.crumb-sep {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
 /* debug sessions, breakpoints dialog */
 
 .debug-sessions {

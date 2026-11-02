@@ -631,7 +631,8 @@ async function vcsWorkflowChecks(dir: string, sh: (cmd: string) => Promise<strin
   commitBtn.click();
   const subjects = () => api.git(dir, "log", "--format=%s");
   await until(async () => (await subjects()).startsWith("smoke commit\n"), 5000);
-  check("double-clicking Commit makes one commit", (await subjects()) === "smoke commit\nbase\ninit\n" || (await subjects()).split("\n").slice(0, 3).join(" | "));
+  const log = (await subjects()).split("\n");
+  check("double-clicking Commit makes one commit", (log[0] === "smoke commit" && log[1] === "base") || log.slice(0, 3).join(" | "));
   amend.checked = true;
   amend.dispatchEvent(new Event("change"));
   await until(() => message.value === "smoke commit", 3000);

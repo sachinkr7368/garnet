@@ -943,6 +943,8 @@ mark {
   border-bottom-left-radius: 0;
   border-left: 1px solid color-mix(in srgb, currentColor 30%, transparent);
   padding: 0 4px;
+  width: auto;
+  height: auto;
 }
 .btn:disabled {
   opacity: 0.5;

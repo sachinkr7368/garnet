@@ -43,6 +43,7 @@ fn run_git(root: &str, args: &[&str], stdin: Option<&str>) -> Result<std::proces
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
+        .env("GIT_TEST_DISALLOW_ABBREVIATED_OPTIONS", "1")
         .stdin(if stdin.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -153,31 +154,53 @@ pub async fn git_unstage(root: String, paths: Vec<String>) -> Result<(), String>
     off(move || unstage(&root, &paths)).await
 }
 
-const RUN_SUBCOMMANDS: &[&str] = &[
-    "add", "branch", "checkout", "cherry-pick", "commit", "fetch", "for-each-ref", "log", "merge", "merge-base", "pull", "push", "rebase",
-    "remote", "reset", "restore", "revert", "rev-list", "rev-parse", "rm", "show", "stash", "status", "switch", "tag", "worktree",
+/// Subcommands the UI runs through git_run, each with the exact options it uses (long options may carry `=value`).
+const RUN_ALLOWED: &[(&str, &[&str])] = &[
+    ("add", &[]),
+    ("branch", &["-d", "-D", "-m", "--list"]),
+    ("checkout", &["-b", "--track", "--ours", "--theirs"]),
+    ("cherry-pick", &["-m", "--abort", "--continue"]),
+    ("commit", &["--no-edit"]),
+    ("fetch", &["--all", "--prune"]),
+    ("for-each-ref", &["--sort", "--format"]),
+    ("log", &["-1", "--format"]),
+    ("merge", &["--ff-only", "--abort", "--continue"]),
+    ("merge-base", &[]),
+    ("pull", &["--ff-only"]),
+    ("push", &["--set-upstream", "--delete"]),
+    ("rebase", &["--abort", "--continue"]),
+    ("remote", &[]),
+    ("reset", &["--soft", "--mixed", "--hard"]),
+    ("revert", &["--no-edit", "-m", "--abort", "--continue"]),
+    ("rev-list", &["--count", "--left-right"]),
+    ("rev-parse", &["--abbrev-ref"]),
+    ("rm", &["-q"]),
+    ("stash", &["-m", "--include-untracked", "--format"]),
+    ("status", &["--porcelain", "--untracked-files"]),
+    ("tag", &[]),
+    ("worktree", &["-b", "--porcelain", "--force"]),
 ];
-/// Options that run a program or redirect git elsewhere. Long options also match their abbreviations (git accepts `--upload-pa`).
-const RUN_DENIED: &[&str] = &["--upload-pack", "--receive-pack", "--exec", "--config", "--output", "--git-dir", "--work-tree", "--exec-path", "--namespace"];
 
-/// git_run is reachable from the webview, so only the subcommands the UI uses are allowed, and never an option that executes code.
+/// git_run is reachable from the webview, so it runs only the subcommands and exact options the UI uses: no global
+/// options (`-c`, `--config-env`), no abbreviations (`--e` for `--exec`), nothing that executes code.
 fn check_run_args(args: &[String]) -> Result<(), String> {
     let sub = args.first().map(String::as_str).unwrap_or("");
-    if !RUN_SUBCOMMANDS.contains(&sub) {
+    let Some((_, opts)) = RUN_ALLOWED.iter().find(|(name, _)| *name == sub) else {
         return Err(format!("git {sub} is not allowed here"));
-    }
-    if sub == "remote" && !matches!(args.get(1).map(String::as_str), None | Some("get-url" | "-v")) {
+    };
+    if sub == "remote" && !matches!(args.get(1).map(String::as_str), Some("get-url")) {
         return Err("only git remote get-url is allowed here".into());
     }
     for a in args[1..].iter().take_while(|a| *a != "--") {
-        let name = a.split('=').next().unwrap_or_default();
-        let denied = if name.starts_with("--") {
-            name.len() > 3 && RUN_DENIED.iter().any(|d| d.starts_with(name))
-        } else {
-            name.starts_with('-') && (name.starts_with("-c") || name.starts_with("-C") || (sub == "rebase" && name[1..].contains('x')))
-        };
-        if denied || a.contains('\0') {
-            return Err(format!("git option {name} is not allowed here"));
+        if a.contains('\0') {
+            return Err("invalid argument".into());
+        }
+        if !a.starts_with('-') {
+            continue;
+        }
+        let name = if a.starts_with("--") { a.split('=').next().unwrap_or_default() } else { a.as_str() };
+        if !opts.contains(&name) {
+            return Err(format!("git {sub} option {name} is not allowed here"));
         }
     }
     Ok(())
@@ -948,14 +971,26 @@ mod tests {
     #[test]
     fn git_run_allows_ui_subcommands_and_rejects_code_execution() {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        for ok in [&["status"][..], &["stash", "push", "-m", "x", "--", "-x", "--exec=y"], &["remote", "get-url", "origin"], &["rebase", "--continue"], &["log", "-1", "--format=%B"], &["branch", "-D", "x"], &["checkout", "-b", "x", "--track", "origin/x"]] {
+        for ok in [
+            &["status"][..], &["status", "--porcelain", "--untracked-files=no"], &["stash", "push", "--include-untracked", "-m", "x", "--", "-x", "--exec=y"],
+            &["stash", "push", "-m", "garnet: before checkout x"], &["stash", "list", "--format=%gd%x1f%s"], &["stash", "pop"], &["stash", "apply", "stash@{0}"], &["stash", "drop", "stash@{1}"],
+            &["remote", "get-url", "origin"], &["rebase", "--continue"], &["rebase", "--abort"], &["merge", "--abort"], &["merge", "feature"], &["merge", "--ff-only", "FETCH_HEAD"],
+            &["log", "-1", "--format=%B"], &["branch", "-D", "x"], &["branch", "-d", "x"], &["branch", "-m", "a", "b"], &["branch", "--list", "x"], &["branch", "x", "abc"],
+            &["checkout", "-b", "x", "--track", "origin/x"], &["checkout", "--theirs", "--", "a.rb"], &["checkout", "x"], &["checkout", "-b", "x", "FETCH_HEAD"],
+            &["fetch", "--all", "--prune"], &["fetch", "origin", "pull/1/head"], &["pull", "--ff-only"], &["push"], &["push", "--set-upstream", "origin", "x"], &["push", "origin", "--delete", "x"],
+            &["for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/heads"], &["rev-parse", "--abbrev-ref", "@{upstream}"], &["rev-parse", "HEAD"],
+            &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], &["rev-list", "--count", "@{upstream}..HEAD"], &["worktree", "list", "--porcelain"],
+            &["worktree", "add", "-b", "x", "/p", "origin/x"], &["worktree", "remove", "--force", "/p"], &["merge-base", "main", "HEAD"], &["cherry-pick", "-m", "1", "abc"],
+            &["revert", "--no-edit", "abc"], &["cherry-pick", "--continue"], &["commit", "--no-edit"], &["reset", "--hard", "abc"], &["rm", "-q", "--", "a.rb"], &["add", "--", "a.rb"], &["tag", "v1", "abc"],
+        ] {
             assert!(check_run_args(&s(ok)).is_ok(), "{ok:?}");
         }
         for bad in [
-            &["-c", "core.pager=sh", "log"][..], &["config", "core.sshCommand", "x"], &["clone", "x"], &[], &["fetch", "--upload-pack=touch x", "."],
-            &["fetch", "--upload-pa=x", "."], &["pull", "--upload-pack", "x"], &["push", "--receive-pack=x"], &["push", "--exec", "x"], &["rebase", "-x", "make"],
-            &["rebase", "-ix", "make"], &["rebase", "--exec=make"], &["log", "--output=/tmp/x"], &["remote", "add", "x", "ext::sh"], &["commit", "-C", "HEAD"],
-            &["status", "--git-dir=/x"], &["clone", "--config", "x"],
+            &["-c", "core.pager=sh", "log"][..], &["-ccore.sshCommand=x", "fetch"], &["--config-env=core.sshCommand=X", "fetch"], &["fetch", "-c", "x"], &["fetch", "-ccore.x=y"],
+            &["config", "core.sshCommand", "x"], &["clone", "x"], &["clone", "--u=x"], &[], &["fetch", "--upload-pack=touch x", "."], &["fetch", "--upload-p=x"], &["fetch", "--upload-pa=x", "."],
+            &["pull", "--upload-pack", "x"], &["push", "--receive-pack=x"], &["push", "--exec", "x"], &["push", "--e=x", "."], &["push", "--ex=x"], &["rebase", "-x", "make"],
+            &["rebase", "-ix", "make"], &["rebase", "--exec=make"], &["log", "--output=/tmp/x"], &["log", "--ext-diff"], &["remote", "add", "x", "ext::sh"], &["remote"], &["commit", "-C", "HEAD"],
+            &["status", "--git-dir=/x"], &["show", "HEAD"], &["stash", "push", "-m", "x", "--pathspec-from-file=/etc/passwd"],
         ] {
             assert!(check_run_args(&s(bad)).is_err(), "{bad:?}");
         }

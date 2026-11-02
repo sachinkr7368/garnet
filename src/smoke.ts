@@ -6,10 +6,17 @@ import { importJetBrainsKeymap, jetbrainsKeystroke } from "./keymapref";
 import { breakpointsIn, debugSessions, debugState, evaluate, flushBreakpoints, loadBreakpoints, resume, resumeSession, selectDebugSession, smokeHooks, stopAllSessions, stopDebug, toggleBreakpoint } from "./debug";
 import { rerunFailed, testRunState, testStatusAt } from "./testresults";
 import { defaultDocker } from "./docker";
-import { editor, openFile } from "./editor";
-import { refreshGit } from "./git";
+import { activeTab, allTabs, closeTab, editor, languageFor, openFile } from "./editor";
+import { symbolPath } from "./breadcrumbs";
+import { snippetsFor } from "./languages/snippets";
+import { replaceInFiles, searchView } from "./search";
+import { decodeTokens, ruleFor, SEMANTIC_RULES } from "./semantic";
+import { commitView, gutterHunks, refreshGit, updateGutterNow } from "./git";
+import { logState, showGitLog } from "./gitlog";
+import { continueOperation, openResolver, runGitOp } from "./merge";
+import { stagePatch } from "./difflogic";
 import { api, Channel, invoke, type PtyEvent } from "./ipc";
-import { lspReady, request } from "./lsp";
+import { cachedSymbols, goToImplementation, lspCapabilities, lspReady, request } from "./lsp";
 import { buildCommand, configList, dockerUnavailable, editConfigurations, launch, newConfig, runs, safeEnv, validateConfig, type RunConfig } from "./run";
 import { isDarkTheme, isTrusted, loadSettings, setting, toggleTheme, updateSetting } from "./settings";
 import { openSettingsWindow } from "./settingsui";
@@ -131,6 +138,8 @@ export async function runSmoke(project: string, withDebug: boolean, openProject:
     }
 
     await uiChecks(check);
+    await editorFeatureChecks(check, !!ok);
+    await gitChecks(controller, check);
     const bpRestored = await breakpointChecks(check);
     await testTreeChecks(report, check);
     await dockerChecks(report, check);
@@ -188,7 +197,7 @@ async function uiChecks(check: (n: string, ok: boolean | string) => void) {
   check("keymap page lists actions", overlay.querySelectorAll(".st-key-row").length > 40);
   overlay.replaceChildren();
   const km = keymap();
-  const expect: Record<string, string> = { "cmd+e": "recentFiles", "cmd+o": "goToClass", "cmd+shift+o": "goToFile", "ctrl+r": "runSelected", "ctrl+d": "debugSelected", "cmd+shift+k": "push", "cmd+[": "back", "cmd+shift+f8": "viewBreakpoints", "alt+f8": "evaluate", "cmd+shift+a": "commandPalette" };
+  const expect: Record<string, string> = { "cmd+shift+r": "replaceInFiles", "cmd+alt+b": "goToImplementation", "ctrl+shift+b": "goToTypeDefinition", "cmd+e": "recentFiles", "cmd+o": "goToClass", "cmd+shift+o": "goToFile", "ctrl+r": "runSelected", "ctrl+d": "debugSelected", "cmd+shift+k": "push", "cmd+[": "back", "cmd+shift+f8": "viewBreakpoints", "alt+f8": "evaluate", "cmd+shift+a": "commandPalette" };
   check("JetBrains default keymap", Object.entries(expect).every(([k, id]) => km.get(k) === id) || JSON.stringify(Object.entries(expect).filter(([k, id]) => km.get(k) !== id)));
   const shadowed = allCommands().flatMap((c) => (c.key ?? "").split(" ").filter(Boolean).filter((k) => km.get(k) !== c.id).map((k) => `${k}:${c.id}`));
   check("no conflicting default shortcuts", shadowed.length === 0 || shadowed.join(","));
@@ -247,6 +256,134 @@ async function uiChecks(check: (n: string, ok: boolean | string) => void) {
   const listed = await invoke<string>("git_run", { root: state.project!.root, args: ["branch", "--list", "garnet-smoke"] });
   await invoke("git_run", { root: state.project!.root, args: ["branch", "-D", "garnet-smoke"] });
   check("git_run branch create/delete", listed.includes("garnet-smoke"));
+}
+
+async function editorFeatureChecks(check: (n: string, ok: boolean | string) => void, lsp: boolean) {
+  const root = state.project!.root;
+  const overlay = document.getElementById("overlay-root")!;
+  openSettingsWindow("Editor/General");
+  const settingsText = overlay.textContent ?? "";
+  const missing = ["breadcrumbs", "Semantic highlighting", "Inlay hints", "Live templates"].filter((t) => !settingsText.includes(t));
+  check("settings list breadcrumbs/semantic/inlay/templates toggles", missing.length === 0 || missing.join(","));
+  overlay.replaceChildren();
+
+  // Templates: HAML / Slim tokenization and snippets
+  const kinds = (text: string, lang: string) => monaco.editor.tokenize(text, lang).flat().map((t) => t.type);
+  const haml = kinds("%p.title{ class: \"x\" }= @post.title\n-# note\n", "haml");
+  check("HAML tokens (tag, class, hash, ruby, comment)", ["tag.haml", "attribute.name.haml", "key.haml", "metatag.haml", "comment.haml"].every((t) => haml.includes(t)) && haml.some((t) => t.endsWith(".ruby")) || haml.join(","));
+  const slim = kinds("a.btn href=post_path(@post) Show #{@post.title}\n= link_to \"x\", y\n", "slim");
+  check("Slim tokens (tag, attr, interpolation, ruby)", ["tag.slim", "attribute.name.slim", "delimiter.interpolation.slim", "variable.instance.slim", "metatag.slim"].every((t) => slim.includes(t)) && slim.some((t) => t.endsWith(".ruby")) || slim.join(","));
+  check("languageFor haml/slim", languageFor(`${root}/app/views/a.html.haml`) === "haml" && languageFor(`${root}/app/views/a.html.slim`) === "slim");
+  check("snippets per file type", snippetsFor("ruby", "spec/a_spec.rb").some((s) => s.prefix === "describe") && !snippetsFor("ruby", "app/a.rb").some((s) => s.prefix === "describe") && snippetsFor("erb", "a.erb").some((s) => s.body === "<%= $0 %>"));
+
+  // Replace in Files: regex groups, per-match exclusion, open buffer edited with undo, gitignored files skipped
+  const fileA = `${root}/app/models/garnet_replace_smoke_a.rb`;
+  const fileB = `${root}/app/models/garnet_replace_smoke_b.rb`;
+  const ignored = `${root}/tmp/garnet_replace_smoke_c.rb`;
+  const body = "garnet_smoke_user_id = garnet_smoke_post_id\n";
+  for (const f of [fileA, fileB, ignored]) await api.writeFile(f, body);
+  try {
+    await openFile(fileA);
+    const modelA = editor.getModel()!;
+    replaceInFiles();
+    const inputs = searchView.querySelectorAll<HTMLInputElement>(".search-input");
+    const [q, rep] = [inputs[0], inputs[1]];
+    const regexBtn = searchView.querySelector<HTMLElement>('[title="Regular expression"]')!;
+    if (!regexBtn.classList.contains("on")) regexBtn.classList.add("on");
+    q.value = "garnet_smoke_(\\w+)_id";
+    rep.value = "smoke${1}Id";
+    rep.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    const groups = await until(() => {
+      const g = [...searchView.querySelectorAll<HTMLElement>(".result-group")];
+      return g.length >= 2 && searchView.querySelector(".search-summary")?.textContent?.includes("ms") ? g : null;
+    }, 10000);
+    const names = (groups ?? []).map((g) => g.querySelector(".result-name")?.textContent);
+    check("replace preview lists matches, skips .gitignored", names.includes("garnet_replace_smoke_a.rb") && names.includes("garnet_replace_smoke_b.rb") && !names.includes("garnet_replace_smoke_c.rb") || names.join(","));
+    const ins = [...searchView.querySelectorAll(".rep-match ins")].map((e) => e.textContent);
+    check("replace preview expands regex groups", ins.includes("smokeuserId") && ins.includes("smokepostId") || ins.join(","));
+    const groupB = groups?.find((g) => g.querySelector(".result-name")?.textContent === "garnet_replace_smoke_b.rb");
+    groupB?.querySelectorAll<HTMLElement>(".rep-match")[1]?.click();
+    [...searchView.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Replace Selected")!.click();
+    const onDisk = await until(async () => {
+      const t = await api.readFile(fileB);
+      return t !== body ? t : null;
+    }, 5000);
+    check("replace selected writes unopened file, keeps excluded match", onDisk === "smokeuserId = garnet_smoke_post_id\n" || String(onDisk));
+    check("replace edits open buffer, not disk", modelA.getValue() === "smokeuserId = smokepostId\n" && (await api.readFile(fileA)) === body || modelA.getValue());
+    modelA.undo();
+    check("replace in open buffer is undoable", modelA.getValue() === body || modelA.getValue());
+    for (const t of allTabs().filter((t) => t.path === fileA)) await closeTab(t, true);
+  } finally {
+    for (const f of [fileA, fileB, ignored]) await api.deletePath(f).catch(() => {});
+  }
+  clearToasts();
+
+  if (!lsp) return;
+  const caps = lspCapabilities();
+  const controller = `${root}/app/controllers/posts_controller.rb`;
+  await openFile(controller);
+  const model = editor.getModel()!;
+  const idx = model.findMatches("def index", false, false, true, null, false)[0]?.range;
+  if (idx) {
+    editor.setPosition({ lineNumber: idx.startLineNumber + 1, column: 3 });
+    const path = symbolPath(await cachedSymbols(model), idx.startLineNumber + 1, 3).map((s) => s.name);
+    check("breadcrumb symbol path", path.join(">") === "PostsController>index" || path.join(">"));
+    const bar = await until(() => {
+      const el = document.querySelector<HTMLElement>(".breadcrumbs");
+      return el && !el.hidden && el.textContent?.includes("index") ? el : null;
+    }, 5000);
+    check("breadcrumbs bar shows class and method", !!bar && bar.textContent!.includes("PostsController") && bar.textContent!.includes("posts_controller.rb") || String(bar?.textContent));
+    editor.setPosition({ lineNumber: model.getLineCount(), column: 1 });
+    [...(bar?.querySelectorAll<HTMLElement>(".crumb") ?? [])].find((c) => c.textContent === "index")?.click();
+    check("breadcrumb click jumps to symbol", editor.getPosition()?.lineNumber === idx.startLineNumber);
+  }
+
+  const legend = caps.semanticTokensProvider?.legend;
+  check("semantic tokens provider with legend", !!legend);
+  if (legend) {
+    const res = await request<any>("textDocument/semanticTokens/full", { textDocument: { uri: model.uri.toString() } }).catch(() => null);
+    const tokens = decodeTokens(res?.data ?? [], legend);
+    const types = [...new Set(tokens.map((t) => t.type))];
+    check("semantic tokens decoded", tokens.length > 0 && types.length > 0 || JSON.stringify(res).slice(0, 200));
+    const unstyled = types.filter((t) => !ruleFor(t, [], SEMANTIC_RULES.dark) || !ruleFor(t, [], SEMANTIC_RULES.light));
+    check("every semantic token type has dark and light colors", unstyled.length === 0 || unstyled.join(","));
+    check("semantic highlighting enabled in editor", (editor.getRawOptions() as Record<string, unknown>)["semanticHighlighting.enabled"] === true);
+  }
+
+  check("inlay hint provider", !!caps.inlayHintProvider);
+  const hintsFile = `${root}/app/models/garnet_hints_smoke.rb`;
+  await api.writeFile(hintsFile, "class GarnetHintsSmoke\n  def run\n    work\n  rescue\n    nil\n  end\nend\n");
+  try {
+    await openFile(hintsFile);
+    const hm = editor.getModel()!;
+    const hints = await until(async () => {
+      const r = await request<any[]>("textDocument/inlayHint", { textDocument: { uri: hm.uri.toString() }, range: { start: { line: 0, character: 0 }, end: { line: 7, character: 0 } } }).catch(() => null);
+      return r?.length ? r : null;
+    }, 10000, 500);
+    check("inlay hint for implicit rescue", JSON.stringify(hints ?? "").includes("StandardError") || JSON.stringify(hints));
+    for (const t of allTabs().filter((t) => t.path === hintsFile)) await closeTab(t, true);
+  } finally {
+    await api.deletePath(hintsFile).catch(() => {});
+  }
+
+  const base = `${root}/app/models/application_record.rb`;
+  await openFile(base);
+  const bm = editor.getModel()!;
+  const at = bm.findMatches("ApplicationRecord", false, false, true, null, false)[0]?.range;
+  if (at) {
+    editor.setPosition({ lineNumber: at.startLineNumber, column: at.startColumn + 2 });
+    const landed = await until(async () => {
+      await goToImplementation();
+      await sleep(300);
+      document.querySelector<HTMLElement>(".qp-backdrop")?.remove();
+      return activeTab()?.path.endsWith("app/models/post.rb") ? true : (await openFile(base), editor.setPosition({ lineNumber: at.startLineNumber, column: at.startColumn + 2 }), null);
+    }, 60000, 1000);
+    check("go to implementation: ApplicationRecord -> Post", !!landed);
+  }
+}
+
+function clearToasts() {
+  document.querySelector<HTMLElement>(".toasts")?.replaceChildren();
 }
 
 const SMOKE_SCRIPT = "lib/smoke_debug.rb";
@@ -349,4 +486,76 @@ async function twoDebugSessions(report: Report, check: (n: string, ok: boolean |
     await until(() => debugSessions().find((s) => s.name === "Smoke B")?.ended, 30000);
   }
   await stopAllSessions();
+}
+
+async function gitChecks(controller: string, check: (n: string, ok: boolean | string) => void) {
+  const root = state.project!.root;
+  showGitLog("");
+  const listed = await until(() => logState().commits.length > 0 && logState().details.querySelector(".log-meta"), 10000);
+  check("git log lists commits with details", !!listed);
+  check("git log draws the graph", !!document.querySelector(".log-row svg.log-graph"));
+  const total = logState().commits.length;
+  showGitLog(controller);
+  await until(() => logState().commits.length > 0 && logState().commits.length <= total && logState().details.querySelector(".change-row.selected"), 10000);
+  check("file history filters the log to the file", logState().commits.length > 0 && !!logState().details.querySelector(".change-row.selected"));
+  showGitLog("");
+
+  await openFile(controller);
+  const model = editor.getModel()!;
+  await updateGutterNow();
+  const before = gutterHunks().length;
+  editor.setPosition({ lineNumber: 1, column: 1 });
+  editor.trigger("keyboard", "type", { text: "# garnet smoke\n" });
+  await updateGutterNow();
+  check("live gutter marks unsaved edits", gutterHunks().length === before + 1 || JSON.stringify(gutterHunks()));
+  while (model.getAlternativeVersionId() !== 1 && model.canUndo()) model.undo();
+  await refreshGit();
+  check("commit panel renders the changes tree", !!commitView.querySelector(".changes"));
+
+  const dir = `${root}/tmp/garnet-smoke-git`;
+  const sh = (cmd: string) => api.runCapture(root, `cd ${JSON.stringify(dir)} && ${cmd}`, 30);
+  await api.runCapture(root, `rm -rf ${JSON.stringify(dir)} && mkdir -p ${JSON.stringify(dir)}`, 30);
+  const saved = state.project!;
+  state.project = { ...saved, root: dir };
+  try {
+    await sh(
+      "git init -q -b main && git config user.email s@example.com && git config user.name smoke && printf 'a\\nb\\nc\\n' > f.rb && git add f.rb && git commit -qm init" +
+        " && git checkout -qb feature && printf 'a\\nTHEIRS\\nc\\n' > f.rb && git commit -qam theirs && git checkout -q main && printf 'a\\nOURS\\nc\\n' > f.rb && git commit -qam ours",
+    );
+    const merged = await runGitOp("Merge", ["merge", "feature"]);
+    document.getElementById("overlay-root")!.replaceChildren();
+    const op = await api.gitOpState(dir);
+    check("merge conflict detected", !merged && op.op === "merge" && op.conflicts.join() === "f.rb");
+    const r = await openResolver("f.rb");
+    check("resolver shows one conflict in three panes", r?.chunks.length === 1 && document.querySelectorAll(".merge-pane .monaco-editor").length === 3);
+    if (r) {
+      r.accept(0, "both");
+      check("accept both yields yours then theirs", r.result.getValue() === "a\nOURS\nTHEIRS\nc\n" || r.result.getValue());
+      check("resolver applies and marks resolved", await r.apply());
+    }
+    check("no conflicts left", (await api.gitOpState(dir)).conflicts.length === 0);
+    await continueOperation("merge");
+    check("merge continued into a merge commit", (await api.gitOpState(dir)).op === "" && (await api.gitCommitDetails(dir, "HEAD")).parents.length === 2);
+
+    await sh("echo x >> f.rb && echo new > u.rb && git stash push -q --include-untracked -m wip");
+    const st = await api.gitCommitDetails(dir, "stash@{0}");
+    check("stash details list tracked and untracked files", st.files.some((f) => f.path === "f.rb") && st.files.some((f) => f.path === "u.rb" && f.status === "?"));
+    await runGitOp("Pop stash", ["stash", "pop"]);
+    const index = (await api.gitFileAt(dir, "", "f.rb")) ?? "";
+    const work = await api.readFile(`${dir}/f.rb`);
+    const patch = stagePatch("f.rb", index, `X\n${work}`, 0, 1);
+    await api.gitStagePatch(dir, `${dir}/f.rb`, patch!);
+    check("hunk staging stages only the chosen hunk", (await api.gitFileAt(dir, "", "f.rb")) === `X\n${index}`);
+    await sh("echo 'f.rb filter=crypt' > .gitattributes");
+    check("hunk staging refuses filtered files", await api.gitStagePatch(dir, `${dir}/f.rb`, patch!).then(() => false, (e) => String(e).includes("'crypt' filter")));
+    await sh("ln -s /etc/hosts link.rb");
+    check("writes through symlinks are refused", await api.writeFile(`${dir}/link.rb`, "x").then(() => false, (e) => String(e).includes("symlink")));
+    check("writes outside the project are refused", await api.writeFile(`${root}/../garnet-smoke-outside`, "x").then(() => false, () => true));
+  } catch (e) {
+    check("git scenario", String(e));
+  } finally {
+    state.project = saved;
+    await api.runCapture(root, `rm -rf ${JSON.stringify(dir)}`, 30);
+    document.getElementById("overlay-root")!.replaceChildren();
+  }
 }

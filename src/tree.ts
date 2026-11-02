@@ -228,6 +228,7 @@ function showMenu(e: MouseEvent, node: Node) {
     { label: "Copy Relative Path", run: () => navigator.clipboard.writeText(rel(node.entry.path)) },
     { label: "Reveal in Finder", run: () => api.revealInFinder(node.entry.path) },
     null,
+    { label: "Show History", run: () => window.dispatchEvent(new CustomEvent("garnet:show-history", { detail: node.entry.path })) },
     {
       label: "Find in Folder…",
       run: () => window.dispatchEvent(new CustomEvent("garnet:find-in", { detail: rel(targetDir(node)) })),

@@ -7,11 +7,14 @@ import TsWorker from "monaco-editor/language/typescript/ts.worker?worker";
 import { conf as htmlConf, language as htmlLanguage } from "monaco-editor/languages/definitions/html/html";
 import { message } from "@tauri-apps/plugin-dialog";
 import { api } from "./ipc";
+import { hamlConf, hamlLanguage } from "./languages/haml";
+import { slimConf, slimLanguage } from "./languages/slim";
+import { snippetsFor } from "./languages/snippets";
 import { styleFor } from "./codestyle";
 import { monacoTheme } from "./theme";
-import { globToRegExp, isDarkTheme, loadSettings, onSettingsChange, projectSettingsPath, setting, settingsPath } from "./settings";
+import { globToRegExp, isDarkTheme, loadSettings, onSettingsChange, projectSettingsPath, setting, settingsPath, updateSetting } from "./settings";
 import { basename, rel } from "./state";
-import { h, icon, statusSlot, toast } from "./ui";
+import { h, icon, iconButton, statusSlot, toast } from "./ui";
 
 export { monaco };
 
@@ -37,12 +40,47 @@ function registerErb() {
   monaco.languages.setLanguageConfiguration("erb", htmlConf);
 }
 
+function registerTemplates() {
+  monaco.languages.register({ id: "haml", extensions: [".haml"], aliases: ["HAML", "haml"] });
+  monaco.languages.setMonarchTokensProvider("haml", hamlLanguage);
+  monaco.languages.setLanguageConfiguration("haml", hamlConf);
+  monaco.languages.register({ id: "slim", extensions: [".slim"], aliases: ["Slim", "slim"] });
+  monaco.languages.setMonarchTokensProvider("slim", slimLanguage);
+  monaco.languages.setLanguageConfiguration("slim", slimConf);
+}
+
+function registerSnippets() {
+  for (const lang of ["ruby", "erb"]) {
+    monaco.languages.registerCompletionItemProvider(lang, {
+      provideCompletionItems(model, position) {
+        if (!setting("editor.liveTemplates")) return { suggestions: [] };
+        const word = model.getWordUntilPosition(position);
+        const bang = model.getValueInRange(new monaco.Range(position.lineNumber, word.endColumn, position.lineNumber, word.endColumn + 1)) === "!" ? 1 : 0;
+        const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn + bang);
+        return {
+          suggestions: snippetsFor(lang, model.uri.fsPath).map((s) => ({
+            label: { label: s.prefix, description: s.description },
+            kind: monaco.languages.CompletionItemKind.Snippet,
+            insertText: s.body,
+            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+            documentation: { value: "```" + lang + "\n" + s.body.replace(/\$\{\d+:([^}]*)\}|\$\d/g, "$1") + "\n```" },
+            range,
+            sortText: `~${s.prefix}`,
+          })),
+        };
+      },
+    });
+  }
+}
+
 function defineThemes() {
   monaco.editor.defineTheme("garnet-dark", monacoTheme("dark"));
   monaco.editor.defineTheme("garnet-light", monacoTheme("light"));
 }
 
 registerErb();
+registerTemplates();
+registerSnippets();
 defineThemes();
 
 const RUBY_FILES = new Set([
@@ -84,6 +122,10 @@ export interface Tab {
   savedVersion: number;
   viewState: monaco.editor.ICodeEditorViewState | monaco.editor.IDiffEditorViewState | null;
   el: HTMLElement;
+  /// Read-only diff between two revisions; `key` identifies it (path + revisions).
+  readonly?: boolean;
+  key?: string;
+  label?: string;
 }
 
 class Emitter<T> {
@@ -139,6 +181,8 @@ function editorOptions(): monaco.editor.IEditorOptions & monaco.editor.IGlobalEd
     scrollBeyondLastLine: setting("editor.scrollBeyondLastLine"),
     stickyScroll: { enabled: setting("editor.stickyScroll") },
     renderWhitespace: setting("editor.renderWhitespace"),
+    "semanticHighlighting.enabled": !!setting("editor.semanticHighlighting"),
+    inlayHints: { enabled: setting("editor.inlayHints") ? "on" : "off" },
     theme: editorTheme(),
   };
 }
@@ -156,25 +200,49 @@ export const editor = monaco.editor.create(editorEl, {
   fixedOverflowWidgets: true,
   padding: { top: 6 },
   cursorSmoothCaretAnimation: "on",
-  "semanticHighlighting.enabled": false,
   model: null,
 });
 
 let diffEditor: monaco.editor.IStandaloneDiffEditor | null = null;
+const diffOptions = () => ({
+  renderSideBySide: setting<boolean>("diff.sideBySide"),
+  hideUnchangedRegions: { enabled: setting<boolean>("diff.collapseUnchanged") },
+});
 function getDiffEditor() {
   diffEditor ??= monaco.editor.createDiffEditor(diffEl, {
     ...editorOptions(),
+    ...diffOptions(),
     automaticLayout: true,
     originalEditable: false,
-    renderSideBySide: true,
   });
   return diffEditor;
+}
+
+const diffLabel = h("span", { class: "diff-label" });
+const diffBar = h(
+  "div",
+  { class: "diff-bar view-toolbar" },
+  diffLabel,
+  h("span", { class: "spacer" }),
+  iconButton("arrow-up", "Previous Difference (⇧F7)", () => goToDiff("previous")),
+  iconButton("arrow-down", "Next Difference (F7)", () => goToDiff("next")),
+  iconButton("split-horizontal", "Side-by-side / Unified", () => updateSetting("diff.sideBySide", !setting("diff.sideBySide"))),
+  iconButton("fold", "Collapse Unchanged Regions", () => updateSetting("diff.collapseUnchanged", !setting("diff.collapseUnchanged"))),
+);
+diffBar.hidden = true;
+diffEl.before(diffBar);
+
+export const diffActive = () => active?.kind === "diff";
+export function goToDiff(target: "next" | "previous") {
+  if (!diffEditor || !diffActive()) return;
+  diffEditor.goToDiff(target);
+  diffEditor.getModifiedEditor().focus();
 }
 
 onSettingsChange(() => {
   const opts = editorOptions();
   editor.updateOptions(opts);
-  diffEditor?.updateOptions(opts);
+  diffEditor?.updateOptions({ ...opts, ...diffOptions() });
   monaco.editor.setTheme(opts.theme!);
   for (const t of tabs) applyCodeStyle(t);
 });
@@ -268,7 +336,7 @@ export async function openFile(path: string, target?: Target) {
 export async function openDiffTab(path: string, originalText: string, title: string) {
   const model = await ensureModel(path);
   if (!model) return;
-  let tab = tabs.find((t) => t.kind === "diff" && t.path === path);
+  let tab = tabs.find((t) => t.kind === "diff" && !t.readonly && t.path === path);
   const original = monaco.editor.createModel(originalText, model.getLanguageId(), monaco.Uri.from({ scheme: "garnet-original", path, query: String(Date.now()) }));
   if (tab) {
     tab.original?.dispose();
@@ -289,6 +357,31 @@ export async function openDiffTab(path: string, originalText: string, title: str
     addTab(tab);
   }
   active = null;
+  activate(tab);
+}
+
+/// Read-only diff of two texts (commit, stash, branch comparison). `path` sets the language and tab tooltip.
+export function openTextDiff(key: string, path: string, left: string, right: string, title: string, label = "") {
+  let tab = tabs.find((t) => t.key === key);
+  if (!tab) {
+    const lang = languageFor(path);
+    const uri = (side: string) => monaco.Uri.from({ scheme: "garnet-rev", path, query: `${side}-${key}-${Date.now()}` });
+    tab = {
+      path,
+      kind: "diff",
+      title,
+      model: monaco.editor.createModel(right, lang, uri("new")),
+      original: monaco.editor.createModel(left, lang, uri("old")),
+      savedVersion: 0,
+      viewState: null,
+      el: h("div"),
+      readonly: true,
+      key,
+      label,
+    };
+    tab.savedVersion = tab.model.getAlternativeVersionId();
+    addTab(tab);
+  }
   activate(tab);
 }
 
@@ -384,7 +477,7 @@ export function activate(tab: Tab | null) {
   active = tab;
   welcomeEl.hidden = !!tab;
   editorEl.hidden = tab?.kind !== "file";
-  diffEl.hidden = tab?.kind !== "diff";
+  diffEl.hidden = diffBar.hidden = tab?.kind !== "diff";
   if (tab?.kind === "file") {
     editor.setModel(tab.model);
     if (tab.viewState) editor.restoreViewState(tab.viewState as monaco.editor.ICodeEditorViewState);
@@ -394,7 +487,9 @@ export function activate(tab: Tab | null) {
     cursorSlot.textContent = pos ? `${pos.lineNumber}:${pos.column}` : "";
   } else if (tab?.kind === "diff") {
     const d = getDiffEditor();
+    d.updateOptions({ readOnly: !!tab.readonly });
     d.setModel({ original: tab.original!, modified: tab.model });
+    diffLabel.textContent = tab.label || `${rel(tab.path)}: HEAD ↔ working copy`;
     if (tab.viewState) d.restoreViewState(tab.viewState as monaco.editor.IDiffEditorViewState);
     d.getModifiedEditor().focus();
   } else {

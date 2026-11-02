@@ -31,10 +31,59 @@ export interface GitStatusEntry {
   worktree: string;
 }
 
-export interface Hunk {
-  kind: "added" | "modified" | "deleted";
-  start: number;
-  end: number;
+export interface ChangedFile {
+  path: string;
+  oldPath: string | null;
+  status: string;
+  added: number | null;
+  deleted: number | null;
+  oldRev: string;
+  newRev: string;
+}
+
+export interface LogCommit {
+  hash: string;
+  parents: string[];
+  author: string;
+  email: string;
+  time: number;
+  refs: string;
+  subject: string;
+  col: number;
+  edges: { from: number; to: number; kind: 0 | 1 | 2 }[];
+}
+
+export interface CommitDetails {
+  hash: string;
+  parents: string[];
+  author: string;
+  email: string;
+  time: number;
+  committer: string;
+  commitTime: number;
+  body: string;
+  files: ChangedFile[];
+}
+
+export interface LogOpts {
+  branch?: string;
+  author?: string;
+  text?: string;
+  path?: string;
+  limit: number;
+}
+
+export interface OpState {
+  op: "" | "merge" | "rebase" | "cherry-pick" | "revert";
+  conflicts: string[];
+}
+
+export interface MergeInput {
+  symlink: boolean;
+  base: string | null;
+  ours: string | null;
+  theirs: string | null;
+  merged: string;
 }
 
 export const api = {
@@ -59,7 +108,14 @@ export const api = {
   gitStatus: (root: string) => invoke<GitStatusEntry[]>("git_status", { root }),
   gitBranch: (root: string) => invoke<string>("git_branch", { root }),
   gitShow: (root: string, path: string, rev: string) => invoke<string>("git_show", { root, path, rev }),
-  gitDiffHunks: (root: string, path: string) => invoke<Hunk[]>("git_diff_hunks", { root, path }),
+  gitFileAt: (root: string, rev: string, path: string) => invoke<string | null>("git_file_at", { root, rev, path }),
+  gitLog: (root: string, opts: LogOpts) => invoke<LogCommit[]>("git_log", { root, opts }),
+  gitDiffFiles: (root: string, spec: string[]) => invoke<ChangedFile[]>("git_diff_files", { root, spec }),
+  gitCommitDetails: (root: string, rev: string) => invoke<CommitDetails>("git_commit_details", { root, rev }),
+  gitStagePatch: (root: string, path: string, patch: string) => invoke<void>("git_stage_patch", { root, path, patch }),
+  gitOpState: (root: string) => invoke<OpState>("git_op_state", { root }),
+  gitMergeInput: (root: string, path: string) => invoke<MergeInput>("git_merge_input", { root, path }),
+  git: (root: string, ...args: string[]) => invoke<string>("git_run", { root, args }),
   gitStage: (root: string, paths: string[]) => invoke<void>("git_stage", { root, paths }),
   gitUnstage: (root: string, paths: string[]) => invoke<void>("git_unstage", { root, paths }),
   gitCommit: (root: string, message: string) => invoke<string>("git_commit", { root, message }),

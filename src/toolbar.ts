@@ -145,7 +145,7 @@ async function cloneRepo() {
 
 /// Branch switcher
 
-interface Branch {
+export interface Branch {
   name: string;
   remote: boolean;
   current: boolean;
@@ -153,7 +153,7 @@ interface Branch {
   track: string;
 }
 
-async function branches(): Promise<Branch[]> {
+export async function branches(): Promise<Branch[]> {
   const out = await git("for-each-ref", "--sort=-committerdate", "--format=%(refname)%09%(HEAD)%09%(upstream:short)%09%(upstream:track)", "refs/heads", "refs/remotes");
   return out
     .split("\n")
@@ -287,6 +287,8 @@ async function checkout(name: string, from?: string, create = false) {
 
 /// Worktree switcher
 
+export const listWorktrees = async (): Promise<Worktree[]> => parseWorktrees(await git("worktree", "list", "--porcelain"));
+
 worktreeBtn.onclick = async () => {
   const out = await git("worktree", "list", "--porcelain").catch((e) => (toast(String(e), "error"), ""));
   const trees = parseWorktrees(out);
@@ -305,40 +307,45 @@ worktreeBtn.onclick = async () => {
     ],
     onAccept: (item) => {
       if (item?.data === "new") return newWorktree();
-      const t = item?.data as { path: string; branch: string } | undefined;
+      const t = item?.data as Worktree | undefined;
       if (t) worktreeActions(t, trees[0]?.path);
     },
   });
 };
 
-function worktreeActions(t: { path: string; branch: string }, mainPath?: string) {
+export const openWorktree = (path: string, newWindow: boolean) => (newWindow ? invoke("open_new_window", { path }) : openProjectHere(path));
+
+export async function removeWorktree(t: Worktree) {
+  const ok = await ask(`Remove worktree ${t.path}? Its folder is deleted; the branch ${t.branch} is kept.`, { kind: "warning", okLabel: "Remove", cancelLabel: "Cancel" });
+  if (!ok) return;
+  await run("Remove worktree", () =>
+    git("worktree", "remove", t.path).catch(async (e) => {
+      if (await ask(`The worktree has local changes.\n\n${e}\n\nRemove anyway and discard them?`, { kind: "warning", okLabel: "Force Remove", cancelLabel: "Cancel" }))
+        return git("worktree", "remove", "--force", t.path);
+      return "kept";
+    }),
+  );
+}
+
+function worktreeActions(t: Worktree, mainPath?: string) {
   const isCurrent = t.path === state.project?.root;
   quickPick({
     placeholder: `${basename(t.path)} (${t.branch})`,
     items: [
       ...(isCurrent ? [] : [{ label: "Open in This Window", icon: "folder", data: "here" }]),
       { label: "Open in New Window", icon: "empty-window", data: "window" },
+      { label: "Reveal in Finder", icon: "go-to-file", data: "reveal" },
       ...(isCurrent || t.path === mainPath ? [] : [{ label: "Remove Worktree…", icon: "trash", data: "remove" }]),
     ],
-    onAccept: async (item) => {
-      if (item?.data === "here") openProjectHere(t.path);
-      if (item?.data === "window") invoke("open_new_window", { path: t.path });
-      if (item?.data === "remove") {
-        const ok = await ask(`Remove worktree ${t.path}? Its folder is deleted; the branch ${t.branch} is kept.`, { kind: "warning", okLabel: "Remove", cancelLabel: "Cancel" });
-        if (!ok) return;
-        run("Remove worktree", () =>
-          git("worktree", "remove", t.path).catch(async (e) => {
-            if (await ask(`The worktree has local changes.\n\n${e}\n\nRemove anyway and discard them?`, { kind: "warning", okLabel: "Force Remove", cancelLabel: "Cancel" }))
-              return git("worktree", "remove", "--force", t.path);
-            return "kept";
-          }),
-        );
-      }
+    onAccept: (item) => {
+      if (item?.data === "here" || item?.data === "window") openWorktree(t.path, item.data === "window");
+      if (item?.data === "reveal") api.revealInFinder(t.path);
+      if (item?.data === "remove") removeWorktree(t);
     },
   });
 }
 
-async function newWorktree() {
+export async function newWorktree() {
   const list = await branches();
   quickPick({
     placeholder: "Branch for the new worktree (or type a new branch name)",

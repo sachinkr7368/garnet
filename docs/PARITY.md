@@ -15,11 +15,11 @@ partial row is meant to become a GitHub issue.
 | Reload on external change, conflict prompt for dirty buffers | done | |
 | Auto-save (delay / focus change), trim trailing whitespace, final newline | done | |
 | Code style per language, .editorconfig, .rubocop.yml indentation width | done | |
-| Live templates / snippets | planned | |
-| HAML and Slim highlighting | planned | |
+| Live templates / snippets | partial | built-in Ruby, RSpec (in `*_spec.rb`) and ERB templates with tab stops; no user-defined templates yet |
+| HAML and Slim highlighting | done | Monarch grammars; Ruby lines embedded as Ruby; filter bodies (`:javascript`, `css:`) are not highlighted as their language |
 | Spell checking | planned | |
-| Semantic highlighting from ruby-lsp | planned | both themes already color the semantic token types; the request stays disabled for speed until the legend mapping lands |
-| Inlay hints | planned | |
+| Semantic highlighting from ruby-lsp | done | full + delta requests; colors for dark and light themes; toggle in Settings › Editor › General |
+| Inlay hints | done | whatever ruby-lsp provides (implicit rescue, hash shorthand); toggle in Settings |
 
 ## Navigation
 
@@ -32,9 +32,11 @@ partial row is meant to become a GitHub issue.
 | Find Usages (panel) and inline usages | done | |
 | Find in Files (regex, case, word, include globs) | done | |
 | Search Everywhere (files, symbols, actions), Go to Class, Go to Test, recent files (⌘E), recent locations (⌘⇧E), back/forward, switcher | done | history is per window session |
-| Breadcrumbs | planned | |
-| Type / call hierarchy | planned | ruby-lsp support is limited |
-| Replace in Files | planned | |
+| Breadcrumbs | done | above the editor, from document symbols; click to jump; toggle in Settings |
+| Go to Implementation (⌘⌥B) | partial | `textDocument/implementation` or type-hierarchy subtypes when the server has them; ruby-lsp has neither, so classes and modules use a project search for subclasses and include/extend/prepend sites; method overrides are not found |
+| Go to Type Declaration (⌃⇧B) | partial | needs a server with `typeDefinition` (e.g. Sorbet via `ruby.lspCommand`); ruby-lsp has none |
+| Type / call hierarchy views | planned | ruby-lsp support is limited |
+| Replace in Files (⌘⇧R) | done | preview with per-file/line/match include, Replace All / Selected, `$1`/`${name}` groups in regex mode, open buffers edited with undo, .gitignore respected; line-based (no multi-line matches); only listed matches when results are truncated at 5000 |
 
 ## Refactoring
 
@@ -88,10 +90,19 @@ partial row is meant to become a GitHub issue.
 | Feature | Status | Notes |
 | --- | --- | --- |
 | Changes panel, stage/unstage (file), commit, commit checks for errors | done | |
-| Diff view (Monaco diff editor), gutter change markers, blame current line | partial | gutter markers refresh on save, not while typing |
+| Changes as a directory tree: filter, status badges, +/- counts, Viewed marks (per branch, cleared when the file changes), expand/collapse all, group by changelist or directory | done | |
+| Compare with Branch (`git diff <base>...HEAD`, PR-style review tree) | done | diffs show merge base ↔ HEAD, not uncommitted edits |
+| Diff view: side-by-side / unified, collapse unchanged regions, next/previous difference (F7 / ⇧F7), read-only revision diffs | done | |
+| Live gutter change markers (buffer vs HEAD in a worker, debounced), click a marker: old text, Rollback, Stage This Hunk, previous/next | done | |
+| Rollback Lines (⌘⌥Z), Next/Previous Change (⌃⌥⇧↓/↑), blame current line | done | |
+| Partial staging in the Commit panel (stage/unstage single hunks) | done | hunk-level, not single lines; files with a clean filter (git-crypt, LFS) are staged whole only |
+| Git log tool window (⌘9): commit graph, filter by branch/user/path/text, commit details with changed files and diffs, file history (Project tree › Show History) | done | text filter matches commit messages, not hashes |
+| Log actions: copy revision, new branch/tag, cherry-pick, revert, reset soft/mixed/hard (confirmed) | done | |
+| Stashes: list, stash with message and untracked files, apply, pop, drop (confirmed), view a stash's changes | done | |
+| Merge conflicts (merge, rebase, cherry-pick, revert, stash pop): Conflicts list, 3-pane resolver (yours / result / theirs) with accept yours/theirs/both per chunk, mark resolved, abort/continue | done | symlink conflicts resolve by taking one side; binary files resolve with Accept Yours/Theirs |
 | Branch switcher: local/remote, checkout (stash or carry changes), new, rename, delete, fetch/pull/push, ahead/behind | done | |
-| Worktree switcher: list, open here / new window, create from branch, remove | done | toolbar shows the current worktree (main checkout: repo name + "main worktree" tag); count in the dropdown header |
-| Hunk/line staging, stash list UI, log/history view, merge conflict resolver, interactive rebase | planned | |
+| Worktrees: toolbar switcher and Commit panel section (folder, branch, dirty marker, current), open here / new window, create from branch, remove, reveal | done | toolbar shows the current worktree (main checkout: repo name + "main worktree" tag); count in the dropdown header |
+| Line-level staging, interactive rebase | planned | |
 
 ## GitHub
 
@@ -125,12 +136,13 @@ partial row is meant to become a GitHub issue.
 | --- | --- | --- |
 | ERB highlighting with embedded Ruby, ERB documents synced to ruby-lsp | done | |
 | JS/TS, CSS, JSON, HTML language features (Monaco workers) | partial | per-file only; no project-wide TS server |
-| HAML / Slim | planned | |
+| HAML / Slim | partial | highlighting only; no language server features |
 
 ## App
 
 | Feature | Status | Notes |
 | --- | --- | --- |
+| File writes limited to the open project and Garnet's config folder; never through symlinks | done | files outside the project (e.g. gem sources reached via Go to Declaration) cannot be saved |
 | Settings window (searchable tree, global + `.garnet/settings.json` overrides, JSON stays editable) | done | |
 | JetBrains macOS default keymap for every implemented action; keymap editor (search, rebind, conflict prompt, find by shortcut), VS Code preset, JetBrains keymap XML import, Help › Keymap Reference | done | XML import skips two-keystroke shortcuts and actions Garnet does not have |
 | Command palette, recent projects, session restore, multiple windows (one process per window) | done | |
@@ -146,14 +158,13 @@ Independent chunks that touch separate files, so they can be built in parallel:
 1. ~~**Test results tree**~~ done.
 2. **GitHub PR panel** — new `src/github-prs.ts` + `github_api` (exists): PR list (search API), CI status (check-runs), PR diff (Monaco diff per file), review comments as editor view zones, checkout PR branch (`git fetch origin pull/N/head`).
 3. **OAuth device flow** — `src-tauri/src/github.rs`: device code + polling; requires registering an OAuth app and embedding its client id.
-4. **Git history and stash** — new `src/gitlog.ts`: `git log --graph` view, commit details, stash list/apply/drop, hunk staging via `git apply --cached`.
-5. **Merge conflict resolver** — new `src/merge.ts`: three-way view using Monaco diff editors.
-6. **Breadcrumbs and Go to Implementation** — `src/editor.ts`/`src/lsp.ts`: breadcrumbs from document symbols; bind ⌘⌥B once ruby-lsp offers implementations.
-7. **Replace in Files** — `src/search.ts` + Rust `search.rs` replace command with preview.
+4. **Interactive rebase** — `src/gitlog.ts`: reorder/squash/fixup/reword from the log, driving `git rebase -i` with a generated todo via `GIT_SEQUENCE_EDITOR`.
+5. **Line-level staging** — `src/git.ts`: select lines inside a hunk in the Commit panel and build the patch from those lines only.
+6. **Method implementations** — `src/lsp.ts`: find overrides of a method in subtypes from the type hierarchy plus document symbols.
+7. **User live templates** — `src/languages/snippets.ts`: templates editable in Settings, per-language contexts.
 8. ~~**Breakpoint persistence and tracking**~~ done.
 9. ~~**Multiple debug sessions**~~ done.
 10. ~~**Docker run targets**~~ done.
-11. **HAML/Slim grammars and snippets** — `src/editor.ts` Monarch definitions, snippet provider.
+11. **Embedded filter highlighting** — `src/languages/haml.ts`/`slim.ts`: indentation-aware `:javascript`/`css:` bodies.
 12. **Database tools** — new Rust module + `src/db.ts`: read `config/database.yml`, connect via `psql`/`mysql`/`sqlite3` CLIs, table browser and SQL console.
 13. **Rails generators and i18n/partials navigation** — `src/rails.ts`.
-14. **Live gutter diff while typing** — `src/git.ts`: diff buffer against cached HEAD text in a worker.

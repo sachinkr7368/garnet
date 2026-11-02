@@ -56,10 +56,14 @@ const JETBRAINS_ACTIONS: Record<string, string> = {
   ActivateRunToolWindow: "runView", ActivateDebugToolWindow: "debugView", ActivateProblemsViewToolWindow: "problemsView",
   ActivateStructureToolWindow: "structureView", ActivateFindToolWindow: "findView", ActivateCommitToolWindow: "commitView",
   GotoAction: "commandPalette", ShowSettings: "settings", GotoTest: "goToTest", GotoRelated: "related",
-  FileStructurePopup: "fileStructure", Back: "back", Forward: "forward", FindInPath: "findInFiles", Find: "find",
+  FileStructurePopup: "fileStructure", Back: "back", Forward: "forward", FindInPath: "findInFiles", ReplaceInPath: "replaceInFiles",
+  GotoImplementation: "goToImplementation", GotoTypeDeclaration: "goToTypeDefinition", ToggleInlayHintsGloballyAction: "toggleInlayHints", Find: "find",
   Replace: "replace", FindNext: "findNext", FindPrevious: "findPrevious", CloseContent: "closeTab", NextTab: "nextTab",
   PreviousTab: "prevTab", Switcher: "switcher", HideAllWindows: "hideAll", GotoLine: "goToLine", SaveAll: "saveAll",
   SearchEverywhere: "searchEverywhere", "Annotate": "gitBlame", "Compare.SameVersion": "gitDiff",
+  ActivateVersionControlToolWindow: "gitLogView", "Vcs.ShowTabbedFileHistory": "fileHistory", "Vcs.RollbackChangedLines": "rollbackLines",
+  VcsShowNextChangeMarker: "nextChange", VcsShowPrevChangeMarker: "prevChange", "Git.Stash": "stash", "Git.Unstash": "unstash",
+  "Git.ResolveConflicts": "resolveConflicts", NextDiff: "diffNext", PreviousDiff: "diffPrev",
 };
 
 const KEY_NAMES: Record<string, string> = {

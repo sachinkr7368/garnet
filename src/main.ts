@@ -6,18 +6,22 @@ import { allCommands, commands, installKeyHandler, keyLabel, runCommand, showPal
 import { attachToProcess, debugView, evaluateSelection, gotoBreakpoint, loadBreakpoints, restartDebug, resume, step, stopAllSessions, stopDebug, toggleBreakpoint, toggleBreakpointEnabled, viewBreakpoints } from "./debug";
 import { rerunAll, rerunFailed, testResultsView } from "./testresults";
 import {
-  activeTab, allTabs, closeActive, closeAll, cycleTab, editor, events, handleFsChanged, monaco, navigateBack, navigateForward, openFile, recentFileList,
-  recentLocations, saveActive, saveAll,
+  activeTab, allTabs, closeActive, closeAll, cycleTab, diffActive, editor, events, goToDiff, handleFsChanged, monaco, navigateBack, navigateForward, openFile,
+  recentFileList, recentLocations, saveActive, saveAll,
 } from "./editor";
-import { blameCurrentLine, commitView, diffActiveFile, onGitChanged, refreshGit } from "./git";
+import {
+  blameCurrentLine, commitView, compareWithBranch, diffActiveFile, gitOpState, goToChange, onGitChanged, refreshGit, rollbackLines, showChangeAtCaret, stageHunkAtCaret,
+} from "./git";
+import { gitLogView, reload as reloadGitLog, showGitLog, stashChanges, unstashChanges } from "./gitlog";
+import { abortOperation, continueOperation, showConflicts } from "./merge";
 import { api, invoke } from "./ipc";
-import { fileStructurePopup, findUsages, lspLogView, lspReady, request, outlineView, problemsView, startLsp, stopLsp, workspaceSymbolsPopup } from "./lsp";
+import { fileStructurePopup, findUsages, goToImplementation, goToTypeDefinition, lspLogView, lspReady, request, outlineView, problemsView, startLsp, stopLsp, workspaceSymbolsPopup } from "./lsp";
 import { goToTest, loadRoutes, routesView, showRelated } from "./rails";
 import { importJetBrainsKeymap, showKeymapReference } from "./keymapref";
 import { editConfigurations, launch, loadRunConfigs, newConfig, pickConfiguration, rakeTask, rerun, runs, runTests, selected } from "./run";
-import { findInFiles, searchView } from "./search";
+import { findInFiles, replaceInFiles, searchView } from "./search";
 import { loadCodeStyle } from "./codestyle";
-import { addRecentProject, askTrust, checkTrust, isTrusted, loadSession, trustProject, loadSettings, recentProjects, saveSession, setting, settingsPath, toggleTheme } from "./settings";
+import { addRecentProject, askTrust, checkTrust, isTrusted, loadSession, trustProject, loadSettings, recentProjects, saveSession, setting, settingsPath, toggleTheme, updateSetting } from "./settings";
 import { openSettingsWindow } from "./settingsui";
 import { createGist, createPullRequest, githubSignIn, initToolbar, openOnGitHub, pullCurrent, pushCurrent, refreshToolbar, showBranches, showProjects, showWorktrees } from "./toolbar";
 import { abs, debounce, rel, state } from "./state";
@@ -40,6 +44,7 @@ bottom.add({ id: "tests", title: "Test Results", icon: "beaker", el: testResults
 bottom.add({ id: "find", title: "Find", icon: "search", el: searchView });
 bottom.add({ id: "problems", title: "Problems", icon: "warning", el: problemsView });
 bottom.add({ id: "debug", title: "Debug", icon: "debug-alt", el: debugView });
+bottom.add({ id: "gitlog", title: "Git", icon: "git-commit", el: gitLogView, onShow: () => reloadGitLog() });
 bottom.add({ id: "routes", title: "Routes", icon: "globe", el: routesView });
 bottom.add({ id: "log", title: "LSP Log", icon: "output", el: lspLogView });
 bottom.hide();
@@ -142,7 +147,7 @@ function searchEverywhere() {
   });
 }
 
-const VCS_ACTIONS = ["commitView", "push", "pull", "branches", "gitDiff", "gitBlame", "worktrees", "githubPr", "githubOpen"];
+const VCS_ACTIONS = ["commitView", "gitLogView", "push", "pull", "branches", "fileHistory", "gitDiff", "gitBlame", "compareBranch", "stash", "unstash", "resolveConflicts", "worktrees", "githubPr", "githubOpen"];
 function vcsPopup() {
   quickPick({
     placeholder: "VCS operations",
@@ -203,6 +208,8 @@ commands(
   { id: "goToLine", title: "Navigate: Go to Line…", key: "cmd+l", editor: true, run: editorAction("editor.action.gotoLine") },
   { id: "fileStructure", title: "Navigate: File Structure…", key: "cmd+f12", run: fileStructurePopup },
   E("goToDefinition", "Navigate: Go to Declaration", "cmd+b", "editor.action.revealDefinition"),
+  { id: "goToImplementation", title: "Navigate: Go to Implementation(s)", key: "cmd+alt+b", run: goToImplementation },
+  { id: "goToTypeDefinition", title: "Navigate: Go to Type Declaration", key: "ctrl+shift+b", run: goToTypeDefinition },
   E("peekDefinition", "Navigate: Quick Definition", "alt+space", "editor.action.peekDefinition"),
   { id: "findUsages", title: "Navigate: Find Usages", key: "alt+f7", run: findUsages },
   E("peekReferences", "Navigate: Show Usages", "cmd+alt+f7", "editor.action.referenceSearch.trigger"),
@@ -214,6 +221,7 @@ commands(
   E("findNext", "Find: Find Next", "cmd+g", "editor.action.nextMatchFindAction"),
   E("findPrevious", "Find: Find Previous", "cmd+shift+g", "editor.action.previousMatchFindAction"),
   { id: "findInFiles", title: "Find: Find in Files…", key: "cmd+shift+f", run: needProject(() => findInFiles()) },
+  { id: "replaceInFiles", title: "Find: Replace in Files…", key: "cmd+shift+r", run: needProject(replaceInFiles) },
   E("format", "Code: Reformat Code", "cmd+alt+l", "editor.action.formatDocument"),
   E("rename", "Refactor: Rename…", "shift+f6", "editor.action.rename"),
   E("codeActions", "Code: Show Context Actions", "alt+enter", "editor.action.quickFix"),
@@ -232,7 +240,7 @@ commands(
   { id: "debugView", title: "View: Debug", key: "cmd+5", run: () => bottom.toggle("debug") },
   { id: "problemsView", title: "View: Problems", key: "cmd+6", run: () => bottom.toggle("problems") },
   { id: "structureView", title: "View: Structure", key: "cmd+7", run: () => sidebar.toggle("structure") },
-  { id: "commitView", title: "VCS: Commit…", key: "cmd+k cmd+0 cmd+9", run: needProject(() => sidebar.show("commit")) },
+  { id: "commitView", title: "VCS: Commit…", key: "cmd+k cmd+0", run: needProject(() => sidebar.show("commit")) },
   { id: "terminalView", title: "View: Terminal", key: "alt+f12", run: needProject(() => bottom.toggle("terminal")) },
   { id: "newTerminal", title: "Terminal: New Terminal Tab", run: needProject(() => (bottom.show("terminal"), newTerminal())) },
   { id: "routesView", title: "Rails: Routes", run: needProject(() => (bottom.show("routes"), loadRoutes())) },
@@ -262,7 +270,7 @@ commands(
   { id: "evaluate", title: "Debug: Evaluate Expression…", key: "alt+f8", run: evaluateSelection },
   { id: "resume", title: "Debug: Resume Program", key: "cmd+alt+r f9", run: resume },
   { id: "stepOver", title: "Debug: Step Over", key: "f8", run: () => step("next") },
-  { id: "stepInto", title: "Debug: Step Into", key: "f7", run: () => step("stepIn") },
+  { id: "stepInto", title: "Debug: Step Into (Next Difference in a diff)", key: "f7", run: () => (diffActive() ? goToDiff("next") : step("stepIn")) },
   { id: "stepOut", title: "Debug: Step Out", key: "shift+f8", run: () => step("stepOut") },
   { id: "restartDebug", title: "Debug: Restart", key: "cmd+shift+f5", run: restartDebug },
   { id: "stopDebug", title: "Debug: Stop", key: "cmd+f2", run: stopDebug },
@@ -273,6 +281,21 @@ commands(
   { id: "gitDiff", title: "VCS: Show Diff for Current File", key: "cmd+alt+d", run: needProject(diffActiveFile) },
   { id: "gitBlame", title: "VCS: Annotate Current Line (Blame)", run: needProject(blameCurrentLine) },
   { id: "branches", title: "VCS: Branches…", run: needProject(showBranches) },
+  { id: "gitLogView", title: "View: Git (Log)", key: "cmd+9", run: needProject(() => bottom.toggle("gitlog")) },
+  { id: "fileHistory", title: "VCS: Show History for Current File", run: needProject(() => { const t = activeTab(); if (t) showGitLog(t.path); else showGitLog(""); }) },
+  { id: "stash", title: "VCS: Stash Changes…", run: needProject(stashChanges) },
+  { id: "unstash", title: "VCS: Unstash Changes…", run: needProject(unstashChanges) },
+  { id: "resolveConflicts", title: "VCS: Resolve Conflicts…", run: needProject(showConflicts) },
+  { id: "abortOperation", title: "VCS: Abort Merge / Rebase / Cherry-Pick / Revert", run: needProject(() => (gitOpState().op ? abortOperation(gitOpState().op) : toast("No merge, rebase, cherry-pick or revert in progress."))) },
+  { id: "continueOperation", title: "VCS: Continue Merge / Rebase / Cherry-Pick / Revert", run: needProject(() => (gitOpState().op ? continueOperation(gitOpState().op) : toast("No merge, rebase, cherry-pick or revert in progress."))) },
+  { id: "compareBranch", title: "VCS: Compare with Branch…", run: needProject(() => (sidebar.show("commit"), compareWithBranch())) },
+  { id: "rollbackLines", title: "VCS: Rollback Lines", key: "cmd+alt+z", editor: true, run: needProject(rollbackLines) },
+  { id: "nextChange", title: "VCS: Next Change", key: "ctrl+alt+shift+down", editor: true, run: needProject(() => goToChange(1)) },
+  { id: "prevChange", title: "VCS: Previous Change", key: "ctrl+alt+shift+up", editor: true, run: needProject(() => goToChange(-1)) },
+  { id: "stageHunk", title: "VCS: Stage Hunk at Caret", editor: true, run: needProject(stageHunkAtCaret) },
+  { id: "showChange", title: "VCS: Show Change at Caret", editor: true, run: needProject(showChangeAtCaret) },
+  { id: "diffNext", title: "Diff: Next Difference", run: () => goToDiff("next") },
+  { id: "diffPrev", title: "Diff: Previous Difference", key: "shift+f7", run: () => goToDiff("previous") },
   { id: "worktrees", title: "VCS: Worktrees…", run: needProject(showWorktrees) },
   { id: "githubSignIn", title: "GitHub: Sign In / Sign Out", run: githubSignIn },
   { id: "githubPr", title: "GitHub: Create Pull Request…", run: needProject(createPullRequest) },
@@ -280,6 +303,9 @@ commands(
   { id: "githubGist", title: "GitHub: Create Gist from Selection…", run: needProject(createGist) },
   { id: "restartLsp", title: "Ruby LSP: Restart", run: needProject(startLsp) },
   { id: "trustProject", title: "File: Trust Project…", run: needProject(askTrust) },
+  { id: "toggleBreadcrumbs", title: "View: Toggle Breadcrumbs", run: () => updateSetting("editor.breadcrumbs", !setting("editor.breadcrumbs")) },
+  { id: "toggleSemanticHighlighting", title: "View: Toggle Semantic Highlighting", run: () => updateSetting("editor.semanticHighlighting", !setting("editor.semanticHighlighting")) },
+  { id: "toggleInlayHints", title: "View: Toggle Inlay Hints", run: () => updateSetting("editor.inlayHints", !setting("editor.inlayHints")) },
   { id: "lspLog", title: "Ruby LSP: Show Log", run: () => bottom.show("log") },
 );
 

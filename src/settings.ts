@@ -17,7 +17,7 @@ export interface SettingDef {
   max?: number;
 }
 
-const LANGS = ["ruby", "erb", "yaml", "javascript", "typescript", "css", "scss", "json", "markdown", "html"];
+const LANGS = ["ruby", "erb", "haml", "slim", "yaml", "javascript", "typescript", "css", "scss", "json", "markdown", "html"];
 
 /// Every setting Garnet understands. The settings window is generated from this list.
 export const SCHEMA: SettingDef[] = [
@@ -39,6 +39,10 @@ export const SCHEMA: SettingDef[] = [
   { key: "editor.wordWrap", page: "Editor/General", label: "Soft wrap", type: "enum", options: ["off", "on", "bounded"], default: "off" },
   { key: "editor.minimap", page: "Editor/General", label: "Show minimap", type: "boolean", default: false },
   { key: "editor.renderWhitespace", page: "Editor/General", label: "Show whitespace", type: "enum", options: ["none", "selection", "boundary", "trailing", "all"], default: "selection" },
+  { key: "editor.breadcrumbs", page: "Editor/General", label: "Show breadcrumbs above the editor", type: "boolean", default: true },
+  { key: "editor.semanticHighlighting", page: "Editor/General", label: "Semantic highlighting (ruby-lsp)", type: "boolean", default: true, description: "Colors methods, parameters, locals and constants from ruby-lsp's analysis." },
+  { key: "editor.inlayHints", page: "Editor/General", label: "Inlay hints (ruby-lsp)", type: "boolean", default: true, description: "Shows implicit rescue classes and hash shorthand values." },
+  { key: "editor.liveTemplates", page: "Editor/General", label: "Live templates (Ruby, RSpec, ERB snippets)", type: "boolean", default: true },
   { key: "editor.trimTrailingWhitespace", page: "Editor/General", label: "Strip trailing whitespace on save", type: "boolean", default: true },
   { key: "editor.insertFinalNewline", page: "Editor/General", label: "Ensure a final newline on save", type: "boolean", default: true },
   { key: "editor.formatOnSave", page: "Editor/General", label: "Reformat Ruby files on save (RuboCop via ruby-lsp)", type: "boolean", default: false },
@@ -67,6 +71,12 @@ export const SCHEMA: SettingDef[] = [
 
   { key: "git.path", page: "Version Control/Git", label: "Path to git", type: "string", default: "git" },
   { key: "git.autoFetchMinutes", page: "Version Control/Git", label: "Auto-fetch every N minutes (0 = off)", type: "number", min: 0, max: 240, default: 0 },
+  { key: "git.logLimit", page: "Version Control/Git", label: "Commits to load in the Git log", type: "number", min: 100, max: 100000, default: 2000 },
+  { key: "git.liveGutter", page: "Version Control/Git", label: "Update gutter change markers while typing", type: "boolean", default: true },
+  { key: "git.groupBy", page: "Version Control/Git", label: "Group changed files by", type: "enum", options: ["changelist", "directory"], default: "changelist", description: "changelist: Staged / Changes sections; directory: one tree." },
+  { key: "git.stashIncludeUntracked", page: "Version Control/Git", label: "Include untracked files when stashing", type: "boolean", default: false },
+  { key: "diff.sideBySide", page: "Version Control/Diff", label: "Side-by-side diff (off = unified)", type: "boolean", default: true },
+  { key: "diff.collapseUnchanged", page: "Version Control/Diff", label: "Collapse unchanged regions", type: "boolean", default: true },
   { key: "git.checkProblemsBeforeCommit", page: "Version Control/Git", label: "Warn before committing files with errors", type: "boolean", default: true },
 
   { key: "ruby.versionManager", page: "Languages/Ruby", label: "Ruby version manager", type: "enum", options: ["auto", "mise", "rbenv", "asdf", "chruby", "rvm", "none"], default: "auto", description: "Used to start ruby-lsp and as the default for new run configurations. auto picks the first installed manager that reads the project's mise.toml, .tool-versions or .ruby-version (in that order), else the first installed of mise, rbenv, asdf, chruby, rvm." },

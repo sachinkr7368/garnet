@@ -105,13 +105,15 @@ export const SCHEMA: SettingDef[] = [
   { key: "terminal.fontSize", page: "Terminal", label: "Font size", type: "number", min: 8, max: 32, default: 13 },
   { key: "terminal.cursorBlink", page: "Terminal", label: "Blinking cursor", type: "boolean", default: true },
   { key: "terminal.env", page: "Terminal", label: "Environment variables", type: "map", default: {}, description: "Added to every terminal and run console." },
+
+  { key: "updates.checkForUpdates", page: "Updates", label: "Check for new Garnet releases (at most once a day)", type: "boolean", default: false, description: "Asks the GitHub Releases API for sachinkr7368/garnet and shows a notice with a link to the release page. Nothing is downloaded." },
 ];
 
 const DEFAULTS: Record<string, unknown> = Object.fromEntries(SCHEMA.map((d) => [d.key, d.default]));
 
 /// Keys that decide which programs run or with what environment. A cloned repo must not be able to set them,
 /// so they are read from the global settings only.
-const GLOBAL_ONLY = /^(ruby\.(lspCommand|lspEnabled|versionManager|useBundler)|git\.path|terminal\.(shell|env)|debug\.rdbgPath|testing\.|rails\.)/;
+const GLOBAL_ONLY = /^(updates\.|ruby\.(lspCommand|lspEnabled|versionManager|useBundler)|git\.path|terminal\.(shell|env)|debug\.rdbgPath|testing\.|rails\.)/;
 export const globalOnly = (key: string) => GLOBAL_ONLY.test(key);
 
 let globalValues: Record<string, unknown> = {};

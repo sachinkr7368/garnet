@@ -19,6 +19,10 @@ import { fileStructurePopup, findUsages, goToImplementation, goToTypeDefinition,
 import { goToTest, loadRoutes, routesView, showRelated } from "./rails";
 import "./db";
 import "./railsprovider";
+import { runRailsGenerator } from "./generators";
+import { loadMigrations, migrationsView } from "./migrations";
+import { sendToRailsConsole } from "./railsconsole";
+import { initUpdateCheck } from "./update";
 import { importJetBrainsKeymap, showKeymapReference } from "./keymapref";
 import { editConfigurations, launch, loadRunConfigs, newConfig, pickConfiguration, rakeTask, rerun, runs, runTests, selected } from "./run";
 import { findInFiles, replaceInFiles, searchView } from "./search";
@@ -28,7 +32,7 @@ import { openSettingsWindow } from "./settingsui";
 import { createGist, createPullRequest, githubSignIn, initToolbar, openOnGitHub, pullCurrent, pushCurrent, refreshToolbar, showBranches, showProjects, showWorktrees } from "./toolbar";
 import { abs, debounce, rel, state } from "./state";
 import { newTerminal, showTerminalPanel, terminals } from "./terminal";
-import { expandedPaths, initTree, refreshTree, revealInTree, treeView } from "./tree";
+import { expandedPaths, initTree, refreshTree, revealInTree, toggleRailsView, treeView } from "./tree";
 import { bottom, fuzzyScore, h, type PickItem, quickPick, setupResizers, sidebar, statusSlot, toast } from "./ui";
 
 type Json = any;
@@ -48,6 +52,7 @@ bottom.add({ id: "problems", title: "Problems", icon: "warning", el: problemsVie
 bottom.add({ id: "debug", title: "Debug", icon: "debug-alt", el: debugView });
 bottom.add({ id: "gitlog", title: "Git", icon: "git-commit", el: gitLogView, onShow: () => reloadGitLog() });
 bottom.add({ id: "routes", title: "Routes", icon: "globe", el: routesView });
+bottom.add({ id: "migrations", title: "Migrations", icon: "versions", el: migrationsView, onShow: () => loadMigrations() });
 bottom.add({ id: "log", title: "LSP Log", icon: "output", el: lspLogView });
 bottom.hide();
 setupResizers();
@@ -246,6 +251,10 @@ commands(
   { id: "terminalView", title: "View: Terminal", key: "alt+f12", run: needProject(() => bottom.toggle("terminal")) },
   { id: "newTerminal", title: "Terminal: New Terminal Tab", run: needProject(() => (bottom.show("terminal"), newTerminal())) },
   { id: "routesView", title: "Rails: Routes", run: needProject(() => (bottom.show("routes"), loadRoutes())) },
+  { id: "railsGenerator", title: "Rails: Run Rails Generator…", key: "cmd+alt+g", run: needProject(runRailsGenerator) },
+  { id: "migrationsView", title: "Rails: Migrations", run: needProject(() => bottom.show("migrations")) },
+  { id: "railsConsoleSend", title: "Rails: Send Selection to Rails Console", key: "cmd+shift+enter", editor: true, run: needProject(sendToRailsConsole) },
+  { id: "railsProjectView", title: "Rails: Toggle Rails Project View", run: needProject(() => (sidebar.show("project"), toggleRailsView())) },
   { id: "hidePanels", title: "View: Hide Active Tool Window", key: "shift+escape", run: () => bottom.hide() },
   { id: "runSelected", title: "Run: Run", key: "ctrl+r", run: needProject(() => (selected() ? launch(selected()!, "run") : editConfigurations())) },
   { id: "debugSelected", title: "Run: Debug", key: "ctrl+d", run: needProject(() => (selected() ? launch(selected()!, "debug") : editConfigurations())) },
@@ -416,6 +425,7 @@ async function boot() {
   installKeyHandler();
   initToolbar(switchProject);
   await loadSettings();
+  initUpdateCheck().catch(() => {});
   const smoke = await invoke<[string, boolean] | null>("smoke_target");
   const pending = smoke ? null : new URLSearchParams(location.search).get(PENDING_ROOT);
   const initial = pending ?? (await api.initialPath());

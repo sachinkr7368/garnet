@@ -712,6 +712,23 @@ mod tests {
         }
     }
 
+    /// Read-only check against the real API over TLS: `GARNET_LIVE_GITHUB_TOKEN=$(gh auth token) cargo test live -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_read_only_calls() {
+        let g = Gh { api: API.into(), web: WEB.into(), token: std::env::var("GARNET_LIVE_GITHUB_TOKEN").ok() };
+        assert!(!g.user().await.unwrap().is_empty());
+        let repo = g.rest("GET", "/repos/sachinkr7368/garnet", None, false, 1).await.unwrap();
+        assert_eq!(repo["full_name"], "sachinkr7368/garnet");
+        let pulls = g.rest("GET", "/repos/sachinkr7368/garnet/pulls?state=all&per_page=2", None, false, 2).await.unwrap();
+        assert_eq!(pulls.as_array().unwrap().len(), 4);
+        let readme = g.rest("GET", "/repos/sachinkr7368/garnet/contents/README.md", None, true, 1).await.unwrap();
+        assert!(readme.as_str().unwrap().contains("Garnet"));
+        let v = g.graphql("query($n: Int!) { repository(owner: \"sachinkr7368\", name: \"garnet\") { pullRequest(number: $n) { number } } }", json!({"n": 3})).await.unwrap();
+        assert_eq!(v["repository"]["pullRequest"]["number"], 3);
+        assert!(g.rest("GET", "/repos/sachinkr7368/definitely-missing-repo", None, false, 1).await.unwrap_err().contains("404"));
+    }
+
     #[test]
     fn error_messages_and_link_parsing() {
         let mut h = HeaderMap::new();

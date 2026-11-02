@@ -102,6 +102,42 @@ pub async fn write_file(app: AppHandle, index: State<'_, Index>, path: String, c
     write_new(Path::new(&path), &content, false)
 }
 
+/// The only export formats; the extension is enforced on the path the save dialog returns.
+fn export_extension(format: &str) -> Result<&'static str, String> {
+    match format {
+        "csv" => Ok("csv"),
+        "json" => Ok("json"),
+        _ => Err(format!("unsupported export format {format}")),
+    }
+}
+
+fn check_export_path(path: &Path, ext: &str) -> Result<(), String> {
+    let ok = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(ext));
+    ok.then_some(()).ok_or_else(|| format!("exports must be saved as .{ext} files"))
+}
+
+/// Asks for the destination in a native save dialog (opened here, never a path from the webview) and writes the
+/// export there with the same symlink and `..` checks as `write_file`. Returns the path, or None when cancelled.
+#[tauri::command]
+pub async fn export_file(app: AppHandle, format: String, default_name: String, content: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let ext = export_extension(&format)?;
+    let name = Path::new(&default_name).file_name().and_then(|n| n.to_str()).unwrap_or("export").to_string();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog().file().set_file_name(&name).add_filter(ext.to_uppercase(), &[ext]).blocking_save_file()
+    })
+    .await
+    .map_err(e2s)?;
+    let Some(picked) = picked else { return Ok(None) };
+    let path = picked.into_path().map_err(e2s)?;
+    check_export_path(&path, ext)?;
+    let dir = path.parent().ok_or("invalid export path")?;
+    let text = path.to_string_lossy().into_owned();
+    check_write(&text, &[fs::canonicalize(dir).map_err(e2s)?], false)?;
+    write_new(&path, &content, false)?;
+    Ok(Some(text))
+}
+
 #[tauri::command]
 pub async fn create_path(app: AppHandle, index: State<'_, Index>, path: String, dir: bool) -> Result<(), String> {
     check_write(&path, &write_roots(&app, &index), false)?;
@@ -185,5 +221,17 @@ mod tests {
         assert!(write_new(&proj.join("link.rb"), "pwned", false).is_err());
         assert_eq!(fs::read_to_string(outside.join("secret")).unwrap(), "keep");
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn exports_only_allow_csv_and_json_extensions() {
+        assert_eq!(export_extension("csv").unwrap(), "csv");
+        assert_eq!(export_extension("json").unwrap(), "json");
+        assert!(export_extension("sh").is_err());
+        assert!(check_export_path(Path::new("/tmp/out.csv"), "csv").is_ok());
+        assert!(check_export_path(Path::new("/tmp/OUT.JSON"), "json").is_ok());
+        assert!(check_export_path(Path::new("/tmp/out.json"), "csv").is_err());
+        assert!(check_export_path(Path::new("/tmp/out.csv.sh"), "csv").is_err());
+        assert!(check_export_path(Path::new("/tmp/out"), "csv").is_err());
     }
 }

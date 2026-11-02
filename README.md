@@ -15,7 +15,13 @@ Garnet has no accounts, no subscription, no telemetry, no licence checks and
 makes no network calls on its own. The only network traffic is what you
 trigger: GitHub actions (sign-in, pull requests, gists, clone, fetch/pull/push)
 and commands you run yourself (for example `gem install ruby-lsp`). Your GitHub
-token is stored in the macOS Keychain, never in a settings file.
+token and database passwords are stored in the macOS Keychain, never in a
+settings file.
+
+The update check is off by default. Turn it on in Settings › Updates ("Check for
+new Garnet releases") and Garnet asks the GitHub Releases API at most once a
+day, then shows "Garnet X is available" with a link to the release page. It
+never downloads anything.
 
 ## Project trust
 
@@ -62,10 +68,11 @@ Feature status compared with RubyMine. The full checklist lives in
 | Git: changes panel, stage/unstage, commit, diff view, gutter markers, blame, branch/worktree switchers, fetch/pull/push | Done |
 | GitHub: sign in (gh token or PAT, Keychain), create PR, open on GitHub, gists, clone | Done |
 | GitHub PR list/review panel, OAuth device flow | Planned |
-| Rails navigation: related files (model/controller/views/tests/migrations), routes browser | Done |
+| Rails: related files, routes browser, generators dialog, partial / i18n / route / association navigation, Rails project view, migrations panel, send to Rails console | Done |
+| Database tool window (PostgreSQL, MySQL, SQLite): database.yml connections, schema browser, table viewer, SQL console with read-only and destructive-statement safety | Done |
 | Settings window (searchable, global + per-project), keymap editor with presets, command palette, recent projects, session restore | Done |
 | Light / Dark / System theme (follows macOS live), Toggle Theme in the toolbar | Done |
-| Database tools, HAML/Slim, Docker run targets, refactorings beyond rename | Planned |
+| Refactorings beyond rename | Planned |
 
 ## Install
 

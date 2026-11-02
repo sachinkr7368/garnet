@@ -88,6 +88,8 @@ export const SCHEMA: SettingDef[] = [
   { key: "rails.environment", page: "Rails", label: "RAILS_ENV for Rails server/console/tasks", type: "string", default: "development" },
   { key: "rails.serverPort", page: "Rails", label: "Default Rails server port", type: "number", min: 1, max: 65535, default: 3000 },
   { key: "rails.serverBinding", page: "Rails", label: "Rails server binding", type: "string", default: "127.0.0.1" },
+  { key: "database.autoLimit", page: "Database", label: "Add LIMIT to console SELECTs without one", type: "boolean", default: true, description: "Default for the Limit toggle in each SQL console." },
+  { key: "database.autoLimitRows", page: "Database", label: "Auto LIMIT rows", type: "number", min: 1, max: 100000, default: 500 },
 
   { key: "testing.rspecRunner", page: "Testing", label: "RSpec runner", type: "enum", options: ["auto", "bundle exec rspec", "bin/rspec", "rspec"], default: "auto" },
   { key: "testing.rspecArgs", page: "Testing", label: "Extra RSpec arguments", type: "string", default: "" },
@@ -104,13 +106,15 @@ export const SCHEMA: SettingDef[] = [
   { key: "terminal.fontSize", page: "Terminal", label: "Font size", type: "number", min: 8, max: 32, default: 13 },
   { key: "terminal.cursorBlink", page: "Terminal", label: "Blinking cursor", type: "boolean", default: true },
   { key: "terminal.env", page: "Terminal", label: "Environment variables", type: "map", default: {}, description: "Added to every terminal and run console." },
+
+  { key: "updates.checkForUpdates", page: "Updates", label: "Check for new Garnet releases (at most once a day)", type: "boolean", default: false, description: "Asks the GitHub Releases API for sachinkr7368/garnet and shows a notice with a link to the release page. Nothing is downloaded." },
 ];
 
 const DEFAULTS: Record<string, unknown> = Object.fromEntries(SCHEMA.map((d) => [d.key, d.default]));
 
 /// Keys that decide which programs run or with what environment. A cloned repo must not be able to set them,
 /// so they are read from the global settings only.
-const GLOBAL_ONLY = /^(ruby\.(lspCommand|lspEnabled|versionManager|useBundler)|git\.path|github\.|terminal\.(shell|env)|debug\.rdbgPath|testing\.|rails\.)/;
+const GLOBAL_ONLY = /^(updates\.|ruby\.(lspCommand|lspEnabled|versionManager|useBundler)|git\.path|github\.|terminal\.(shell|env)|debug\.rdbgPath|testing\.|rails\.)/;
 export const globalOnly = (key: string) => GLOBAL_ONLY.test(key);
 
 let globalValues: Record<string, unknown> = {};

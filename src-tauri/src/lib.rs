@@ -1,4 +1,5 @@
 mod dap;
+mod db;
 mod env;
 mod fsops;
 mod git;
@@ -88,6 +89,7 @@ pub fn run() {
         .manage(lsp::Lsp::default())
         .manage(dap::Dap::default())
         .manage(watch::Watch::default())
+        .manage(db::Db::default())
         .menu(menu)
         .on_menu_event(|app, event| {
             let _ = app.emit("menu", event.id().0.clone());
@@ -96,6 +98,7 @@ pub fn run() {
             fsops::list_dir,
             fsops::read_file,
             fsops::write_file,
+            fsops::export_file,
             fsops::create_path,
             fsops::rename_path,
             fsops::delete_path,
@@ -142,6 +145,7 @@ pub fn run() {
             github::github_sign_out,
             github::github_api,
             github::open_url,
+            github::latest_release,
             github::open_new_window,
             git::git_set_path,
             git::git_set_trusted,
@@ -156,6 +160,16 @@ pub fn run() {
             project::smoke_target,
             project::smoke_finish,
             project::uptime_ms,
+            db::db_connect,
+            db::db_disconnect,
+            db::db_query,
+            db::db_cancel,
+            db::db_schema,
+            db::db_table_page,
+            db::db_password_set,
+            db::db_password_delete,
+            db::db_password_exists,
+            db::db_detect,
         ])
         .build(tauri::generate_context!())
         .expect("failed to start Garnet");
@@ -165,6 +179,7 @@ pub fn run() {
             app.state::<pty::Ptys>().kill_all();
             app.state::<lsp::Lsp>().stop();
             app.state::<dap::Dap>().stop();
+            tauri::async_runtime::block_on(app.state::<db::Db>().close_all());
         }
     });
 }

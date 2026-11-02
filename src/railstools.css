@@ -1,0 +1,81 @@
+.view-toolbar .icon-btn.active {
+  background: var(--selected);
+  color: var(--text);
+}
+.rails-tree .tree-detail {
+  font-size: 11px;
+}
+.migrations-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.migrations {
+  overflow: auto;
+  flex: 1;
+}
+.migration-row {
+  display: grid;
+  grid-template-columns: 52px 140px minmax(200px, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 1px 10px;
+  font: 12px/22px ui-monospace, Menlo, monospace;
+  cursor: default;
+}
+.migration-row:hover {
+  background: var(--hover);
+}
+.migration-status {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+.migration-status.up {
+  color: var(--added);
+}
+.migration-status.down {
+  color: var(--warn);
+}
+.migration-version {
+  color: var(--dim);
+}
+.migration-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.migration-actions {
+  display: flex;
+  gap: 2px;
+  visibility: hidden;
+}
+.migration-row:hover .migration-actions {
+  visibility: visible;
+}
+.gen-dialog {
+  width: min(760px, 92vw);
+}
+.gen-form {
+  max-height: 70vh;
+  overflow: auto;
+}
+.gen-output {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 6px 8px;
+  background: var(--input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font: 12px/18px ui-monospace, Menlo, monospace;
+  white-space: pre-wrap;
+}
+.gen-output:empty {
+  display: none;
+}
+.update-banner a {
+  color: var(--accent);
+  cursor: pointer;
+}

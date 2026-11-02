@@ -51,11 +51,15 @@ partial row is meant to become a GitHub issue.
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Related files (model, controller, views, helpers, specs/tests, factories, migrations) | done | naive inflector; irregular plurals beyond a short list fall back to `s` |
+| Related files (model, controller, views, helpers, specs/tests, factories, migrations) | done | ActiveSupport's default inflection rules ported as data (plurals, singulars, irregulars, uncountables); app-specific `inflect` blocks in config/initializers are not read |
 | Routes browser (`bin/rails routes --expanded`), jump to action | done | |
 | Rails server / console / rake run configurations, RAILS_ENV and port defaults | done | |
-| Generators UI (`rails g` with preview) | planned | |
-| Partial and i18n key navigation from ERB | planned | |
+| Run Rails Generator (⌘⌥G): generators from `bin/rails generate --help`, options form per generator, `--pretend` preview, run, open created files | done | |
+| Navigation (⌘-click / ⌘B): `render` partials (incl. `partial:` and `render @posts`), i18n keys (`t(".key")` lazy lookups in views/partials/controller actions, `t("a.b")`) to the locale YAML entry, `routes.rb` entries (strings, `resources`, `only:`, member routes, `namespace`/`scope module:`) to controller actions, controller actions to their views, `has_many`/`belongs_to`/`has_one`/HABTM (incl. `class_name:`) and factories (incl. `class:`) to models | done | locale files are read from `config/locales/**`; keys built with interpolation or passed as variables aren't resolved |
+| i18n hover (translation in every locale) and missing-key warnings in the default locale | done | calls with `default:` or `scope:` are not flagged |
+| Rails project view (Models, Controllers, Views, Helpers, Mailers, Jobs, Migrations, Specs/Tests) | done | toggle in the Project tool window toolbar or Rails: Toggle Rails Project View |
+| Migrations panel: `db:migrate:status` (multi-db), migrate / rollback / redo / up / down with confirmation, open file | done | uses Settings › Rails RAILS_ENV |
+| Send Selection to Rails Console (⌘⇧↩) | done | starts the Rails console configuration when none is running |
 | Model/schema diagram | planned | |
 
 ## Testing
@@ -120,7 +124,11 @@ partial row is meant to become a GitHub issue.
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Database browser / SQL console / schema view | planned | |
+| Connections from `config/database.yml` per environment (ERB never executed: only `ENV[...]`/`ENV.fetch` with literal defaults are resolved, the rest is left for you to fill in) plus manual connections; PostgreSQL, MySQL, SQLite | done | connection details in Garnet's config dir, passwords only in the macOS Keychain; nothing connects until you click Connect |
+| Schema browser (schemas, tables, views, columns, indexes, foreign keys), table data viewer (paging, sort, WHERE filter) | done | |
+| SQL console: Monaco SQL with table/column completion, run statement at cursor or selection (⌘↩), results grid, cancel, query history, export to CSV/JSON | done | grid cells are read-only |
+| Safety: read-only connections (default for non-development environments and non-local hosts) run in read-only transactions / `query_only` and Garnet blocks writes; confirmation for UPDATE/DELETE without WHERE, DROP, TRUNCATE, ALTER; automatic LIMIT 500 on SELECT (toggle); per-connection colour tag | done | |
+| Editing cell values in the grid, ER diagram | planned | |
 
 ## Docker and remote
 
@@ -148,7 +156,7 @@ partial row is meant to become a GitHub issue.
 | Command palette, recent projects, session restore, multiple windows (one process per window) | done | |
 | Light / dark / system theme, UI font size, zoom | done | System (default) follows macOS live; Toggle Theme in the toolbar and palette; chrome, editor, diff, terminal ANSI and semantic-token colors switch without restart; contrast checked by tests (text ≥ 4.5:1) |
 | Signed and notarized releases | partial | workflow supports it once Apple secrets are added |
-| Auto-update check (opt-in) | planned | |
+| Update check (opt-in, Settings › Updates): at most once a day against GitHub Releases, notice with a link, never downloads | done | |
 | Plugin API | planned | |
 
 ## Work packages for follow-up
@@ -166,5 +174,5 @@ Independent chunks that touch separate files, so they can be built in parallel:
 9. ~~**Multiple debug sessions**~~ done.
 10. ~~**Docker run targets**~~ done.
 11. **Embedded filter highlighting** — `src/languages/haml.ts`/`slim.ts`: indentation-aware `:javascript`/`css:` bodies.
-12. **Database tools** — new Rust module + `src/db.ts`: read `config/database.yml`, connect via `psql`/`mysql`/`sqlite3` CLIs, table browser and SQL console.
-13. **Rails generators and i18n/partials navigation** — `src/rails.ts`.
+12. ~~**Database tools**~~ done.
+13. ~~**Rails generators and i18n/partials navigation**~~ done.

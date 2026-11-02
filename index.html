@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Garnet</title>
+  </head>
+  <body>
+    <div id="app">
+      <header id="toolbar"><div id="switchers"></div><span class="spacer"></span><div id="run-widget"></div></header>
+      <div id="main">
+        <nav id="toolstrip"></nav>
+        <aside id="sidebar"><div id="sidebar-head"></div><div id="sidebar-body"></div></aside>
+        <div class="resizer vertical" id="sidebar-resizer"></div>
+        <section id="center">
+          <div id="topbar"><div id="tabs"></div></div>
+          <div id="editor-area">
+            <div id="welcome"></div>
+            <div id="editor"></div>
+            <div id="diff-editor"></div>
+          </div>
+          <div class="resizer horizontal" id="bottom-resizer"></div>
+          <div id="bottom"><div id="bottom-head"></div><div id="bottom-body"></div></div>
+        </section>
+      </div>
+      <footer id="statusbar"></footer>
+    </div>
+    <div id="overlay-root"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

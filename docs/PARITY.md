@@ -62,7 +62,7 @@ partial row is meant to become a GitHub issue.
 | Gutter run/debug icons for `describe`/`context`/`it`/`test`/`def test_` | done | |
 | Run test at cursor, file, all; RSpec and Minitest (Rails and plain) | done | |
 | Clickable `file:line` in output, rerun last | done | |
-| Test results tree (per-example pass/fail, rerun failed) | planned | output is a console today |
+| Test results tree: per-example pass/fail/ignored, durations, failure message and clickable backtrace, rerun failed / one / all, show passed / ignored filters, progress bar, gutter icons with the last result | done | RSpec via a formatter Garnet ships, Minitest via a reporter plugin on `RUBYLIB` (both kept in Garnet's state dir); Minitest progress is indeterminate when filtered by line or name; runs inside Docker show the console only |
 | Coverage | planned | |
 
 ## Run and debug
@@ -77,10 +77,10 @@ partial row is meant to become a GitHub issue.
 | Step over/into/out, pause, resume, restart, stop | done | |
 | Frames, variables tree (locals, ivars via `self`, expandable objects), watches, evaluate console, inline values | done | |
 | Attach to rdbg (port, host:port, socket) incl. Docker path mapping | done | |
-| Breakpoints follow edits and persist across restarts | partial | they keep their line numbers and are kept for the session only |
-| Several debug sessions at the same time | planned | one debug session at a time (any number of plain runs) |
-| Hit-count breakpoints, exception breakpoint conditions | planned | |
-| Run configurations inside Docker / docker compose | planned | attach works today |
+| Breakpoints follow edits and persist across restarts, enable/disable, Breakpoints dialog (⌘⇧F8) with conditions, logpoints and pass counts | done | stored per project in Garnet's state dir (`breakpoints.json`), not in the repo |
+| Several debug sessions at the same time | done | session tabs in the Debug panel; threads, frames, variables, console and toolbar follow the selected session; breakpoints apply to all sessions |
+| Hit-count breakpoints, exception breakpoint conditions | partial | pass counts and per-session hit counters work (Garnet-side, rdbg has no hit conditions); exception breakpoint conditions are planned |
+| Run configurations inside Docker / docker compose | done | `docker compose run` or `exec` in a service; debug via rdbg on a port published on 127.0.0.1 only (exec refuses ports published on all interfaces) or a shared-volume socket, with path mapping; option shows why it is unavailable when Docker is missing |
 
 ## Version control
 
@@ -124,7 +124,8 @@ partial row is meant to become a GitHub issue.
 | Feature | Status | Notes |
 | --- | --- | --- |
 | Attach debugger to rdbg in a container (`localfsMap`) | done | |
-| Docker / compose run targets, remote interpreters | planned | |
+| Docker / compose run targets | done | see Run and debug |
+| Remote interpreters (SSH), test results tree for runs inside Docker | planned | |
 
 ## ERB, HAML, JavaScript
 
@@ -151,16 +152,16 @@ partial row is meant to become a GitHub issue.
 
 Independent chunks that touch separate files, so they can be built in parallel:
 
-1. **Test results tree** — new `src/testresults.ts`; run RSpec with `--format json` / Minitest reporter output, render pass/fail tree, rerun failed. Hooks into `run.ts` `launch` only.
+1. ~~**Test results tree**~~ done.
 2. **GitHub PR panel** — new `src/github-prs.ts` + `github_api` (exists): PR list (search API), CI status (check-runs), PR diff (Monaco diff per file), review comments as editor view zones, checkout PR branch (`git fetch origin pull/N/head`).
 3. **OAuth device flow** — `src-tauri/src/github.rs`: device code + polling; requires registering an OAuth app and embedding its client id.
 4. **Interactive rebase** — `src/gitlog.ts`: reorder/squash/fixup/reword from the log, driving `git rebase -i` with a generated todo via `GIT_SEQUENCE_EDITOR`.
 5. **Line-level staging** — `src/git.ts`: select lines inside a hunk in the Commit panel and build the patch from those lines only.
 6. **Breadcrumbs and Go to Implementation** — `src/editor.ts`/`src/lsp.ts`: breadcrumbs from document symbols; bind ⌘⌥B once ruby-lsp offers implementations.
 7. **Replace in Files** — `src/search.ts` + Rust `search.rs` replace command with preview.
-8. **Breakpoint persistence and tracking** — `src/debug.ts`: decorations with stickiness to follow edits, persist per project in `.garnet/breakpoints.json`; hit-count breakpoints.
-9. **Multiple debug sessions** — `src-tauri/src/dap.rs` keyed sessions + `src/debug.ts` session tabs.
-10. **Docker run targets** — `src/run.ts`: config type for `docker compose run/exec` with rdbg port publishing and automatic `localfsMap`.
+8. ~~**Breakpoint persistence and tracking**~~ done.
+9. ~~**Multiple debug sessions**~~ done.
+10. ~~**Docker run targets**~~ done.
 11. **HAML/Slim grammars and snippets** — `src/editor.ts` Monarch definitions, snippet provider.
 12. **Database tools** — new Rust module + `src/db.ts`: read `config/database.yml`, connect via `psql`/`mysql`/`sqlite3` CLIs, table browser and SQL console.
 13. **Rails generators and i18n/partials navigation** — `src/rails.ts`.

@@ -169,6 +169,13 @@ export function rerunArgs(kind: TestKind, rails: boolean, results: TestResult[],
   return `-e ${quote(`${files.map((f) => `require File.expand_path(${JSON.stringify(f)})`).join("; ")}`)} -- -n ${quote(pattern)}`;
 }
 
+/// RUBYLIB for a Minitest run: Garnet's reporter dir in front of the value the process would otherwise get
+/// (`inherited` in precedence order, e.g. config env, then terminal env, then the login shell's).
+export function prependRubylib(dir: string, ...inherited: (string | undefined)[]): string {
+  const base = inherited.find((v) => v !== undefined && v.trim() !== "") ?? "";
+  return [dir, ...base.split(":").filter((p) => p && p !== dir)].join(":");
+}
+
 /// Minitest with a line or name filter reports the unfiltered test count; don't trust it.
 export const plannedUnreliable = (kind: TestKind, args: string) => kind === "minitest" && /:\d+|(^|\s)(-n|--name)\b/.test(args);
 

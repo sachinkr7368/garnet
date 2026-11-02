@@ -310,7 +310,7 @@ export async function launch(cfg: RunConfig, mode: "run" | "debug", opts: { glob
     if ("error" in checked) return toast(`Not debugging "${cfg.name}": ${checked.error}`, "error");
     attachPort = checked.port;
   }
-  const test = docker ? null : await prepareTestRun(cfg);
+  const test = docker ? null : await prepareTestRun(cfg, env);
   const command = buildCommand(cfg, { debug: mode === "debug" ? { port, globalRdbg: opts.globalRdbg } : undefined, testArgs: test?.args, envNames: Object.keys(env) });
   const title = mode === "debug" ? `${cfg.name} (debug)` : cfg.name;
   const item = runInPanel(title, command, {

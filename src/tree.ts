@@ -4,6 +4,7 @@ import { api, type DirEntry } from "./ipc";
 import { globToRegExp, setting } from "./settings";
 import { basename, dirname, rel, state } from "./state";
 import { contextMenu, h, icon, iconButton, inputBox, toast } from "./ui";
+import { railsTreeEl, refreshRailsTree } from "./railsview";
 
 interface Node {
   entry: DirEntry;
@@ -15,6 +16,18 @@ interface Node {
 }
 
 export const treeEl = h("div", { class: "tree", tabIndex: 0 });
+const railsToggle = iconButton("list-tree", "Rails View (Models, Controllers, Views, …)", () => toggleRailsView());
+let railsMode = false;
+railsToggle.hidden = true;
+railsTreeEl.hidden = true;
+
+export function toggleRailsView(on = !railsMode) {
+  railsMode = on && !!state.project?.rails;
+  railsToggle.classList.toggle("active", railsMode);
+  treeEl.hidden = railsMode;
+  railsTreeEl.hidden = !railsMode;
+  if (railsMode) refreshRailsTree();
+}
 export const treeView = h(
   "div",
   { class: "tree-view" },
@@ -25,8 +38,10 @@ export const treeView = h(
     iconButton("new-folder", "New Folder", () => newPath(true)),
     iconButton("refresh", "Refresh", () => refreshTree()),
     iconButton("collapse-all", "Collapse All", () => collapseAll()),
+    railsToggle,
   ),
   treeEl,
+  railsTreeEl,
 );
 
 const nodes = new Map<string, Node>();
@@ -109,6 +124,7 @@ function select(path: string) {
 
 export async function initTree(expanded: string[] = []) {
   const project = state.project!;
+  railsToggle.hidden = !project.rails;
   nodes.clear();
   rootNode = createNode({ name: project.name, path: project.root, dir: true }, 0);
   rootNode.row.hidden = true;
@@ -126,6 +142,7 @@ export function expandedPaths(): string[] {
 }
 
 export async function refreshTree(paths?: string[]) {
+  if (railsMode) refreshRailsTree();
   const dirs = paths
     ? new Set(paths.map(dirname))
     : new Set([...nodes.values()].filter((n) => n.expanded).map((n) => n.entry.path));

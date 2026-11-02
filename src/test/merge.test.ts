@@ -12,11 +12,14 @@ vi.mock("../ipc", () => ({
     }),
     gitFileAt: vi.fn(async (_r: string, rev: string) => (rev === ":2" ? state.ours : state.theirs)),
     gitOpState: vi.fn(async () => ({ op: state.op, conflicts: state.conflicts })),
+    gitMergeInput: vi.fn(async () => ({ symlink: false, nonUtf8: true, base: "caf\ufffd\n", ours: "a\n", theirs: "b\n", merged: "" })),
+    writeFile: vi.fn(async () => {}),
   },
 }));
 
-const { ask } = await import("@tauri-apps/plugin-dialog");
-const { abortOperation, acceptSide, continueOperation, runGitOp } = await import("../merge");
+const { ask, message } = await import("@tauri-apps/plugin-dialog");
+const { abortOperation, acceptSide, continueOperation, openResolver, runGitOp } = await import("../merge");
+const { api } = await import("../ipc");
 const { state: appState } = await import("../state");
 
 beforeEach(() => {
@@ -77,5 +80,18 @@ describe("runGitOp", () => {
     const overlay = document.getElementById("overlay-root")!;
     expect(overlay.querySelector(".conflicts-dialog")).toBeNull();
     expect(overlay.querySelector(".toast.error")?.textContent).toContain("Revert failed");
+  });
+});
+
+describe("non-UTF-8 conflicts (B14)", () => {
+  it("offers only whole-side resolution, so the bytes are never rewritten as text", async () => {
+    vi.mocked(message).mockResolvedValueOnce("Accept Yours" as never);
+    expect(await openResolver("latin1.txt")).toBeNull();
+    expect(vi.mocked(message).mock.calls[0][0]).toContain("not UTF-8");
+    expect(calls).toEqual([
+      ["checkout", "--ours", "--", "latin1.txt"],
+      ["add", "--", "latin1.txt"],
+    ]);
+    expect(api.writeFile).not.toHaveBeenCalled();
   });
 });

@@ -11,8 +11,8 @@ import { symbolPath } from "./breadcrumbs";
 import { snippetsFor } from "./languages/snippets";
 import { replaceInFiles, searchView } from "./search";
 import { decodeTokens, ruleFor, SEMANTIC_RULES } from "./semantic";
-import { commitView, gutterHunks, refreshGit, updateGutterNow } from "./git";
-import { logState, showGitLog } from "./gitlog";
+import { commitView, gutterHunks, refreshGit, rollbackDialog, updateGutterNow } from "./git";
+import { logState, setLogMode, showGitLog } from "./gitlog";
 import { continueOperation, openResolver, runGitOp } from "./merge";
 import { stagePatch } from "./difflogic";
 import { api, Channel, invoke, type PtyEvent } from "./ipc";
@@ -587,6 +587,7 @@ async function gitChecks(controller: string, check: (n: string, ok: boolean | st
     await sh("ln -s /etc/hosts link.rb");
     check("writes through symlinks are refused", await api.writeFile(`${dir}/link.rb`, "x").then(() => false, (e) => String(e).includes("symlink")));
     check("writes outside the project are refused", await api.writeFile(`${root}/../garnet-smoke-outside`, "x").then(() => false, () => true));
+    await vcsWorkflowChecks(dir, sh, check);
   } catch (e) {
     check("git scenario", String(e));
   } finally {
@@ -594,6 +595,71 @@ async function gitChecks(controller: string, check: (n: string, ok: boolean | st
     await api.runCapture(root, `rm -rf ${JSON.stringify(dir)}`, 30);
     document.getElementById("overlay-root")!.replaceChildren();
   }
+}
+
+/// Rollback, Commit/Amend and Shelve through the Commit tool window, in the temp repo.
+async function vcsWorkflowChecks(dir: string, sh: (cmd: string) => Promise<string>, check: Check) {
+  const read = (p: string) => api.readFile(`${dir}/${p}`).catch(() => null);
+  const overlay = document.getElementById("overlay-root")!;
+  const button = (scope: ParentNode, label: string) => [...scope.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === label);
+  await sh(
+    "rm -f .gitattributes link.rb && git reset -q --hard && git clean -fdq && printf 'base\\n' > r.rb && printf 'gone\\n' > d.rb && git add . && git commit -qm base" +
+      " && printf 'edited\\n' > r.rb && rm d.rb && printf 'new\\n' > added.rb && git add added.rb && printf 'u\\n' > untracked.rb",
+  );
+  await refreshGit();
+  rollbackDialog(["r.rb", "d.rb", "added.rb", "untracked.rb"]);
+  const dialog = overlay.querySelector(".rollback-dialog");
+  check("rollback dialog lists the files with the delete-added option", (dialog?.querySelectorAll(".change-name").length === 4 && !!dialog.querySelector(".rollback-delete input")) || String(dialog?.textContent));
+  if (dialog) {
+    dialog.querySelector<HTMLInputElement>(".rollback-delete input")!.checked = true;
+    button(dialog, "Rollback")!.click();
+  }
+  const clean = await until(async () => !(await api.gitStatus(dir)).length, 5000);
+  check("rollback restores modified and deleted files and deletes added copies", (!!clean && (await read("r.rb")) === "base\n" && (await read("d.rb")) === "gone\n" && (await read("added.rb")) === null && (await read("untracked.rb")) === null) || JSON.stringify(await api.gitStatus(dir)));
+
+  const message = commitView.querySelector<HTMLTextAreaElement>(".commit-message")!;
+  const commitBtn = button(commitView, "Commit")!;
+  const amend = commitView.querySelector<HTMLInputElement>(".amend-box")!;
+  const type = (text: string) => ((message.value = text), message.dispatchEvent(new Event("input")));
+  await sh("printf 'one\\n' > r.rb && git add r.rb");
+  await refreshGit();
+  type("");
+  check("commit is disabled without a message", commitBtn.disabled);
+  type("smoke commit");
+  check("commit is enabled with a message and staged files", !commitBtn.disabled);
+  commitBtn.click();
+  commitBtn.click();
+  const subjects = () => api.git(dir, "log", "--format=%s");
+  await until(async () => (await subjects()).startsWith("smoke commit\n"), 5000);
+  check("double-clicking Commit makes one commit", (await subjects()) === "smoke commit\nbase\ninit\n" || (await subjects()).split("\n").slice(0, 3).join(" | "));
+  amend.checked = true;
+  amend.dispatchEvent(new Event("change"));
+  await until(() => message.value === "smoke commit", 3000);
+  check("amend prefills the last message", message.value === "smoke commit" || message.value);
+  type("smoke commit, amended");
+  commitBtn.click();
+  await until(async () => (await subjects()).startsWith("smoke commit, amended"), 5000);
+  check("amend rewrites the last commit", (await subjects()).split("\n").slice(0, 2).join("|") === "smoke commit, amended|base" || (await subjects()));
+
+  await sh("printf 'shelved\\n' > r.rb");
+  await refreshGit();
+  const row = commitView.querySelector<HTMLElement>('.change-row[data-path="r.rb"]');
+  row?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+  [...overlay.querySelectorAll<HTMLElement>(".ctx-item")].find((i) => i.textContent?.includes("Shelve Changes"))?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  const input = await until(() => overlay.querySelector<HTMLInputElement>(".qp-input"), 2000);
+  if (input) {
+    input.value = "smoke shelf";
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+  }
+  await until(async () => (await read("r.rb")) === "one\n", 5000);
+  check("shelve stashes the selected file", ((await read("r.rb")) === "one\n" && (await api.git(dir, "stash", "list", "--format=%s")).includes("smoke shelf")) || String(await read("r.rb")));
+  setLogMode("stash");
+  await until(() => logState().stashes.length === 1, 5000);
+  check("Shelf tab lists the shelved changes", logState().stashes[0]?.message.includes("smoke shelf") || JSON.stringify(logState().stashes));
+  document.querySelector<HTMLElement>('.gitlog-view .log-row [title^="Unshelve"]')?.click();
+  await until(async () => (await read("r.rb")) === "shelved\n", 5000);
+  check("unshelve restores the changes and empties the shelf", ((await read("r.rb")) === "shelved\n" && !(await api.git(dir, "stash", "list")).trim()) || String(await read("r.rb")));
+  setLogMode("log");
 }
 
 type Check = (n: string, ok: boolean | string) => void;

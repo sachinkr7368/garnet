@@ -27,6 +27,7 @@ export const allTabs = () => [];
 export const openFile = async () => {};
 export const ensureModel = async () => null;
 export const handlePathMoved = () => {};
+export const handleFsChanged = async (_paths: string[]) => {};
 export const uriFor = (p: string) => ({ toString: () => `file://${p}` });
 export const saveAll = async () => {};
 export const languageFor = () => "plaintext";

@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyHunks, buildPatch, buildTree, diffLines, filterPaths, hasConflictMarkers, hunkKind, overlapsNew, parseConflicts, patchHunks, revertHunks, stagePatch, swapHunk } from "../difflogic";
+import { applyHunks, buildPatch, buildTree, diffLines, filterPaths, gutterDiff, hasConflictMarkers, hunkKind, matchEol, overlapsNew, parseConflicts, patchHunks, revertHunks, rollbackEdits, stagePatch, swapHunk, unstagePatch, type LineEdit } from "../difflogic";
 
 const rand = (seed: number) => () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
 
@@ -88,6 +88,55 @@ describe("hunk staging patches", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 60000);
+});
+
+/// Applies edits (all relative to the original text, as Monaco does in one pushEditOperations) to "\n" text.
+function applyEdits(text: string, edits: LineEdit[]) {
+  const lines = text.split("\n");
+  const offset = (line: number, col: number) => lines.slice(0, line - 1).reduce((n, l) => n + l.length + 1, 0) + col - 1;
+  let out = text;
+  for (const e of [...edits].sort((x, y) => y.startLine - x.startLine)) out = out.slice(0, offset(e.startLine, e.startCol)) + e.text + out.slice(offset(e.endLine, e.endCol));
+  return out;
+}
+
+describe("rollback lines (B6) and CRLF (B33)", () => {
+  const head = "a\nb\nc\nd\ne\n";
+  it("rolls back only the hunk under the selection, from the current text", () => {
+    const buf = "a\nB\nc\nd\nE\n";
+    expect(applyEdits(buf, rollbackEdits(head, buf, 1, 2, "\n"))).toBe("a\nb\nc\nd\nE\n");
+    // Three lines inserted above after the gutter last ran: the same hunk is found at its new place.
+    const shifted = "x\ny\nz\n" + buf;
+    expect(applyEdits(shifted, rollbackEdits(head, shifted, 4, 5, "\n"))).toBe("x\ny\nz\na\nb\nc\nd\nE\n");
+  });
+
+  it("rolls back several hunks, end-of-file edits and deletions in one batch", () => {
+    for (const buf of ["a\nB\nc\nd\nE\n", "a\nc\nd\ne\n", "a\nb\nc\nd\ne\nf\ng", "", "z\n", "a\nb\nc\n"]) {
+      const lines = buf.split("\n").length;
+      expect(applyEdits(buf, rollbackEdits(head, buf, 0, lines, "\n"))).toBe(head);
+    }
+    expect(rollbackEdits(head, head, 0, 5, "\n")).toEqual([]);
+  });
+
+  it("ignores CRLF vs LF in the gutter and when staging", () => {
+    expect(gutterDiff(head, head.replace(/\n/g, "\r\n"))).toEqual([]);
+    expect(gutterDiff(head, "a\r\nB\r\nc\r\nd\r\ne\r\n")).toEqual([{ a0: 1, a1: 2, b0: 1, b1: 2 }]);
+    expect(matchEol("a\nb\n", "a\r\nB\r\n")).toBe("a\nB\n");
+    expect(matchEol("a\r\nb\r\n", "a\r\nB\r\n")).toBe("a\r\nB\r\n");
+    expect(stagePatch("f.rb", "a\nb\n", matchEol("a\nb\n", "a\r\nB\r\n"), 1, 2)).toBe("diff --git a/f.rb b/f.rb\n--- a/f.rb\n+++ b/f.rb\n@@ -2,1 +2,1 @@\n-b\n+B\n");
+  });
+});
+
+describe("unstagePatch (B31)", () => {
+  it("finds the hunk by its HEAD lines after an earlier hunk was unstaged", () => {
+    const head = "1\n2\n3\n";
+    const index = "0\n1\n2\n2b\n3\n";
+    const first = patchHunks(head, index)[0];
+    const second = patchHunks(head, index)[1];
+    const afterFirst = "1\n2\n2b\n3\n";
+    expect(unstagePatch("f.rb", head, index, first.a0, first.a1)).toBe("diff --git a/f.rb b/f.rb\n--- a/f.rb\n+++ b/f.rb\n@@ -1,1 +0,0 @@\n-0\n");
+    expect(unstagePatch("f.rb", head, afterFirst, second.a0, second.a1)).toBe("diff --git a/f.rb b/f.rb\n--- a/f.rb\n+++ b/f.rb\n@@ -3,1 +2,0 @@\n-2b\n");
+    expect(unstagePatch("f.rb", head, head, second.a0, second.a1)).toBeNull();
+  });
 });
 
 describe("parseConflicts", () => {

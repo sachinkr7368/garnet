@@ -27,6 +27,8 @@ export interface ProjectInfo {
 
 export interface GitStatusEntry {
   path: string;
+  /// Source path of a staged rename or copy.
+  orig?: string | null;
   index: string;
   worktree: string;
 }
@@ -80,6 +82,7 @@ export interface OpState {
 
 export interface MergeInput {
   symlink: boolean;
+  nonUtf8?: boolean;
   base: string | null;
   ours: string | null;
   theirs: string | null;
@@ -118,7 +121,8 @@ export const api = {
   git: (root: string, ...args: string[]) => invoke<string>("git_run", { root, args }),
   gitStage: (root: string, paths: string[]) => invoke<void>("git_stage", { root, paths }),
   gitUnstage: (root: string, paths: string[]) => invoke<void>("git_unstage", { root, paths }),
-  gitCommit: (root: string, message: string) => invoke<string>("git_commit", { root, message }),
+  gitCommit: (root: string, message: string, amend = false) => invoke<string>("git_commit", { root, message, amend }),
+  gitRollback: (root: string, paths: string[], deleteAdded: boolean) => invoke<void>("git_rollback", { root, paths, deleteAdded }),
   gitBlameLine: (root: string, path: string, line: number) =>
     invoke<{ hash: string; author: string; time: number; summary: string }>("git_blame_line", { root, path, line }),
   freePort: () => invoke<number>("free_port"),

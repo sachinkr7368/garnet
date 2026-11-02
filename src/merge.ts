@@ -141,8 +141,9 @@ export async function openResolver(relPath: string): Promise<Resolver | null> {
     toast(`Cannot read conflict: ${e}`, "error");
     return null;
   }
-  if (input.symlink) {
-    const answer = await message(`${relPath} is a symbolic link on at least one side. Links can only be resolved by taking one side as a whole.`, {
+  if (input.symlink || input.nonUtf8) {
+    const why = input.symlink ? "is a symbolic link on at least one side. Links" : "is not UTF-8 text (or is binary). Its bytes";
+    const answer = await message(`${relPath} ${why} can only be resolved by taking one side as a whole.`, {
       kind: "warning",
       buttons: { yes: "Accept Yours", no: "Accept Theirs", cancel: "Cancel" },
     });
@@ -218,7 +219,7 @@ export async function openResolver(relPath: string): Promise<Resolver | null> {
       h("button", { class: "btn small", onclick: () => chunks.forEach((_, i) => chunks[i].state === "unresolved" && accept(i, "theirs")) }, "All Theirs"),
       h("span", { class: "sep" }),
       h("button", { class: "btn small primary", onclick: () => apply() }, "Apply"),
-      h("button", { class: "btn small", onclick: () => close() }, "Cancel"),
+      h("button", { class: "btn small", onclick: () => cancel() }, "Cancel"),
     ),
     h(
       "div",
@@ -353,10 +354,16 @@ export async function openResolver(relPath: string): Promise<Resolver | null> {
     window.removeEventListener("keydown", onKey, true);
     current = null;
   };
+  const initialVersion = models.result.getAlternativeVersionId();
+  /// Escape and Cancel keep manual edits unless the user agrees to drop them.
+  const cancel = async () => {
+    if (models.result.getAlternativeVersionId() !== initialVersion && !(await ask("Discard the changes made in the merge result?", { kind: "warning", okLabel: "Discard", cancelLabel: "Keep Editing" }))) return;
+    if (current === resolver) close();
+  };
   const onKey = (e: KeyboardEvent) => {
     if (e.key === "Escape") {
       e.stopPropagation();
-      close();
+      cancel();
     }
   };
   window.addEventListener("keydown", onKey, true);
@@ -383,8 +390,9 @@ export async function openResolver(relPath: string): Promise<Resolver | null> {
     return true;
   };
 
-  current = { chunks, result: models.result, accept, apply, close };
+  const resolver: Resolver = { chunks, result: models.result, accept, apply, close };
+  current = resolver;
   layout();
   goChunk(1);
-  return current;
+  return resolver;
 }

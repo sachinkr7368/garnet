@@ -3,6 +3,7 @@ import { saveAll } from "./editor";
 import { refreshGit } from "./git";
 import { cloneDialog, createPullRequest } from "./github";
 import { api, invoke } from "./ipc";
+import { runGitOp } from "./merge";
 import { isDarkTheme, isTrusted, onSettingsChange, recentProjects, toggleTheme } from "./settings";
 import { basename, dirname, root, state } from "./state";
 import { h, icon, iconButton, inputBox, quickPick, toast, withTip, type PickItem } from "./ui";
@@ -27,22 +28,31 @@ export function initToolbar(switchProject: (path: string) => void) {
 
 const git = (...args: string[]) => invoke<string>("git_run", { root: root(), args });
 
+/// Runs a git action with a result toast; true when it succeeded.
 async function run(label: string, fn: () => Promise<unknown>) {
+  let ok = true;
   try {
     const out = await fn();
     toast(typeof out === "string" && out.trim() ? `${label}: ${out.trim().split("\n").slice(-2).join(" ")}` : `${label}: done`);
   } catch (e) {
+    ok = false;
     toast(`${label} failed: ${e}`, "error");
   }
   refreshGit();
   refreshToolbar();
+  return ok;
 }
+
+/// Branch label; `git rev-parse --abbrev-ref HEAD` prints "HEAD" on a detached checkout.
+export const headLabel = (abbrev: string, sha: string) => (abbrev === "HEAD" ? `detached at ${sha.slice(0, 7) || "HEAD"}` : abbrev || "detached");
 
 /// Toolbar labels
 
+let toolbarSeq = 0;
 export async function refreshToolbar() {
   const p = state.project;
   if (!p) return;
+  const mine = ++toolbarSeq;
   projectBtn.replaceChildren(icon("folder"), h("span", { class: "name" }, p.name), icon("chevron-down"));
   if (!p.git || !isTrusted()) {
     worktreeBtn.hidden = branchBtn.hidden = true;
@@ -53,19 +63,29 @@ export async function refreshToolbar() {
     git("rev-list", "--left-right", "--count", "HEAD...@{upstream}").catch(() => ""),
     git("worktree", "list", "--porcelain").catch(() => ""),
   ]);
+  const sha = branch.trim() === "HEAD" ? await git("rev-parse", "HEAD").catch(() => "") : "";
+  if (mine !== toolbarSeq) return;
   const [ahead, behind] = counts.trim().split(/\s+/).map(Number);
+  const name = headLabel(branch.trim(), sha.trim());
   branchBtn.hidden = false;
   branchBtn.replaceChildren(
     icon("git-branch"),
-    h("span", { class: "name" }, branch.trim() || "detached"),
+    h("span", { class: "name", title: name }, name),
     h("span", { class: "counts" }, counts ? `${ahead ? `↑${ahead}` : ""}${behind ? ` ↓${behind}` : ""}`.trim() : ""),
     icon("chevron-down"),
   );
-  const label = worktreeLabel(parseWorktrees(worktrees), p.root);
+  const trees = parseWorktrees(worktrees);
+  const label = worktreeLabel(trees, p.root);
+  const tree = currentWorktree(trees, p.root);
   worktreeBtn.hidden = !label;
   if (label)
     worktreeBtn.replaceChildren(
-      ...[icon(label.main ? "repo" : "repo-forked"), h("span", { class: "name" }, label.name), label.main && h("span", { class: "tag" }, "main worktree"), icon("chevron-down")].filter((n): n is HTMLSpanElement => !!n),
+      ...[
+        icon(label.main ? "repo" : "repo-forked"),
+        h("span", { class: "name", title: `${label.name}${tree?.branch ? ` (${tree.branch})` : ""}\n${tree?.path ?? ""}` }, label.name),
+        label.main && h("span", { class: "tag" }, "main worktree"),
+        icon("chevron-down"),
+      ].filter((n): n is HTMLSpanElement => !!n),
     );
 }
 
@@ -245,8 +265,9 @@ async function newBranch() {
   if (name) checkout(name.trim(), undefined, true);
 }
 
-/// Checks out a branch, asking how to handle local changes first.
-async function checkout(name: string, from?: string, create = false) {
+/// Checks out a branch, asking how to handle local changes first. "Stash and Checkout" restores them on the new
+/// branch (Smart Checkout), or back on the old one when the checkout fails.
+export async function checkout(name: string, from?: string, create = false) {
   await saveAll();
   const dirty = (await git("status", "--porcelain", "--untracked-files=no").catch(() => "")).trim();
   let stashed = false;
@@ -256,18 +277,22 @@ async function checkout(name: string, from?: string, create = false) {
       buttons: { yes: "Stash and Checkout", no: "Carry Changes", cancel: "Cancel" },
     });
     if (answer === "Stash and Checkout" || answer === "Yes") {
-      await git("stash", "push", "-m", `garnet: before checkout ${name}`);
+      try {
+        await git("stash", "push", "-m", `garnet: before checkout ${name}`);
+      } catch (e) {
+        return toast(`Could not stash your changes, so ${name} was not checked out: ${e}`, "error");
+      }
       stashed = true;
     } else if (answer !== "Carry Changes" && answer !== "No") return;
   }
   const args = create ? ["checkout", "-b", name, ...(from ? [from] : [])] : from ? ["checkout", "-b", name, "--track", from] : ["checkout", name];
-  await run(`Checkout ${name}`, () =>
+  const ok = await run(`Checkout ${name}`, () =>
     git(...args).catch((e) => {
       if (!create && from && /already exists/.test(String(e))) return git("checkout", name);
       throw e;
     }),
   );
-  if (stashed) toast(`Your changes were stashed ("garnet: before checkout ${name}"). Run git stash pop to restore them.`);
+  if (stashed) await runGitOp(ok ? "Restore local changes" : "Checkout failed; restore local changes", ["stash", "pop"]);
 }
 
 /// Worktree switcher
@@ -344,7 +369,7 @@ export async function newWorktree() {
       if (!path) return;
       const exists = list.some((x) => !x.remote && x.name === branch);
       const args = exists ? ["worktree", "add", path, branch] : b?.remote ? ["worktree", "add", "-b", branch, path, b.name] : ["worktree", "add", "-b", branch, path];
-      await run("New worktree", () => git(...args));
+      if (!(await run("New worktree", () => git(...args)))) return;
       if (await ask(`Open ${basename(path)} in a new window?`, { okLabel: "Open", cancelLabel: "Not now" })) invoke("open_new_window", { path });
     },
   });

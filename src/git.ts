@@ -1,14 +1,14 @@
 import { ask } from "@tauri-apps/plugin-dialog";
 import DiffWorker from "./diffworker?worker";
-import { activeTab, editor, events, monaco, openDiffTab, openFile, openTextDiff } from "./editor";
-import { buildPatch, buildTree, displayLine, filterPaths, hunkKind, overlapsNew, patchHunks, patchLines, splitLines, stagePatch, swapHunk, type LineHunk } from "./difflogic";
+import { activeTab, editor, events, handleFsChanged, handlePathMoved, monaco, openDiffTab, openFile, openTextDiff } from "./editor";
+import { buildTree, displayLine, filterPaths, hunkKind, matchEol, patchHunks, patchLines, rollbackEdits, splitLines, stagePatch, unstagePatch, type LineHunk } from "./difflogic";
 import { api, invoke, type ChangedFile, type GitStatusEntry, type OpState } from "./ipc";
 import { abortOperation, acceptSide, continueOperation, openResolver, showConflicts } from "./merge";
 import { abs, basename, debounce, rel, root, state } from "./state";
 import { setGitDecorations } from "./tree";
 import { askTrust, isTrusted, onSettingsChange, setting, updateSetting } from "./settings";
-import { branches, listWorktrees, newWorktree, openWorktree, removeWorktree, type Worktree } from "./toolbar";
-import { contextMenu, fileIcon, h, icon, iconButton, quickPick, statusSlot, tip, toast } from "./ui";
+import { branches, headLabel, listWorktrees, newWorktree, openWorktree, pushCurrent, removeWorktree, type Worktree } from "./toolbar";
+import { contextMenu, fileIcon, h, icon, iconButton, inputBox, modal, quickPick, statusSlot, tip, toast } from "./ui";
 
 const branchEl = statusSlot("branch", "left", undefined, "Current Git branch");
 const blameEl = statusSlot("blame", "left", undefined, "Annotation for the current line");
@@ -33,7 +33,11 @@ export const diffAsync = (a: string, b: string) =>
 
 const message = h("textarea", { class: "commit-message", placeholder: "Commit message (⌘↩ to commit)", rows: 4, spellcheck: true });
 const commitBtn = h("button", { class: "btn primary", onclick: () => commit() }, "Commit");
-const list = h("div", { class: "changes" });
+const commitPushBtn = iconButton("chevron-down", "Commit and Push…", (e) => contextMenu(e, [{ label: "Commit and Push…", run: () => commit(true) }]));
+commitPushBtn.classList.add("btn", "primary", "split");
+const amendBox = h("input", { type: "checkbox", class: "amend-box" });
+let amendPrefill = "";
+const list = h("div", { class: "changes", tabIndex: 0 });
 const branchHead = h("div", { class: "commit-branch" });
 const filterInput = h("input", { class: "changes-filter", placeholder: "Filter files", spellcheck: false });
 const opBanner = h("div", { class: "op-banner" });
@@ -52,7 +56,12 @@ const worktreeSection = h(
   ),
   worktreeList,
 );
-const commitBox = h("div", { class: "commit-box" }, message, h("div", { class: "commit-actions" }, commitBtn));
+const commitBox = h(
+  "div",
+  { class: "commit-box" },
+  message,
+  h("div", { class: "commit-actions" }, h("label", { class: "amend", title: "Amend the last commit (message and staged changes)" }, amendBox, "Amend"), h("span", { class: "spacer" }), h("div", { class: "split-btn" }, commitBtn, commitPushBtn)),
+);
 const groupBtn = iconButton("list-tree", "Group by: Changelist / Directory", () =>
   updateSetting("git.groupBy", setting("git.groupBy") === "directory" ? "changelist" : "directory").then(render),
 );
@@ -67,6 +76,7 @@ export const commitView = h(
     groupBtn,
     iconButton("expand-all", "Expand All", () => (collapsed.clear(), render())),
     iconButton("collapse-all", "Collapse All", () => collapseAll()),
+    iconButton("discard", "Rollback… (selected files, or all changes)", () => rollbackSelected(), "rollbackLines"),
     iconButton("git-compare", "Compare with Branch…", () => compareWithBranch()),
     iconButton("refresh", "Refresh", () => refreshGit()),
   ),
@@ -84,12 +94,25 @@ message.addEventListener("keydown", (e) => {
     commit();
   }
 });
+message.addEventListener("input", () => updateCommitEnabled());
+amendBox.addEventListener("change", async () => {
+  if (amendBox.checked && !message.value.trim()) {
+    amendPrefill = (await api.git(root(), "log", "-1", "--format=%B").catch(() => "")).trim();
+    if (amendBox.checked && !message.value.trim()) message.value = amendPrefill;
+  } else if (!amendBox.checked && message.value.trim() === amendPrefill) message.value = "";
+  updateCommitEnabled();
+});
 
 let entries: GitStatusEntry[] = [];
 let opState: OpState = { op: "", conflicts: [] };
 let unstagedCounts = new Map<string, ChangedFile>();
 let stagedCounts = new Map<string, ChangedFile>();
 let currentBranch = "";
+let refreshSeq = 0;
+let committing = false;
+/// Repo-relative paths selected in the changes list (click, ⌘-click).
+const selection = new Set<string>();
+queueMicrotask(() => updateCommitEnabled());
 const collapsed = new Set<string>();
 const expandedHunks = new Set<string>();
 let compare: { base: string; mergeBase: string; files: ChangedFile[] } | null = null;
@@ -137,7 +160,7 @@ const viewedBox = (path: string, f?: ChangedFile) =>
 
 /// Generic collapsible file tree, also used by the Git log's commit details.
 
-export function fileTree<T extends { path: string }>(files: T[], key: string, row: (f: T, depth: number) => HTMLElement, rerender: () => void, closed = collapsed): HTMLElement[] {
+export function fileTree<T extends { path: string }>(files: T[], key: string, row: (f: T, depth: number) => HTMLElement, rerender: () => void, closed = collapsed, dirMenu?: (e: MouseEvent, dir: string) => void): HTMLElement[] {
   const out: HTMLElement[] = [];
   const walk = (nodes: ReturnType<typeof buildTree<T>>, depth: number) => {
     for (const n of nodes) {
@@ -150,7 +173,7 @@ export function fileTree<T extends { path: string }>(files: T[], key: string, ro
       out.push(
         h(
           "div",
-          { class: "change-row dir-row", style: `padding-left:${6 + depth * 14}px`, onclick: () => (open ? closed.add(id) : closed.delete(id), rerender()) },
+          { class: "change-row dir-row", style: `padding-left:${6 + depth * 14}px`, onclick: () => (open ? closed.add(id) : closed.delete(id), rerender()), oncontextmenu: dirMenu && ((e: MouseEvent) => dirMenu(e, n.path)) },
           icon(open ? "chevron-down" : "chevron-right"),
           icon("folder"),
           h("span", { class: "change-name" }, n.name),
@@ -206,24 +229,48 @@ function collapseAll() {
   render();
 }
 
+const entryFor = (path: string) => entries.find((e) => e.path === path);
+/// Unstaging a rename must reset its old path too, or the deletion stays staged.
+const withOrig = (paths: string[]) => paths.flatMap((p) => [p, ...(entryFor(p)?.orig ? [entryFor(p)!.orig!] : [])]);
+const stageRows = (rows: Row[], staged: boolean) =>
+  (staged ? api.gitUnstage(root(), withOrig(rows.map((r) => r.path))) : api.gitStage(root(), rows.map((r) => r.path))).then(refreshGit, (err) => toast(String(err), "error"));
+
 function stageToggle(r: Row) {
   return iconButton(r.staged ? "remove" : "add", r.staged ? "Unstage" : "Stage", (ev) => {
     ev.stopPropagation();
-    (r.staged ? api.gitUnstage : api.gitStage)(root(), [r.path]).then(refreshGit, (err) => toast(String(err), "error"));
+    stageRows([r], r.staged);
   });
 }
 
+function paintSelection() {
+  for (const el of list.querySelectorAll<HTMLElement>(".change-row[data-path]")) el.classList.toggle("selected", selection.has(el.dataset.path!));
+  updateCommitEnabled();
+}
+
+function clickRow(e: MouseEvent, r: Row) {
+  list.focus();
+  if (e.metaKey || e.ctrlKey) {
+    if (!selection.delete(r.path)) selection.add(r.path);
+    return paintSelection();
+  }
+  selection.clear();
+  selection.add(r.path);
+  paintSelection();
+  if (r.code === "U") openResolver(r.path);
+  else showRowDiff(r);
+}
+
 function changeRow(r: Row, depth: number, groupKey: string) {
-  const path = abs(r.path);
   const hunkKey = `${groupKey}:${r.path}`;
   const canSplit = r.code !== "?" && r.code !== "U" && r.code !== "D" && r.code !== "A";
   const el = h(
     "div",
     {
-      class: `change-row git-${statusLabel[r.code] ?? "modified"}${isViewed(r.path, r.counts) ? " viewed" : ""}`,
+      class: `change-row git-${statusLabel[r.code] ?? "modified"}${isViewed(r.path, r.counts) ? " viewed" : ""}${selection.has(r.path) ? " selected" : ""}`,
       style: `padding-left:${6 + depth * 14}px`,
       title: `${r.path} (${statusLabel[r.code] ?? r.code})`,
-      onclick: () => (r.code === "U" ? openResolver(r.path) : showDiff(path, r.staged)),
+      "data-path": r.path,
+      onclick: (e: MouseEvent) => clickRow(e, r),
       oncontextmenu: (e: MouseEvent) => rowMenu(e, r),
     },
     canSplit
@@ -250,29 +297,165 @@ function changeRow(r: Row, depth: number, groupKey: string) {
 
 function rowMenu(e: MouseEvent, r: Row) {
   const path = abs(r.path);
+  if (!selection.has(r.path)) {
+    selection.clear();
+    selection.add(r.path);
+    paintSelection();
+  }
+  if (r.code === "U")
+    return contextMenu(e, [
+      { label: "Merge…", run: () => openResolver(r.path) },
+      { label: "Accept Yours", run: () => acceptSide(r.path, "ours") },
+      { label: "Accept Theirs", run: () => acceptSide(r.path, "theirs") },
+      { label: "Show History", run: () => window.dispatchEvent(new CustomEvent("garnet:show-history", { detail: path })) },
+    ]);
+  const paths = [...selection];
+  const untracked = paths.filter((p) => entryFor(p)?.worktree === "?");
   contextMenu(e, [
-    r.code === "U" ? { label: "Merge…", run: () => openResolver(r.path) } : { label: "Show Diff", run: () => showDiff(path, r.staged) },
-    ...(r.code === "U"
-      ? [
-          { label: "Accept Yours", run: () => acceptSide(r.path, "ours") },
-          { label: "Accept Theirs", run: () => acceptSide(r.path, "theirs") },
-        ]
-      : [{ label: r.staged ? "Unstage" : "Stage", run: () => (r.staged ? api.gitUnstage : api.gitStage)(root(), [r.path]).then(refreshGit, (err) => toast(String(err), "error")) }]),
-    r.code !== "D" ? { label: "Open File", run: () => openFile(path) } : null,
-    { label: "Show History", run: () => window.dispatchEvent(new CustomEvent("garnet:show-history", { detail: path })) },
+    { label: "Show Diff", shortcut: "⌘D", run: () => showRowDiff(r) },
+    r.code !== "D" ? { label: "Jump to Source", shortcut: "F4", run: () => openFile(path) } : null,
     null,
+    { label: "Rollback…", icon: "discard", command: "rollbackLines", run: () => rollbackDialog(paths) },
+    { label: "Shelve Changes…", run: () => shelve(paths) },
+    { label: r.staged ? "Unstage" : "Stage", run: () => stageRows(rowsFor().flatMap((g) => g.rows).filter((x) => selection.has(x.path) && x.staged === r.staged), r.staged) },
+    null,
+    { label: "Copy Path", run: () => navigator.clipboard.writeText(paths.map(abs).join("\n")) },
+    untracked.length ? { label: "Add to .gitignore", run: () => addToGitignore(untracked) } : null,
+    { label: "Delete…", icon: "trash", run: () => deleteFiles(paths) },
+    null,
+    { label: "Show History", run: () => window.dispatchEvent(new CustomEvent("garnet:show-history", { detail: path })) },
     { label: isViewed(r.path, r.counts) ? "Mark as Not Viewed" : "Mark as Viewed", run: () => setViewed(r.path, r.counts, !isViewed(r.path, r.counts)) },
   ]);
 }
 
+/// Rollback (RubyMine ⌥⌘Z): selected files, a folder, or all changes back to HEAD.
+
+const isAdded = (e: GitStatusEntry) => e.index === "?" || e.index === "A" || e.index === "C" || e.worktree === "A";
+const under = (path: string, p: string) => path === p || path.startsWith(`${p}/`);
+
+/// Status entries a rollback of `paths` (files or folders) touches; conflicts are resolved in the merge tool instead.
+export const rollbackTargets = (paths: string[]) =>
+  entries.filter((e) => !opState.conflicts.includes(e.path) && paths.some((p) => under(e.path, p) || (e.orig && under(e.orig, p))));
+
+export function rollbackSelected() {
+  const paths = selection.size ? [...selection] : entries.map((e) => e.path);
+  return rollbackDialog(paths);
+}
+
+export function rollbackDialog(paths: string[]) {
+  const targets = rollbackTargets(paths);
+  if (!targets.length) return toast("No changes to roll back.");
+  const deleteAdded = h("input", { type: "checkbox" });
+  let close = () => {};
+  const go = () => (close(), rollbackFiles(targets.map((t) => t.path), deleteAdded.checked));
+  const box = h(
+    "div",
+    { class: "qp rollback-dialog" },
+    h("div", { class: "qp-title" }, "Rollback Changes"),
+    h("div", { class: "dim rollback-note" }, `${targets.length} file${targets.length === 1 ? "" : "s"} will be reverted to HEAD; local changes are lost.`),
+    h(
+      "div",
+      { class: "qp-list" },
+      ...targets.map((t) => {
+        const code = t.index !== " " && t.index !== "?" ? t.index : t.worktree;
+        return h("div", { class: `change-row git-${statusLabel[code] ?? "modified"}` }, badge(code), fileIcon(t.path), h("span", { class: "change-name" }, t.orig ? `${t.orig} → ${t.path}` : t.path));
+      }),
+    ),
+    targets.some(isAdded) ? h("label", { class: "rollback-delete" }, deleteAdded, "Delete local copies of added files") : null,
+    h("div", { class: "dialog-actions" }, h("span", { class: "spacer" }), h("button", { class: "btn", onclick: () => close() }, "Cancel"), h("button", { class: "btn primary", onclick: go }, "Rollback")),
+  );
+  const backdrop = modal(box, () => close());
+  close = () => backdrop.remove();
+}
+
+export async function rollbackFiles(paths: string[], deleteAdded: boolean) {
+  const touched = rollbackTargets(paths).flatMap((e) => [e.path, ...(e.orig ? [e.orig] : [])]);
+  try {
+    await api.gitRollback(root(), paths, deleteAdded);
+    toast(`Rolled back ${paths.length} file${paths.length === 1 ? "" : "s"}.`);
+  } catch (e) {
+    toast(`Rollback failed: ${e}`, "error");
+  }
+  selection.clear();
+  await handleFsChanged(touched.map(abs));
+  await refreshGit();
+}
+
+async function shelve(paths: string[]) {
+  const name = await inputBox("Shelve changes: description", `Shelved ${paths.length === 1 ? basename(paths[0]) : `${paths.length} files`}`);
+  if (name === null) return;
+  try {
+    await api.git(root(), "stash", "push", "--include-untracked", "-m", name.trim() || "Shelved changes", "--", ...withOrig(paths));
+    toast("Changes shelved. Unshelve them from the Git tool window's Shelf tab.");
+  } catch (e) {
+    toast(`Shelve failed: ${e}`, "error");
+  }
+  selection.clear();
+  await handleFsChanged(paths.map(abs));
+  refreshGit();
+}
+
+/// .gitignore text with an anchored entry per path added (skipping ones already listed).
+export function withIgnored(text: string, paths: string[]) {
+  const have = new Set(text.split("\n").map((l) => l.trim()));
+  const add = paths.map((p) => `/${p}`).filter((p) => !have.has(p));
+  if (!add.length) return text;
+  return `${text}${text && !text.endsWith("\n") ? "\n" : ""}${add.join("\n")}\n`;
+}
+
+async function addToGitignore(paths: string[]) {
+  const file = abs(".gitignore");
+  try {
+    const text = await api.readFile(file).catch(() => "");
+    await api.writeFile(file, withIgnored(text, paths));
+    await handleFsChanged([file]);
+  } catch (e) {
+    toast(`Could not update .gitignore: ${e}`, "error");
+  }
+  refreshGit();
+}
+
+async function deleteFiles(paths: string[]) {
+  const files = paths.filter((p) => entryFor(p)?.worktree !== "D" && entryFor(p)?.index !== "D");
+  if (!files.length) return toast("The selected files are already deleted.");
+  if (!(await ask(`Delete ${files.length === 1 ? files[0] : `${files.length} files`}? This cannot be undone.`, { title: "Delete", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" }))) return;
+  for (const p of files) await api.deletePath(abs(p)).then(() => handlePathMoved(abs(p), null), (e) => toast(String(e), "error"));
+  selection.clear();
+  refreshGit();
+}
+
+/// Commit list keys (they win over editor bindings while the list has focus): ⌘D diff, F4 jump to source.
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if (!list.contains(document.activeElement) || !selection.size) return;
+    const diff = e.metaKey && !e.altKey && !e.shiftKey && !e.ctrlKey && e.code === "KeyD";
+    const source = e.code === "F4" && !e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey;
+    if (!diff && !source) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const r = rowsFor().flatMap((g) => g.rows).find((x) => selection.has(x.path));
+    if (!r) return;
+    if (diff) showRowDiff(r);
+    else if (r.code !== "D") openFile(abs(r.path));
+  },
+  true,
+);
+
 /// Partial staging: hunks of index→working copy (stage) or HEAD→index (unstage)
+
+/// Both sides of a row's hunks: HEAD (old path of a rename) → index when staged, index → working copy otherwise.
+async function hunkTexts(r: Row): Promise<[string, string]> {
+  const path = abs(r.path);
+  if (r.staged) return [(await api.gitFileAt(root(), "HEAD", abs(entryFor(r.path)?.orig ?? r.path))) ?? "", (await api.gitFileAt(root(), "", path)) ?? ""];
+  const index = (await api.gitFileAt(root(), "", path)) ?? "";
+  return [index, matchEol(index, await api.readFile(path))];
+}
 
 async function renderHunks(box: HTMLElement, r: Row) {
   const path = abs(r.path);
   try {
-    const [a, b] = r.staged
-      ? [(await api.gitFileAt(root(), "HEAD", path)) ?? "", (await api.gitFileAt(root(), "", path)) ?? ""]
-      : [(await api.gitFileAt(root(), "", path)) ?? "", await api.readFile(path)];
+    const [a, b] = await hunkTexts(r);
     const hunks = patchHunks(a, b);
     const al = patchLines(a).map(displayLine);
     const bl = patchLines(b).map(displayLine);
@@ -293,9 +476,18 @@ async function renderHunks(box: HTMLElement, r: Row) {
               "button",
               {
                 class: "btn small",
-                onclick: async () => {
-                  const patch = r.staged ? buildPatch(r.path, b, a, [swapHunk(hk)]) : buildPatch(r.path, a, b, [hk]);
-                  await api.gitStagePatch(root(), path, patch).then(refreshGit, (err) => toast(String(err), "error"));
+                onclick: async (e: MouseEvent) => {
+                  const btn = e.currentTarget as HTMLButtonElement;
+                  btn.disabled = true;
+                  try {
+                    const [a2, b2] = await hunkTexts(r);
+                    const patch = r.staged ? unstagePatch(r.path, a2, b2, hk.a0, hk.a1) : stagePatch(r.path, a2, b2, hk.b0, hk.b1);
+                    if (patch === null) toast(r.staged ? "This change is not staged any more." : "This change is already staged.");
+                    else await api.gitStagePatch(root(), path, patch);
+                  } catch (err) {
+                    toast(String(err), "error");
+                  }
+                  await refreshGit();
                 },
               },
               r.staged ? "Unstage Hunk" : "Stage Hunk",
@@ -362,15 +554,16 @@ function render() {
           h("span", { class: "spacer" }),
           g.staged === null
             ? null
-            : iconButton(g.staged ? "remove" : "add", g.staged ? "Unstage all" : "Stage all", () =>
-                (g.staged ? api.gitUnstage : api.gitStage)(root(), g.rows.map((i) => i.path)).then(refreshGit, (err) => toast(String(err), "error")),
-              ),
+            : iconButton(g.staged ? "remove" : "add", g.staged ? "Unstage all" : "Stage all", () => stageRows(g.rows, g.staged!)),
         ),
-        ...fileTree(rows, g.key, (r, depth) => changeRow(r, depth, g.key), render),
+        ...fileTree(rows, g.key, (r, depth) => changeRow(r, depth, g.key), render, collapsed, (e, dir) =>
+          contextMenu(e, [{ label: `Rollback ${dir}…`, icon: "discard", run: () => rollbackDialog([dir]) }, { label: "Shelve Changes…", run: () => shelve(rows.filter((x) => under(x.path, dir)).map((x) => x.path)) }]),
+        ),
       );
     }),
   );
   if (!groups.length) list.replaceChildren(h("div", { class: "empty" }, "No local changes."));
+  updateCommitEnabled();
 }
 
 function renderOpBanner() {
@@ -391,6 +584,7 @@ function renderOpBanner() {
 }
 
 export async function refreshGit() {
+  const mine = ++refreshSeq;
   headCache.clear();
   if (!state.project?.git) {
     list.replaceChildren(h("div", { class: "empty" }, "Not a git repository."));
@@ -414,13 +608,17 @@ export async function refreshGit() {
     api.gitDiffFiles(root(), ["--cached"]).catch(() => []),
     loadViewed(),
   ]);
+  const sha = branch === "HEAD" ? (await api.git(root(), "rev-parse", "HEAD").catch(() => "")).trim() : "";
+  if (mine !== refreshSeq) return;
   entries = status;
   opState = op;
-  currentBranch = branch;
+  currentBranch = sha || branch;
+  const known = new Set(status.map((e) => e.path));
+  for (const p of selection) if (!known.has(p)) selection.delete(p);
   unstagedCounts = new Map(unstaged.map((f) => [f.path, f]));
   stagedCounts = new Map(staged.map((f) => [f.path, f]));
-  branchEl.replaceChildren(icon("git-branch"), ` ${branch}`);
-  branchHead.replaceChildren(icon("git-branch"), ` ${branch}`);
+  branchEl.replaceChildren(icon("git-branch"), ` ${headLabel(branch, sha)}`);
+  branchHead.replaceChildren(icon("git-branch"), ` ${headLabel(branch, sha)}`);
   renderOpBanner();
   render();
   if (!worktreeList.hidden) refreshWorktrees();
@@ -439,25 +637,63 @@ window.addEventListener("garnet:git-refresh", () => refreshGit());
 
 export const gitOpState = () => opState;
 
-async function commit() {
+const stagedEntries = () => entries.filter((e) => e.index !== " " && e.index !== "?" && !opState.conflicts.includes(e.path));
+
+/// Commit needs a message and something to commit (staged files, selected files, or Amend), and is off while one runs.
+export const commitReady = (o: { message: string; staged: number; selected: number; amend: boolean; busy: boolean; conflicts: number }) =>
+  !o.busy && !o.conflicts && !!o.message.trim() && (o.amend || o.staged > 0 || o.selected > 0);
+
+function updateCommitEnabled() {
+  const ready = commitReady({ message: message.value, staged: stagedEntries().length, selected: selection.size, amend: amendBox.checked, busy: committing, conflicts: opState.conflicts.length });
+  commitBtn.disabled = commitPushBtn.disabled = !ready;
+  commitBtn.title = committing ? "Committing…" : ready ? tip(amendBox.checked ? "Amend the last commit" : "Commit staged changes") : opState.conflicts.length ? "Resolve the merge conflicts first" : !message.value.trim() ? "Enter a commit message" : "Stage or select files to commit";
+}
+
+export async function commit(push = false) {
+  if (committing) return;
   const msg = message.value.trim();
+  const amend = amendBox.checked;
   if (!msg) return toast("Enter a commit message.");
   if (opState.conflicts.length) return toast("Resolve the merge conflicts first.", "error");
-  const staged = entries.filter((e) => e.index !== " " && e.index !== "?");
-  if (!staged.length) return toast("Nothing staged. Stage files with + first.");
-  if (setting("git.checkProblemsBeforeCommit")) {
-    const stagedPaths = new Set(staged.map((e) => abs(e.path)));
-    const errors = monaco.editor.getModelMarkers({}).filter((m) => m.severity === monaco.MarkerSeverity.Error && stagedPaths.has(m.resource.fsPath));
-    if (errors.length && !(await ask(`${errors.length} error(s) in staged files (see Problems). Commit anyway?`, { kind: "warning", okLabel: "Commit", cancelLabel: "Cancel" }))) return;
-  }
+  const staged = stagedEntries();
+  const picked = staged.length ? [] : [...selection];
+  if (!staged.length && !picked.length && !amend) return toast("Nothing staged. Stage or select files first.");
+  committing = true;
+  updateCommitEnabled();
   try {
-    const out = await api.gitCommit(root(), msg);
+    if (setting("git.checkProblemsBeforeCommit")) {
+      const paths = new Set([...staged.map((e) => e.path), ...picked].map(abs));
+      const errors = monaco.editor.getModelMarkers({}).filter((m) => m.severity === monaco.MarkerSeverity.Error && paths.has(m.resource.fsPath));
+      if (errors.length && !(await ask(`${errors.length} error(s) in the files to commit (see Problems). Commit anyway?`, { kind: "warning", okLabel: "Commit", cancelLabel: "Cancel" }))) return;
+    }
+    if (picked.length) await api.gitStage(root(), picked);
+    const out = await api.gitCommit(root(), msg, amend);
     message.value = "";
+    amendBox.checked = false;
+    selection.clear();
     toast(out.split("\n")[0] || "Committed");
+    if (push) await pushCurrent();
   } catch (e) {
     toast(String(e), "error");
+  } finally {
+    committing = false;
+    await refreshGit();
   }
-  refreshGit();
+}
+
+/// Diff for a Commit panel row: staged = HEAD (old path of a rename) ↔ index; deleted = last content ↔ empty.
+export async function showRowDiff(r: { path: string; code: string; staged: boolean }) {
+  const path = abs(r.path);
+  const orig = entryFor(r.path)?.orig ?? r.path;
+  if (r.staged) {
+    const [left, right] = await Promise.all([api.gitFileAt(root(), "HEAD", abs(orig)), api.gitFileAt(root(), "", path)]);
+    return openTextDiff(`staged:${r.path}`, path, left ?? "", right ?? "", `${basename(r.path)} (staged)`, `${orig} @ HEAD ↔ ${r.path} @ index`);
+  }
+  if (r.code === "D") {
+    const left = (await api.gitFileAt(root(), "", path)) ?? (await api.gitFileAt(root(), "HEAD", path));
+    return openTextDiff(`deleted:${r.path}`, path, left ?? "", "", `${basename(r.path)} (deleted)`, `${r.path} ↔ deleted`);
+  }
+  return showDiff(path);
 }
 
 export async function showDiff(path: string, staged = false) {
@@ -520,8 +756,8 @@ async function refreshWorktrees() {
         "div",
         { class: `change-row worktree-row${current ? " current" : ""}`, title: t.path, onclick: menu, oncontextmenu: menu },
         icon(current ? "check" : "repo"),
-        h("span", { class: "change-name" }, basename(t.path)),
-        h("span", { class: "change-dir" }, t.branch),
+        h("span", { class: "change-name", title: t.path }, basename(t.path)),
+        h("span", { class: "change-dir", title: t.branch }, t.branch),
         dirty[i] ? h("span", { class: "dirty-dot", title: "Uncommitted changes" }, "●") : null,
       );
     }),
@@ -601,28 +837,21 @@ editor.onMouseDown((e) => {
   if (hk) showHunkPopup(hk);
 });
 
-/// Replaces the buffer lines of a hunk with the HEAD lines (undoable).
-function rollbackHunk(hk: LineHunk) {
+/// Puts back the HEAD lines of every change touching buffer lines [r0, r1) of the active file, diffed from the current
+/// text (never the debounced gutter state), as one undoable edit.
+async function rollbackRange(r0: number, r1: number) {
   const t = activeTab();
-  if (!t || !gutterState) return;
+  if (!t || t.kind !== "file") return false;
+  const head = await headText(t.path);
+  if (head === null || activeTab() !== t) return false;
   const model = t.model;
-  const eol = model.getEOL();
-  const old = splitLines(gutterState.head).slice(hk.a0, hk.a1).map((l) => l.replace(/\r$/, ""));
-  const count = model.getLineCount();
-  let range: monaco.Range;
-  let text: string;
-  if (hk.b1 < count) {
-    range = new monaco.Range(hk.b0 + 1, 1, hk.b1 + 1, 1);
-    text = old.map((l) => l + eol).join("");
-  } else if (hk.b0 > 0) {
-    range = new monaco.Range(hk.b0, model.getLineMaxColumn(hk.b0), count, model.getLineMaxColumn(count));
-    text = old.map((l) => eol + l).join("");
-  } else {
-    range = model.getFullModelRange();
-    text = old.join(eol);
-  }
-  model.pushEditOperations(editor.getSelections(), [{ range, text }], () => null);
+  const edits = rollbackEdits(head, model.getValue(), r0, r1, model.getEOL());
+  if (!edits.length) return false;
   model.pushStackElement();
+  model.pushEditOperations(editor.getSelections(), edits.map((e) => ({ range: new monaco.Range(e.startLine, e.startCol, e.endLine, e.endCol), text: e.text })), () => null);
+  model.pushStackElement();
+  refreshGutter();
+  return true;
 }
 
 async function stageHunk(hk: LineHunk) {
@@ -631,7 +860,7 @@ async function stageHunk(hk: LineHunk) {
   try {
     const index = await api.gitFileAt(root(), "", t.path);
     if (index === null) return toast("The file is not tracked yet; stage the whole file from the Commit tool window.");
-    const patch = stagePatch(rel(t.path), index, t.model.getValue(), hk.b0, hk.b1);
+    const patch = stagePatch(rel(t.path), index, matchEol(index, t.model.getValue()), hk.b0, hk.b1);
     if (patch === null) return toast("This change is already staged.");
     await api.gitStagePatch(root(), t.path, patch);
     toast("Hunk staged.");
@@ -670,7 +899,7 @@ async function showHunkPopup(hk: LineHunk) {
       { class: "view-toolbar" },
       iconButton("arrow-up", "Previous Change", () => go(-1), "prevChange"),
       iconButton("arrow-down", "Next Change", () => go(1), "nextChange"),
-      h("button", { class: "btn small", title: tip("Rollback Lines", "rollbackLines"), onclick: () => (closeHunkPopup(), rollbackHunk(hk)) }, "Rollback"),
+      h("button", { class: "btn small", title: tip("Rollback Lines", "rollbackLines"), onclick: () => (closeHunkPopup(), rollbackRange(hk.b0, Math.max(hk.b0, hk.b1))) }, "Rollback"),
       h("button", { class: "btn small", onclick: () => (closeHunkPopup(), stageHunk(hk)) }, "Stage This Hunk"),
       h("button", { class: "btn small", onclick: () => (closeHunkPopup(), showDiff(t.path)) }, "Show Diff"),
       h("span", { class: "spacer" }),
@@ -700,12 +929,12 @@ function caretHunk(): LineHunk | undefined {
   return line ? hunkAtLine(line) : undefined;
 }
 
-export function rollbackLines() {
+/// ⌥⌘Z: rolls back the selected files when the Commit tool window has focus, otherwise the changed lines at the caret.
+export async function rollbackLines() {
+  if (commitView.contains(document.activeElement) && document.activeElement !== message) return rollbackSelected();
   const sel = editor.getSelection();
-  if (!sel || !gutterState) return;
-  const chosen = gutterState.hunks.filter((hk) => overlapsNew(hk, sel.startLineNumber - 1, sel.endLineNumber));
-  if (!chosen.length) return toast("No changes at the caret.");
-  for (const hk of [...chosen].reverse()) rollbackHunk(hk);
+  if (!sel) return;
+  if (!(await rollbackRange(sel.startLineNumber - 1, sel.endLineNumber))) toast("No changes at the caret.");
 }
 
 export function stageHunkAtCaret() {

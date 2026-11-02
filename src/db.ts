@@ -1,10 +1,11 @@
 import "./db.css";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { commands } from "./commands";
-import { activate as activateEditorTab, closeTab as closeEditorTab, findViewTab, monaco, openViewTab, retitleViewTab } from "./editor";
+import { activate as activateEditorTab, activeTab as activeFileTab, activeViewTab, closeTab as closeEditorTab, findViewTab, monaco, openViewTab, retitleViewTab } from "./editor";
 import { api, invoke } from "./ipc";
 import { setting } from "./settings";
-import { classify, defaultReadOnly, envSegment, isLocalHost, csvLine, splitStatements, statementAt, toCsv, toJson, withAutoLimit, type Dialect, type Kind } from "./sqlsafety";
+import { classify, defaultReadOnly, envSegment, isLocalHost, csvLine, splitStatements, statementAt, toCsv, toJson, toMarkdown, toSqlInsert, updateSql, withAutoLimit, type Dialect, type Kind } from "./sqlsafety";
+import { pluralize, underscore } from "./inflect";
 import { state } from "./state";
 import { contextMenu, h, icon, iconButton, modal, quickPick, rightbar, toast, trackDrag, type MenuItem } from "./ui";
 
@@ -51,6 +52,8 @@ export interface Override {
 export interface ProjectStore {
   manual: ManualConn[];
   overrides: Record<string, Override>;
+  /// The "Database detected" notification was answered (Add or Ignore).
+  noticed?: boolean;
 }
 
 export interface Conn extends ConnFields {
@@ -191,6 +194,10 @@ export const dbTesting = {
   openConsole: (id: string) => openConsole(id),
   updateConn: (id: string, patch: { readOnly?: boolean; color?: Color }) => updateConn(connById(id)!, patch),
   tabEls: () => tabs.map((t) => t.el),
+  connect: (id: string) => connect(connById(id)!),
+  isLive: (id: string) => live.has(id),
+  setSchema: (id: string, schema: Schema) => live.set(id, { version: "test", schema }),
+  openTable: (id: string, schema: string, table: string) => openTable(id, schema, table),
 };
 
 export interface Outcome {
@@ -203,24 +210,27 @@ export interface Outcome {
 export async function runBatch(
   conn: Conn,
   sqls: string[],
-  opts: { autoLimit?: number; onResult?: (o: Outcome) => void; cancelled?: () => boolean } = {},
+  opts: { autoLimit?: number; onResult?: (o: Outcome) => void; cancelled?: () => boolean; onQuery?: (queryId: string) => void } = {},
 ): Promise<{ outcomes: Outcome[]; blocked?: string }> {
   const multi = sqls.find((sql) => splitStatements(sql, dialect(conn)).length !== 1);
   if (multi !== undefined) return { outcomes: [], blocked: `Run one statement at a time; nothing was run. This text holds ${splitStatements(multi, dialect(conn)).length || "no"} statements:\n\n${multi}` };
   const checks = sqls.map((sql) => ({ sql, c: classify(sql, dialect(conn)) }));
+  const confirmRun = (items: { reason?: string; sql: string }[]) =>
+    (dbSmokeHooks.ask ?? ask)(`Run on "${conn.name}"?\n\n${items.map((x) => `${x.reason}:\n${x.sql}`).join("\n\n")}`, {
+      title: "Dangerous Statement",
+      kind: "warning",
+      okLabel: "Run",
+      cancelLabel: "Cancel",
+    });
+  const confirmed = new Set<string>();
   if (conn.readOnly) {
     const bad = checks.find((x) => x.c.kind !== "read");
     if (bad) return { outcomes: [], blocked: `"${conn.name}" is read-only, so this ${KIND_LABEL[bad.c.kind]} statement was not run:\n\n${bad.sql}` };
   } else {
     const risky = checks.filter((x) => x.c.dangerous);
     if (risky.length) {
-      const ok = await (dbSmokeHooks.ask ?? ask)(`Run on "${conn.name}"?\n\n${risky.map((x) => `${x.c.reason}:\n${x.sql}`).join("\n\n")}`, {
-        title: "Dangerous Statement",
-        kind: "warning",
-        okLabel: "Run",
-        cancelLabel: "Cancel",
-      });
-      if (!ok) return { outcomes: [], blocked: "Cancelled; nothing was run." };
+      if (!(await confirmRun(risky.map((x) => ({ reason: x.c.reason, sql: x.sql }))))) return { outcomes: [], blocked: "Cancelled; nothing was run." };
+      risky.forEach((x) => confirmed.add(x.sql));
     }
   }
   const outcomes: Outcome[] = [];
@@ -229,7 +239,7 @@ export async function runBatch(
     const text = opts.autoLimit && c.kind === "read" ? withAutoLimit(sql, opts.autoLimit, dialect(conn)) : sql;
     let o: Outcome;
     try {
-      o = { sql: text, result: await invoke<QueryResult>("db_query", { id: conn.id, sql: text, maxRows: MAX_ROWS }) };
+      o = { sql: text, result: await dbQuery(conn, text, opts.onQuery, async (reason) => confirmed.has(sql) || (await confirmRun([{ reason, sql: text }]))) };
     } catch (e) {
       o = { sql: text, error: String(e) };
     }
@@ -238,6 +248,24 @@ export async function runBatch(
     if (o.error) break;
   }
   return { outcomes };
+}
+
+/// The backend refuses a destructive statement with `CONFIRM:<token>:<reason>` (its own check, independent of
+/// `classify`); it runs only when sent again with that token, which happens only after `confirm` says yes.
+async function dbQuery(conn: Conn, sql: string, onQuery: ((id: string) => void) | undefined, confirm: (reason: string) => Promise<boolean>): Promise<QueryResult> {
+  const send = (token?: string) => {
+    const queryId = crypto.randomUUID();
+    onQuery?.(queryId);
+    return invoke<QueryResult>("db_query", { id: conn.id, sql, maxRows: MAX_ROWS, queryId, confirm: token });
+  };
+  try {
+    return await send();
+  } catch (e) {
+    const m = /CONFIRM:([0-9a-f]+):(.*)/s.exec(String(e));
+    if (!m) throw e;
+    if (!(await confirm(m[2]))) throw new Error(`Cancelled: ${m[2]}`);
+    return send(m[1]);
+  }
 }
 
 export function completions(schema: Schema, qualifier?: string): { label: string; kind: "table" | "column"; detail: string }[] {
@@ -333,6 +361,8 @@ const configOf = (c: Conn) => ({
   root: loadedRoot ?? undefined,
 });
 
+export const isAuthFailure = (e: unknown) => /password authentication failed|Access denied for user|authentication failed|no password supplied|password is required/i.test(String(e));
+
 async function connect(c: Conn) {
   if (live.has(c.id) || connecting.has(c.id)) return;
   const missing = c.unresolved.filter((f) => f !== "password");
@@ -353,6 +383,7 @@ async function connect(c: Conn) {
   }
   connecting.add(c.id);
   renderTree();
+  let retry = false;
   try {
     const info = await invoke<{ version: string }>("db_connect", { id: c.id, config: configOf(c), password });
     live.set(c.id, { version: info.version, schema: null });
@@ -360,12 +391,21 @@ async function connect(c: Conn) {
     loadSchema(c.id);
   } catch (e) {
     sessionPasswords.delete(c.id);
-    toast(`${c.name}: ${e}`, "error");
+    // A saved (Keychain or session) password that the server rejects is asked for again; database.yml's isn't ours to replace.
+    if (c.engine !== "sqlite" && c.ymlPassword === undefined && isAuthFailure(e)) {
+      const p = await promptPassword(c, `${e}`.split("\n")[0], true);
+      if (p) {
+        if (p.keep) await invoke("db_password_set", { id: c.id, password: p.password }).catch((err) => toast(`Keychain: ${err}`, "error"));
+        else sessionPasswords.set(c.id, p.password);
+        retry = true;
+      }
+    } else toast(`${c.name}: ${e}`, "error");
   } finally {
     connecting.delete(c.id);
     renderTree();
     tabs.forEach((t) => t.refresh());
   }
+  if (retry) return connect(c);
 }
 
 async function disconnect(id: string) {
@@ -461,7 +501,7 @@ const field = (label: string, input: HTMLElement, hint = "", unresolved = false)
     hint ? h("small", { class: "dim" }, hint) : null,
   );
 
-function promptPassword(c: Conn): Promise<{ password: string; keep: boolean } | null> {
+function promptPassword(c: Conn, error = "", replacing = false): Promise<{ password: string; keep: boolean } | null> {
   return new Promise((resolve) => {
     const input = h("input", { class: "search-input", type: "password", spellcheck: false, autocomplete: "off" });
     const keep = h("input", { type: "checkbox", checked: true });
@@ -475,8 +515,9 @@ function promptPassword(c: Conn): Promise<{ password: string; keep: boolean } | 
       `Password for ${c.name}`,
       "key",
       [
+        error ? h("small", { class: "db-warn" }, icon("warning"), ` ${error}`) : h("span"),
         field(`${c.username || "user"}@${c.host || "localhost"}${c.database ? `/${c.database}` : ""}`, input),
-        h("label", { class: "rc-check" }, keep, " Save password in Keychain"),
+        h("label", { class: "rc-check" }, keep, replacing ? " Save in Keychain (replaces the saved password)" : " Save password in Keychain"),
       ],
       [h("button", { class: "btn", onclick: () => done(null) }, "Cancel"), h("button", { class: "btn primary", onclick: ok }, "Connect")],
       () => done(null),
@@ -485,12 +526,12 @@ function promptPassword(c: Conn): Promise<{ password: string; keep: boolean } | 
   });
 }
 
-function editConnection(existing?: Conn) {
+function editConnection(existing?: Conn, engine: Dialect = "postgres") {
   if (!loadedRoot) return;
   const d = existing?.source === "detected" ? detected.find((x) => x.environment === existing.environment) : undefined;
   const draft: ConnFields & { name: string; readOnly: boolean; color: Color } = existing
     ? { ...existing }
-    : { name: "", engine: "postgres", host: "localhost", port: null, database: "", username: "", sslmode: "prefer", readOnly: false, color: "none" };
+    : { name: "", engine, host: "localhost", port: null, database: "", username: "", sslmode: "prefer", readOnly: false, color: "none" };
   const missing = new Set(existing?.unresolved ?? []);
   const id = existing?.id ?? `${loadedRoot}::${crypto.randomUUID()}`;
   const ymlPassword = existing?.ymlPassword !== undefined;
@@ -553,6 +594,21 @@ function editConnection(existing?: Conn) {
   };
   render();
 
+  const testResult = h("small", { class: "dim db-test-result" });
+  const test = async () => {
+    if (!draft.engine) return toast("Choose an engine.", "error");
+    testResult.textContent = "Connecting…";
+    testResult.className = "dim db-test-result";
+    const config = { ...configOf({ ...draft, id, source: "manual", unresolved: [] } as Conn), readOnly: true };
+    try {
+      const r = await invoke<{ version: string; ms: number }>("db_test", { id, config, password: ymlPassword ? existing?.ymlPassword : password.value || sessionPasswords.get(id) });
+      testResult.textContent = `Succeeded · ${r.version} · ${r.ms} ms`;
+      testResult.classList.add("db-ok");
+    } catch (e) {
+      testResult.textContent = String(e).split("\n")[0];
+      testResult.classList.add("db-warn");
+    }
+  };
   const close = () => backdrop.remove();
   const submit = async () => {
     if (!draft.engine) return toast("Choose an engine.", "error");
@@ -586,7 +642,7 @@ function editConnection(existing?: Conn) {
     existing ? `Edit ${existing.name}` : "New Connection",
     "database",
     [body],
-    [h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", onclick: submit }, "Save")],
+    [h("button", { class: "btn", title: "Connect read-only with these settings and report the server version", onclick: test }, "Test Connection"), testResult, h("span", { class: "spacer" }), h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", onclick: submit }, "Save")],
     close,
   );
   (body.querySelector<HTMLElement>(".db-unresolved input, .db-unresolved select") ?? body.querySelector("input"))?.focus();
@@ -820,50 +876,181 @@ const withSelected = (fn: (c: Conn) => unknown) => () => {
 
 /// Grid
 
-function grid(columns: string[], rows: (string | null)[][], sort?: { col?: string; desc: boolean; onSort: (col: string) => void }) {
+export interface GridEdit {
+  /// Why a column can't be edited, or null when it can.
+  blocked: (col: number) => string | null;
+  /// Staged values by row then column; the grid fills it, the table viewer submits it.
+  staged: Map<number, Map<number, string | null>>;
+  onChange: () => void;
+}
+
+export interface GridOpts {
+  /// Server-side sort (table viewer); without it, header clicks sort the loaded rows in place.
+  sort?: { col?: string; desc: boolean; onSort: (col: string) => void };
+  edit?: GridEdit;
+  copyAs?: { table: string; dialect: Dialect };
+  onSelect?: (value: string | null, column: string) => void;
+}
+
+const compareCells = (a: string | null, b: string | null) => {
+  if (a === null || b === null) return a === b ? 0 : a === null ? -1 : 1;
+  const x = Number(a);
+  const y = Number(b);
+  return a.trim() !== "" && b.trim() !== "" && !isNaN(x) && !isNaN(y) ? x - y : a.localeCompare(b);
+};
+
+/// Row order for a client-side sort; NULLs first ascending, numbers compared as numbers.
+export const sortedOrder = (rows: (string | null)[][], col: number, desc: boolean) =>
+  rows.map((_, i) => i).sort((i, j) => (desc ? -1 : 1) * compareCells(rows[i][col], rows[j][col]) || i - j);
+
+function cellContent(v: string | null) {
+  if (v === null) return h("span", { class: "db-null" }, "NULL");
+  if (v === "") return h("span", { class: "db-empty", title: "Empty string" });
+  return v;
+}
+
+export function grid(columns: string[], rows: (string | null)[][], opts: GridOpts = {}) {
+  const { sort, edit } = opts;
+  let local: { col: number; desc: boolean } | null = null;
+  let order = rows.map((_, i) => i);
   const body = h("tbody", {});
-  body.append(...rows.map((r) => h("tr", {}, ...r.map((v) => h("td", {}, v === null ? h("span", { class: "db-null" }, "NULL") : v)))));
+  const value = (r: number, c: number) => (edit?.staged.get(r)?.has(c) ? edit.staged.get(r)!.get(c)! : rows[r][c]);
+  const rowOf = (tr: Element) => Number((tr as HTMLElement).dataset.row);
+  const renderBody = () =>
+    body.replaceChildren(
+      ...order.map((r) =>
+        h(
+          "tr",
+          { "data-row": r },
+          ...columns.map((_, c) => h("td", { class: edit?.staged.get(r)?.has(c) ? "db-staged" : "" }, cellContent(value(r, c)))),
+        ),
+      ),
+    );
+  renderBody();
+  const stage = (r: number, c: number, v: string | null) => {
+    const row = edit!.staged.get(r) ?? new Map<number, string | null>();
+    if (v === rows[r][c]) row.delete(c);
+    else row.set(c, v);
+    if (row.size) edit!.staged.set(r, row);
+    else edit!.staged.delete(r);
+    renderBody();
+    edit!.onChange();
+  };
+  const startEdit = (td: HTMLTableCellElement) => {
+    const r = rowOf(td.parentElement!);
+    const c = td.cellIndex;
+    const why = edit?.blocked(c);
+    if (!edit || why) return why && toast(why);
+    const input = h("input", { class: "db-cell-input", value: value(r, c) ?? "", spellcheck: false });
+    td.replaceChildren(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = (save: boolean) => {
+      if (done) return;
+      done = true;
+      if (save) stage(r, c, input.value);
+      else renderBody();
+    };
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") finish(true);
+      else if (e.key === "Escape") finish(false);
+    });
+    input.addEventListener("blur", () => finish(true));
+  };
+  body.ondblclick = (e) => {
+    const td = (e.target as HTMLElement).closest("td");
+    if (td && !td.querySelector("input")) startEdit(td);
+  };
+  const all = () => order.map((r) => columns.map((_, c) => value(r, c)));
+  const copy = (text: string) => navigator.clipboard.writeText(text);
   body.oncontextmenu = (e) => {
     const td = (e.target as HTMLElement).closest("td");
-    const tr = td?.parentElement as HTMLTableRowElement | null;
+    const tr = td?.parentElement;
     if (!td || !tr) return;
-    const r = rows[tr.sectionRowIndex];
-    const v = r[td.cellIndex];
+    const r = rowOf(tr);
+    const c = td.cellIndex;
+    const v = value(r, c);
+    const line = columns.map((_, i) => value(r, i));
+    const ca = opts.copyAs;
     contextMenu(e, [
-      { label: "Copy Value", run: () => navigator.clipboard.writeText(v ?? "NULL") },
-      { label: "Copy Row as CSV", run: () => navigator.clipboard.writeText(csvLine(r)) },
+      { label: "Copy Value", run: () => copy(v ?? "NULL") },
+      { label: "Copy Row as CSV", run: () => copy(csvLine(line)) },
+      null,
+      { label: "Copy All as CSV", run: () => copy(toCsv(columns, all())) },
+      { label: "Copy All as JSON", run: () => copy(toJson(columns, all())) },
+      { label: "Copy All as Markdown", run: () => copy(toMarkdown(columns, all())) },
+      ca ? { label: "Copy All as SQL INSERT", run: () => copy(toSqlInsert(ca.table, columns, all(), ca.dialect)) } : null,
+      ...(edit
+        ? [
+            null,
+            { label: "Edit Value", run: () => startEdit(td) },
+            { label: "Set NULL", run: () => (edit.blocked(c) ? toast(edit.blocked(c)!) : stage(r, c, null)) },
+            edit.staged.get(r)?.has(c) ? { label: "Revert Value", run: () => stage(r, c, rows[r][c]) } : null,
+          ]
+        : []),
     ]);
   };
-  const head = h(
-    "tr",
-    {},
-    ...columns.map((c) => {
-      const th = h(
-        "th",
-        { class: sort ? "db-sortable" : "", title: sort ? `Sort by ${c}` : c, onclick: sort ? () => sort.onSort(c) : undefined },
-        c,
-        sort?.col === c ? icon(sort.desc ? "arrow-down" : "arrow-up") : null,
-      );
-      th.append(resizeHandle(th));
-      return th;
-    }),
-  );
+  const onSort = (name: string) => {
+    if (sort) return sort.onSort(name);
+    const col = columns.indexOf(name);
+    local = { col, desc: local?.col === col ? !local.desc : false };
+    order = sortedOrder(rows, col, local.desc);
+    renderBody();
+    renderHead();
+  };
+  const head = h("tr", {});
+  const renderHead = () =>
+    head.replaceChildren(
+      ...columns.map((c, i) => {
+        const on = sort ? sort.col === c : local?.col === i;
+        const desc = sort ? sort.desc : local?.desc;
+        const th = h("th", { class: "db-sortable", title: `Sort by ${c}`, onclick: () => onSort(c) }, c, on ? icon(desc ? "arrow-down" : "arrow-up") : null);
+        th.append(resizeHandle(th));
+        return th;
+      }),
+    );
+  renderHead();
   let cell: HTMLTableCellElement | null = null;
   body.onclick = (e) => {
     const td = (e.target as HTMLElement).closest("td");
-    if (!td) return;
+    if (!td || td.querySelector("input")) return;
     cell?.classList.remove("db-cell-selected");
     cell = td;
     td.classList.add("db-cell-selected");
+    opts.onSelect?.(value(rowOf(td.parentElement!), td.cellIndex), columns[td.cellIndex]);
   };
   const wrap = h("div", { class: "db-grid-wrap", tabIndex: 0 }, h("table", { class: "db-grid" }, h("thead", {}, head), body));
   wrap.addEventListener("keydown", (e) => {
-    if (!(e.metaKey && e.key.toLowerCase() === "c") || !cell || window.getSelection()?.toString()) return;
-    const tr = cell.parentElement as HTMLTableRowElement;
-    navigator.clipboard.writeText(rows[tr.sectionRowIndex]?.[cell.cellIndex] ?? "NULL");
+    if (cell?.isConnected && e.key === "F2" && edit) return startEdit(cell);
+    if (!(e.metaKey && e.key.toLowerCase() === "c") || !cell?.isConnected || window.getSelection()?.toString()) return;
+    copy(value(rowOf(cell.parentElement!), cell.cellIndex) ?? "NULL");
     e.preventDefault();
   });
   return wrap;
+}
+
+/// Value viewer: the selected cell in full, JSON pretty-printed.
+export function valueViewer() {
+  const pre = h("pre", { class: "db-value-text" });
+  const label = h("span", { class: "dim" });
+  const el = h("div", { class: "db-value-viewer" }, h("div", { class: "db-value-head" }, label), pre);
+  el.hidden = true;
+  const show = (v: string | null, column: string) => {
+    label.textContent = column;
+    pre.classList.toggle("db-null", v === null);
+    let text = v ?? "NULL";
+    if (v && /^\s*[[{]/.test(v)) {
+      try {
+        text = JSON.stringify(JSON.parse(v), null, 2);
+      } catch {
+        /* not JSON */
+      }
+    }
+    pre.textContent = text;
+  };
+  return { el, show };
 }
 
 /// Drag handle on a header cell's right edge; the column keeps the width it's dragged to.
@@ -893,6 +1080,8 @@ interface DbTab {
   el: HTMLElement;
   refresh: () => void;
   dispose?: () => void;
+  /// Toolbar actions the dbXxx commands run on the active tab.
+  actions?: Partial<Record<"submit" | "revert" | "reload" | "prev" | "next" | "viewer", () => unknown>>;
 }
 
 const tabs: DbTab[] = [];
@@ -981,48 +1170,151 @@ export async function exportResult(r: QueryResult, format: "csv" | "json") {
 
 /// Table data viewer
 
+const PAGE_SIZES = [50, 100, 500, 1000];
+const BINARY = /blob|bytea|binary/i;
+
+/// Why the grid can't be edited at all (null when it can): writable connection, a table, a usable primary key.
+export function editBlocked(c: Conn | undefined, t: TableInfo | undefined): string | null {
+  if (!c) return "Unknown data source.";
+  if (c.readOnly) return `"${c.name}" is read-only.`;
+  if (!t) return "Refresh the schema first; the primary key isn't known yet.";
+  if (t.kind !== "table") return `${t.name} is a view.`;
+  const pk = t.columns.filter((x) => x.primaryKey);
+  if (!pk.length) return `${t.name} has no primary key, so rows can't be addressed safely.`;
+  if (pk.some((x) => BINARY.test(x.dataType))) return `${t.name}'s primary key is binary.`;
+  return null;
+}
+
+const tableInfo = (id: string, schema: string, table: string) =>
+  live.get(id)?.schema?.schemas.find((s) => s.name === schema)?.tables.find((t) => t.name === table);
+
+/// Submits staged cell edits as one UPDATE per row, after listing them for confirmation.
+export async function submitEdits(c: Conn, schema: string, t: TableInfo, columns: string[], rows: (string | null)[][], staged: Map<number, Map<number, string | null>>) {
+  const pk = t.columns.filter((x) => x.primaryKey).map((x) => x.name);
+  const sqls: string[] = [];
+  for (const [r, changes] of staged) {
+    const sql = updateSql(dialect(c), schema, t.name, pk, columns, rows[r], changes);
+    if (!sql) return { error: `Row ${r + 1} has no usable primary key value; nothing was submitted.` };
+    sqls.push(sql);
+  }
+  if (!sqls.length) return { error: "" };
+  const ok = await (dbSmokeHooks.ask ?? ask)(`Run ${sqls.length} UPDATE statement${sqls.length === 1 ? "" : "s"} on "${c.name}"?\n\n${sqls.join(";\n")};`, {
+    title: "Submit Changes",
+    kind: "warning",
+    okLabel: "Submit",
+    cancelLabel: "Cancel",
+  });
+  if (!ok) return { error: "Cancelled; nothing was submitted." };
+  const res = await runBatch(c, sqls);
+  const failed = res.outcomes.find((o) => o.error);
+  const odd = res.outcomes.filter((o) => o.result && o.result.rowsAffected !== 1).length;
+  if (res.blocked || failed) return { error: res.blocked ?? `${failed!.error}\n\n${failed!.sql}\n\n${res.outcomes.length - 1} earlier statement(s) ran.` };
+  return { error: odd ? `${odd} UPDATE(s) matched no row or more than one row; reload to check.` : "", done: res.outcomes.length };
+}
+
 function openTable(id: string, schema: string, table: string) {
   const key = `table:${id}:${schema}.${table}`;
   if (tabs.some((t) => t.key === key)) return activate(key);
   let offset = 0;
+  let pageSize = PAGE;
   let orderBy: string | undefined;
   let desc = false;
   let filter = "";
   let seq = 0;
+  let page: (QueryResult & { total: number | null }) | null = null;
+  const staged = new Map<number, Map<number, string | null>>();
   const header = connHeader(id);
   const filterInput = h("input", { class: "search-input", placeholder: "WHERE …  (Enter to apply)", spellcheck: false });
   const range = h("span", { class: "dim db-range" });
-  const prev = iconButton("chevron-left", "Previous page", () => ((offset = Math.max(0, offset - PAGE)), load()));
-  const next = iconButton("chevron-right", "Next page", () => ((offset += PAGE), load()));
+  const prev = iconButton("chevron-left", "Previous page", () => ((offset = Math.max(0, offset - pageSize)), load()), "dbPrevPage");
+  const next = iconButton("chevron-right", "Next page", () => ((offset += pageSize), load()), "dbNextPage");
+  const sizeSel = h("select", { class: "run-select", title: "Page size" }, ...PAGE_SIZES.map((n) => h("option", { value: n, selected: n === pageSize }, String(n))));
+  sizeSel.onchange = () => ((pageSize = Number(sizeSel.value)), (offset = 0), load());
+  const submitBtn = iconButton("check", "Submit changes (⌘↩)", () => submit(), "dbSubmitEdits");
+  const revertBtn = iconButton("discard", "Revert changes", () => revert(), "dbRevertEdits");
+  const viewer = valueViewer();
+  const viewerBtn = iconButton("open-preview", "Value viewer", () => ((viewer.el.hidden = !viewer.el.hidden), viewerBtn.classList.toggle("on", !viewer.el.hidden)), "dbValueViewer");
+  const exportBtn = (fmt: "csv" | "json") => h("button", { class: "btn small", title: `Export this page as ${fmt.toUpperCase()}`, onclick: () => page && exportResult(page, fmt) }, fmt.toUpperCase());
   const content = h("div", { class: "db-result" });
-  filterInput.addEventListener("keydown", (e) => {
-    if (e.key !== "Enter") return;
+  const syncEdit = () => {
+    const n = [...staged.values()].reduce((a, m) => a + m.size, 0);
+    submitBtn.disabled = revertBtn.disabled = n === 0;
+    submitBtn.title = n ? `Submit ${n} change${n === 1 ? "" : "s"} (⌘↩)` : "Submit changes (⌘↩)";
+  };
+  const discardChanges = async () => !staged.size || (await (dbSmokeHooks.ask ?? ask)(`Discard ${staged.size} edited row(s)?`, { title: "Unsubmitted Changes", kind: "warning", okLabel: "Discard", cancelLabel: "Keep Editing" }));
+  filterInput.addEventListener("keydown", async (e) => {
+    if (e.key !== "Enter" || !(await discardChanges())) return;
     filter = filterInput.value.trim();
     offset = 0;
     load();
   });
+  const revert = () => {
+    staged.clear();
+    render();
+  };
+  const submit = async () => {
+    const c = needLive(id);
+    const t = tableInfo(id, schema, table);
+    if (!c || !t || !page || !staged.size) return;
+    const res = await submitEdits(c, schema, t, page.columns, page.rows, staged);
+    if (res.error) toast(res.error, "error");
+    if (res.done) {
+      toast(`Submitted ${res.done} UPDATE${res.done === 1 ? "" : "s"}.`);
+      staged.clear();
+      load();
+    }
+  };
+  const render = () => {
+    syncEdit();
+    if (!page) return;
+    const c = connById(id);
+    const t = tableInfo(id, schema, table);
+    const blocked = editBlocked(c, t);
+    submitBtn.hidden = revertBtn.hidden = blocked !== null;
+    const edit: GridEdit | undefined = blocked
+      ? undefined
+      : {
+          staged,
+          onChange: syncEdit,
+          blocked: (col) => {
+            const info = t!.columns.find((x) => x.name === page!.columns[col]);
+            if (!info) return `${page!.columns[col]} isn't a column of ${table}.`;
+            if (BINARY.test(info.dataType)) return `${info.name} is binary; edit it with an UPDATE in the console.`;
+            return null;
+          },
+        };
+    content.replaceChildren(
+      grid(page.columns, page.rows, {
+        sort: {
+          col: orderBy,
+          desc,
+          onSort: async (col) => {
+            if (!(await discardChanges())) return;
+            desc = orderBy === col ? !desc : false;
+            orderBy = col;
+            load();
+          },
+        },
+        edit,
+        copyAs: c ? { table, dialect: dialect(c) } : undefined,
+        onSelect: viewer.show,
+      }),
+    );
+  };
   const load = async () => {
     if (!needLive(id)) return;
     const mine = ++seq;
     range.textContent = "Loading…";
     try {
-      const page = await invoke<QueryResult & { total: number | null }>("db_table_page", { id, schema, table, offset, limit: PAGE, orderBy, desc, filter: filter || undefined });
+      const p = await invoke<QueryResult & { total: number | null }>("db_table_page", { id, schema, table, offset, limit: pageSize, orderBy, desc, filter: filter || undefined });
       if (mine !== seq) return;
-      const end = offset + page.rows.length;
-      range.textContent = page.rows.length ? `rows ${offset + 1}–${end}${page.total !== null ? ` of ${page.total}` : ""}` : page.total ? `no rows past ${page.total}` : "no rows";
+      page = p;
+      staged.clear();
+      const end = offset + p.rows.length;
+      range.textContent = p.rows.length ? `rows ${offset + 1}–${end}${p.total !== null ? ` of ${p.total}` : ""}` : p.total ? `no rows past ${p.total}` : "no rows";
       prev.disabled = offset === 0;
-      next.disabled = page.total !== null ? end >= page.total : page.rows.length < PAGE;
-      content.replaceChildren(
-        grid(page.columns, page.rows, {
-          col: orderBy,
-          desc,
-          onSort: (col) => {
-            desc = orderBy === col ? !desc : false;
-            orderBy = col;
-            load();
-          },
-        }),
-      );
+      next.disabled = p.total !== null ? end >= p.total : p.rows.length < pageSize;
+      render();
     } catch (e) {
       if (mine !== seq) return;
       range.textContent = "";
@@ -1033,11 +1325,32 @@ function openTable(id: string, schema: string, table: string) {
     "div",
     { class: "db-pane" },
     header.el,
-    h("div", { class: "view-toolbar" }, iconButton("refresh", "Reload", () => load()), filterInput, prev, range, next),
-    content,
+    h(
+      "div",
+      { class: "view-toolbar" },
+      iconButton("refresh", "Reload", async () => (await discardChanges()) && load(), "dbReload"),
+      filterInput,
+      submitBtn,
+      revertBtn,
+      prev,
+      range,
+      next,
+      sizeSel,
+      viewerBtn,
+      exportBtn("csv"),
+      exportBtn("json"),
+    ),
+    h("div", { class: "db-split db-table-split" }, content, viewer.el),
   );
-  addTab({ key, connId: id, iconName: "table", title: () => table, el, refresh: header.refresh });
+  el.addEventListener("keydown", (e) => {
+    if (e.metaKey && e.key === "Enter" && !(e.target instanceof HTMLInputElement)) {
+      e.preventDefault();
+      submit();
+    }
+  });
+  addTab({ key, connId: id, iconName: "table", title: () => table, el, refresh: () => (header.refresh(), render()), actions: { submit, revert, reload: load, prev: () => !prev.disabled && prev.click(), next: () => !next.disabled && next.click(), viewer: () => viewerBtn.click() } });
   header.refresh();
+  syncEdit();
   load();
 }
 
@@ -1082,13 +1395,14 @@ function openConsole(id: string) {
   let shown = 0;
   let running = false;
   let cancelled = false;
+  let queryId = "";
   let message = "";
 
   const limitBox = h("input", { type: "checkbox", checked: setting<boolean>("database.autoLimit") });
   const runBtn = iconButton("play", "Run statement at caret or selection ⌘↩", () => run());
   const cancelBtn = iconButton("debug-stop", "Cancel", () => {
     cancelled = true;
-    invoke("db_cancel", { id }).catch((e) => toast(String(e), "error"));
+    invoke("db_cancel", { id, queryId }).catch((e) => toast(String(e), "error"));
   });
   const explainBtn = iconButton("graph", "Explain Plan (EXPLAIN, nothing is executed)", () => explain());
   const csvBtn = h("button", { class: "btn small", onclick: () => current()?.result && exportResult(current()!.result!, "csv") }, "Export CSV");
@@ -1159,6 +1473,7 @@ function openConsole(id: string) {
       const res = await runBatch(c, sqls, {
         autoLimit: limitBox.checked ? setting<number>("database.autoLimitRows") : 0,
         cancelled: () => cancelled,
+        onQuery: (q) => (queryId = q),
         onResult: (o) => {
           outcomes.push(o);
           shown = outcomes.length - 1;
@@ -1251,6 +1566,17 @@ function openConsole(id: string) {
     fontFamily: setting<string>("editor.fontFamily"),
   });
   ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => run());
+  ed.addAction({
+    id: "garnet.db.openTableAtCaret",
+    label: "Database: Open Table at Caret",
+    keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyB],
+    run: () => {
+      const word = model.getWordAtPosition(ed.getPosition()!)?.word;
+      const hit = word ? findTable(id, word) : undefined;
+      if (hit) openTable(id, hit.schema, hit.table.name);
+      else if (word) toast(`No table named ${word} in the loaded schema.`);
+    },
+  });
   header.refresh();
   renderResults();
   ed.focus();
@@ -1266,6 +1592,37 @@ async function addHistory(id: string, sqls: string[]) {
   history![id] = [...sqls.slice().reverse(), ...rest].slice(0, 100);
   await api.configWrite(HISTORY, JSON.stringify(history));
 }
+
+/// A table by name in a live connection's schema (case-insensitive, the default schema first).
+export function findTable(id: string, name: string): { schema: string; table: TableInfo } | undefined {
+  const n = name.replace(/^["`[]|["`\]]$/g, "").toLowerCase();
+  for (const s of live.get(id)?.schema?.schemas ?? []) {
+    const table = s.tables.find((t) => t.name.toLowerCase() === n);
+    if (table) return { schema: s.name, table };
+  }
+  return undefined;
+}
+
+/// Quick documentation for a table: its columns, types and keys.
+export function tableDoc(t: TableInfo): string {
+  const pk = t.columns.filter((c) => c.primaryKey).map((c) => c.name);
+  const fk = (c: string) => t.foreignKeys.find((f) => f.columns.includes(c));
+  const lines = t.columns.map((c) => {
+    const ref = fk(c.name);
+    return `| ${c.name}${c.primaryKey ? " (PK)" : ""} | ${c.dataType}${c.nullable ? "" : " not null"} | ${ref ? `→ ${ref.refTable}(${ref.refColumns.join(", ")})` : ""} |`;
+  });
+  return [`**${t.name}** (${t.kind})${pk.length ? ` · primary key (${pk.join(", ")})` : ""}`, "", "| column | type | references |", "| --- | --- | --- |", ...lines].join("\n");
+}
+
+monaco.languages.registerHoverProvider("sql", {
+  provideHover(model, position) {
+    const id = consoleModels.get(model.uri.toString());
+    const word = model.getWordAtPosition(position);
+    const hit = id && word ? findTable(id, word.word) : undefined;
+    if (!hit || !word) return null;
+    return { range: new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn), contents: [{ value: tableDoc(hit.table) }] };
+  },
+});
 
 monaco.languages.registerCompletionItemProvider("sql", {
   triggerCharacters: ["."],
@@ -1296,7 +1653,7 @@ export const dbView = h(
   h(
     "div",
     { class: "view-toolbar" },
-    iconButton("add", "New Data Source…", () => editConnection(), "dbNewConnection"),
+    iconButton("add", "New Data Source…", () => pickEngine(), "dbNewConnection"),
     iconButton("refresh", "Refresh (re-read config/database.yml)", () => detect(), "dbRedetect"),
     iconButton("plug", "Connect", withSelected(connect)),
     iconButton("debug-disconnect", "Disconnect", withSelected((c) => disconnect(c.id))),
@@ -1307,6 +1664,57 @@ export const dbView = h(
 );
 
 rightbar.add({ id: "database", title: "Database", icon: "database", command: "databaseView", el: dbView, onShow: () => void ensureLoaded() });
+
+/// "+" › Data Source › engine, as in RubyMine.
+function pickEngine() {
+  quickPick({
+    placeholder: "New data source",
+    items: (["postgres", "mysql", "sqlite"] as Dialect[]).map((e) => ({ label: { postgres: "PostgreSQL", mysql: "MySQL", sqlite: "SQLite" }[e], data: e, icon: "database" })),
+    onAccept: (item) => item && editConnection(undefined, item.data as Dialect),
+  });
+}
+
+/// Rails data source detection: offer to add config/database.yml's connections once per project.
+export async function dbProjectOpened() {
+  const root = state.project?.root;
+  if (!root || !state.project?.rails) return;
+  const all = await readJson<Record<string, ProjectStore>>(STORE, {});
+  if (all[root]?.noticed) return;
+  const answer = async (add: boolean) => {
+    const latest = await readJson<Record<string, ProjectStore>>(STORE, {});
+    latest[root] = Object.assign({ manual: [], overrides: {} }, latest[root], { noticed: true });
+    await api.configWrite(STORE, JSON.stringify(latest, null, 2));
+    if (loadedRoot === root) store.noticed = true;
+    if (add) await showPanel();
+  };
+  toast("Database detected in config/database.yml. Add it as a data source?", "info", [
+    { label: "Add Data Source", run: () => void answer(true) },
+    { label: "Ignore", run: () => void answer(false) },
+  ]);
+}
+
+const activeDbTab = () => {
+  const key = activeViewTab()?.key;
+  return tabs.find((t) => t.key === key);
+};
+const onTab = (action: keyof NonNullable<DbTab["actions"]>) => () => activeDbTab()?.actions?.[action]?.();
+
+/// Model file → table: app/models/blog_post.rb → blog_posts, opened in the first connected data source that has it.
+export function tableForModel(path: string): string | null {
+  const m = /\/app\/models\/(?:.*\/)?([^/]+)\.rb$/.exec(path);
+  return m ? pluralize(underscore(m[1])) : null;
+}
+
+async function goToTable() {
+  const path = activeFileTab()?.path ?? "";
+  const name = tableForModel(path);
+  if (!name) return toast("Open a Rails model (app/models/*.rb) first.");
+  for (const id of live.keys()) {
+    const hit = findTable(id, name);
+    if (hit) return openTable(id, hit.schema, hit.table.name);
+  }
+  toast(live.size ? `No table "${name}" in the connected data sources.` : `Connect a data source to find "${name}".`, "info", [{ label: "Database", run: () => void showPanel() }]);
+}
 
 const needProject = (fn: () => unknown) => () => (state.project ? fn() : toast("Open a folder first."));
 const showPanel = async () => {
@@ -1322,7 +1730,14 @@ commands(
   { id: "databaseView", title: "View: Database", run: needProject(() => rightbar.activate("database")) },
   { id: "dbEditData", title: "Database: Edit Data (selected table)", run: fromTree((r) => r.onOpen?.()) },
   { id: "dbJumpToDdl", title: "Database: Jump to DDL (selected table)", run: fromTree((r) => r.onDdl?.()) },
-  { id: "dbNewConnection", title: "Database: New Connection…", run: needProject(async () => (await showPanel(), editConnection())) },
+  { id: "dbNewConnection", title: "Database: New Data Source…", run: needProject(async () => (await showPanel(), pickEngine())) },
+  { id: "dbGoToTable", title: "Database: Go to Table (from Rails model)", run: needProject(goToTable) },
+  { id: "dbSubmitEdits", title: "Database: Submit Changes", run: onTab("submit") },
+  { id: "dbRevertEdits", title: "Database: Revert Changes", run: onTab("revert") },
+  { id: "dbReload", title: "Database: Reload Table", run: onTab("reload") },
+  { id: "dbPrevPage", title: "Database: Previous Page", run: onTab("prev") },
+  { id: "dbNextPage", title: "Database: Next Page", run: onTab("next") },
+  { id: "dbValueViewer", title: "Database: Toggle Value Viewer", run: onTab("viewer") },
   { id: "dbRedetect", title: "Database: Re-read config/database.yml", run: needProject(async () => (await showPanel(), detect())) },
   {
     id: "dbConsole",

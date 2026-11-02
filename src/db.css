@@ -281,3 +281,74 @@
 .db-unresolved select {
   border-color: var(--warn);
 }
+
+.db-empty::after {
+  content: "''";
+  color: var(--dim);
+  opacity: 0.6;
+}
+.db-grid td.db-staged {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.db-cell-input {
+  width: 100%;
+  min-width: 80px;
+  font: inherit;
+  border: none;
+  outline: 1px solid var(--accent);
+  background: var(--bg);
+  color: var(--text);
+}
+.db-table-split {
+  flex-direction: row;
+}
+.db-value-viewer {
+  width: 34%;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+}
+.db-value-viewer[hidden] {
+  display: none;
+}
+.db-value-head {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+}
+.db-value-text {
+  flex: 1;
+  margin: 0;
+  padding: 6px 8px;
+  overflow: auto;
+  font: 12px/18px ui-monospace, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.db-test-result {
+  align-self: center;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.db-test-result.db-ok {
+  color: var(--added);
+}
+.db-dialog .rc-actions .spacer {
+  flex: 1;
+}
+.search-summary.error {
+  color: var(--deleted);
+}
+.search-input.invalid {
+  border-color: var(--deleted);
+}
+.result-more {
+  padding: 2px 28px;
+  font-size: 11px;
+  font-style: italic;
+}

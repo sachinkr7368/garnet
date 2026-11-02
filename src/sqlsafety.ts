@@ -38,7 +38,8 @@ export function tokenize(sql: string, dialect: Dialect = "postgres"): Token[] {
       let j = i + 1;
       while (j < n && /\s/.test(sql[j])) j++;
       push("ws", j);
-    } else if ((c === "-" && d === "-") || (c === "#" && dialect === "mysql")) {
+    } else if ((c === "-" && d === "-" && (dialect !== "mysql" || i + 2 >= n || /[\s\x00-\x1f]/.test(sql[i + 2]))) || (c === "#" && dialect === "mysql")) {
+      // MySQL needs whitespace or a control character after `--`; `1--1` is 1 - -1.
       const j = sql.indexOf("\n", i);
       push("comment", j < 0 ? n : j);
     } else if (c === "/" && d === "*") {
@@ -236,7 +237,14 @@ export function defaultReadOnly(env: string | undefined, engine: Dialect | null,
   return host === null || !isLocalHost(host);
 }
 
-const csvField = (v: string | null) => (v === null ? "" : /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+const NUMBER = /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/;
+
+/// NULL is an empty field and an empty string is `""`; text a spreadsheet would run as a formula gets a leading `'`.
+function csvField(v: string | null): string {
+  if (v === null) return "";
+  const safe = /^[=+\-@\t\r]/.test(v) && !NUMBER.test(v) ? `'${v}` : v;
+  return safe === "" || /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+}
 
 export const csvLine = (row: (string | null)[]) => row.map(csvField).join(",");
 
@@ -245,11 +253,54 @@ export function toCsv(columns: string[], rows: (string | null)[][]): string {
 }
 
 export function toJson(columns: string[], rows: (string | null)[][]): string {
-  const seen = new Map<string, number>();
+  const used = new Set<string>();
   const keys = columns.map((c) => {
-    const n = (seen.get(c) ?? 0) + 1;
-    seen.set(c, n);
-    return n === 1 ? c : `${c}_${n}`;
+    let k = c;
+    for (let n = 2; used.has(k); n++) k = `${c}_${n}`;
+    used.add(k);
+    return k;
   });
   return JSON.stringify(rows.map((r) => Object.fromEntries(keys.map((k, i) => [k, r[i] ?? null]))), null, 2);
+}
+
+const quoteIdent = (d: Dialect, name: string) => (d === "mysql" ? `\`${name.replace(/`/g, "``")}\`` : `"${name.replace(/"/g, '""')}"`);
+
+/// A SQL string literal that reads the same whatever the server's escaping settings are: Postgres dollar quoting with
+/// a tag not in the value; MySQL a hex string in utf8mb4 (no quote or backslash to misread); SQLite plain quotes.
+export function sqlLiteral(v: string | null, d: Dialect): string {
+  if (v === null) return "NULL";
+  if (d === "sqlite") return `'${v.replace(/'/g, "''")}'`;
+  if (d === "mysql") return v === "" ? "''" : `_utf8mb4 X'${[...new TextEncoder().encode(v)].map((b) => b.toString(16).padStart(2, "0")).join("")}'`;
+  let tag = "$g$";
+  for (let n = 0; (v + tag).indexOf(tag) !== v.length; n++) tag = `$g${n}$`;
+  return `${tag}${v}${tag}`;
+}
+
+export function toSqlInsert(table: string, columns: string[], rows: (string | null)[][], d: Dialect): string {
+  const cols = columns.map((c) => quoteIdent(d, c)).join(", ");
+  return rows.map((r) => `INSERT INTO ${quoteIdent(d, table)} (${cols}) VALUES (${r.map((v) => sqlLiteral(v, d)).join(", ")});`).join("\n") + "\n";
+}
+
+export function toMarkdown(columns: string[], rows: (string | null)[][]): string {
+  const cell = (v: string | null) => (v === null ? "NULL" : v.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>"));
+  const line = (r: (string | null)[]) => `| ${r.map(cell).join(" | ")} |`;
+  return [line(columns), `|${columns.map(() => " --- |").join("")}`, ...rows.map(line)].join("\n") + "\n";
+}
+
+/// One UPDATE per edited row, keyed by the primary key's original values; null when there is no usable key.
+export function updateSql(
+  d: Dialect,
+  schema: string,
+  table: string,
+  pk: string[],
+  columns: string[],
+  original: (string | null)[],
+  changes: Map<number, string | null>,
+): string | null {
+  const keyIdx = pk.map((k) => columns.indexOf(k));
+  if (!pk.length || keyIdx.some((i) => i < 0 || original[i] === null) || !changes.size) return null;
+  const from = d === "sqlite" ? quoteIdent(d, table) : `${quoteIdent(d, schema)}.${quoteIdent(d, table)}`;
+  const set = [...changes].map(([i, v]) => `${quoteIdent(d, columns[i])} = ${sqlLiteral(v, d)}`).join(", ");
+  const where = keyIdx.map((i) => `${quoteIdent(d, columns[i])} = ${sqlLiteral(original[i], d)}`).join(" AND ");
+  return `UPDATE ${from} SET ${set} WHERE ${where}`;
 }

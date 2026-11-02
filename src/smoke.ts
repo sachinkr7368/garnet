@@ -312,6 +312,7 @@ async function editorFeatureChecks(check: (n: string, ok: boolean | string) => v
   const fileA = `${root}/app/models/garnet_replace_smoke_a.rb`;
   const fileB = `${root}/app/models/garnet_replace_smoke_b.rb`;
   const ignored = `${root}/tmp/garnet_replace_smoke_c.rb`;
+  const link = `${root}/app/models/garnet_replace_smoke_link.rb`;
   const body = "garnet_smoke_user_id = garnet_smoke_post_id\n";
   for (const f of [fileA, fileB, ignored]) await api.writeFile(f, body);
   try {
@@ -345,8 +346,17 @@ async function editorFeatureChecks(check: (n: string, ok: boolean | string) => v
     modelA.undo();
     check("replace in open buffer is undoable", modelA.getValue() === body || modelA.getValue());
     for (const t of allTabs().filter((t) => t.path === fileA)) await closeTab(t, true);
+
+    q.value = "(?:foo(";
+    q.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    const err = await until(() => searchView.querySelector(".search-summary.error")?.textContent, 5000);
+    check("find: invalid regex shows one line and marks the field", (!!err && !err.includes("\n") && err.startsWith("Invalid regular expression") && q.classList.contains("invalid")) || String(err));
+    regexBtn.classList.remove("on");
+    await api.runCapture(root, `ln -sf /etc/hosts ${shellQuote(link)}`, 30);
+    const viaLink = await invoke("replace_in_file", { path: link, edits: [{ line: 1, start: 0, end: 1, old: "#", new: "!" }] }).then(() => "written", (e) => String(e));
+    check("replace refuses to write through a symlink", viaLink.includes("symlink") || viaLink);
   } finally {
-    for (const f of [fileA, fileB, ignored]) await api.deletePath(f).catch(() => {});
+    for (const f of [fileA, fileB, ignored, link]) await api.deletePath(f).catch(() => {});
   }
   clearToasts();
 
@@ -630,7 +640,9 @@ async function databaseChecks(report: Report, check: Check) {
   const root = state.project!.root;
   const dev = `${root}::env::development`;
   const test = `${root}::env::test`;
-  const q = (id: string, sql: string) => invoke<{ rows: (string | null)[][] }>("db_query", { id, sql, maxRows: 1000 });
+  const q = (id: string, sql: string, confirm?: string) => invoke<{ rows: (string | null)[][] }>("db_query", { id, sql, maxRows: 1000, confirm });
+  /// The backend's own confirmation handshake, for the smoke run's cleanup of what it created.
+  const qConfirmed = (id: string, sql: string) => q(id, sql).catch((e) => q(id, sql, /CONFIRM:([0-9a-f]+):/.exec(String(e))?.[1] ?? ""));
   const prevHistory = await api.configRead("db-history.json");
   const exportPath = `${(await invoke<[string, boolean] | null>("smoke_target"))![0]}.export.csv`;
   try {
@@ -638,7 +650,14 @@ async function databaseChecks(report: Report, check: Check) {
     check("db: Database tool window is docked on the right with a stripe button", !!document.querySelector('#rightstrip .dock-tab[data-view="database"]') && !document.getElementById("rightbar")!.hidden && !!document.querySelector("#rightbar .db-view"));
 
     runCommand("dbNewConnection");
+    const engines = await until(() => {
+      const items = [...document.querySelectorAll<HTMLElement>(".qp-item")].filter((i) => /PostgreSQL|MySQL|SQLite/.test(i.textContent ?? ""));
+      return items.length ? items : null;
+    }, 5000);
+    check("db: + › Data Source lists the engines", engines?.length === 3 || String(document.querySelector(".qp")?.textContent));
+    engines?.[0]?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
     const dlg = await until(() => document.querySelector<HTMLElement>(".db-dialog"), 5000);
+    check("db: data source dialog has Test Connection", !![...(dlg?.querySelectorAll("button") ?? [])].find((b) => b.textContent === "Test Connection"));
     const fields = [...(dlg?.querySelectorAll<HTMLInputElement>("input.search-input") ?? [])];
     const hit = fields.every((f) => {
       const r = f.getBoundingClientRect();
@@ -673,6 +692,42 @@ async function databaseChecks(report: Report, check: Check) {
     const second = await until(() => range() === `rows 101–${total} of ${total}` && range(), 15000);
     check("db: table viewer pages forward", !!second || range());
     check("db: table data opens as an editor tab", allTabs().some((t) => t.kind === "view" && t.title === "posts" && t === activeViewTab() && activeTab() === null));
+
+    {
+      // Cell editing on one of the smoke run's own rows: stage a title, submit (confirmation answered yes), check it on disk.
+      const where = dbPane()?.querySelector<HTMLInputElement>('input[placeholder^="WHERE"]');
+      if (where) {
+        where.value = "title LIKE 'garnet-smoke-%'";
+        where.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+        await until(() => /^rows 1–100 of 150$/.test(range()), 10000);
+      }
+      const cell = () => [...(dbPane()?.querySelectorAll<HTMLTableCellElement>(".db-grid tbody tr:first-child td") ?? [])];
+      const head = [...(dbPane()?.querySelectorAll(".db-grid th") ?? [])].map((th) => th.textContent);
+      const ti = head.indexOf("title");
+      const id = cell()[head.indexOf("id")]?.textContent;
+      cell()[ti]?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      const input = await until(() => cell()[ti]?.querySelector<HTMLInputElement>("input"), 3000);
+      if (input) {
+        input.value = "garnet-smoke-edited";
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+      }
+      let asked = "";
+      dbSmokeHooks.ask = async (m) => ((asked = String(m)), true);
+      click(dbPane()?.querySelector('[title^="Submit 1 change"]'));
+      const saved = await until(async () => (await q(dev, `SELECT title FROM posts WHERE id = ${Number(id)}`)).rows[0]?.[0] === "garnet-smoke-edited", 10000);
+      check("db: grid edit submits one confirmed UPDATE keyed by the primary key", (!!saved && asked.includes("UPDATE") && asked.includes(`WHERE "id" = '${id}'`)) || JSON.stringify({ asked, id }));
+      dbSmokeHooks.ask = undefined;
+    }
+
+    {
+      const one = await q(dev, "SELECT 1; DROP TABLE garnet_smoke_drop").then(() => "ran", (e) => String(e));
+      check("db: backend refuses two statements in one string", one.includes("one statement") || one);
+      const token = await q(dev, "DROP TABLE garnet_smoke_drop").then(() => "ran", (e) => String(e));
+      const kept = (await q(dev, "SELECT name FROM sqlite_master WHERE name = 'garnet_smoke_drop'")).rows.length === 1;
+      check("db: backend asks for a confirmation token before DROP", (token.startsWith("CONFIRM:") && token.endsWith(":DROP statement") && kept) || token);
+      const cancel = await invoke<boolean>("db_cancel", { id: dev, queryId: "not-running" }).catch((e) => String(e));
+      check("db: cancel ignores a query id that isn't running", cancel === false || String(cancel));
+    }
 
     const tree = document.querySelector<HTMLElement>(".db-tree")!;
     for (const name of ["posts", "comments", "schema_migrations", "ar_internal_metadata"]) {
@@ -747,8 +802,9 @@ async function databaseChecks(report: Report, check: Check) {
     const still = (await q(dev, "SELECT name FROM sqlite_master WHERE name = 'garnet_smoke_drop'")).rows.length === 1;
     check("db: DROP on a writable connection asks first; cancel runs nothing", (!!a && a.title === "Dangerous Statement" && a.message.includes("DROP statement") && still && !!pane?.textContent?.includes("Cancelled; nothing was run.")) || JSON.stringify({ a, still, pane: pane?.textContent?.slice(0, 200) }));
 
-    click(dbRow("test"), 2);
+    dblclick(dbRow("test"));
     const testLive = await until(() => dbRow("test")?.querySelector(".db-live"), 15000);
+    check("db: connect to test (read-only sqlite)", !!testLive || String(document.querySelector(".toasts")?.textContent));
     check("db: test connection is read-only by default", !!dbRow("test")?.querySelector(".db-ro") || String(dbRow("test")?.textContent));
     if (testLive) {
       click(dbRow("test"));
@@ -765,7 +821,7 @@ async function databaseChecks(report: Report, check: Check) {
     dbSmokeHooks.ask = undefined;
     await updateSetting("database.autoLimitRows", undefined);
     await q(dev, "DELETE FROM posts WHERE title LIKE 'garnet-smoke-%'").catch(() => {});
-    await q(dev, "DROP TABLE IF EXISTS garnet_smoke_drop").catch(() => {});
+    await qConfirmed(dev, "DROP TABLE IF EXISTS garnet_smoke_drop").catch(() => {});
     for (const id of [dev, test]) await invoke("db_disconnect", { id }).catch(() => {});
     if (prevHistory === null) await api.configWrite("db-history.json", "{}");
     else await api.configWrite("db-history.json", prevHistory);

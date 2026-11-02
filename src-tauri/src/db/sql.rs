@@ -7,6 +7,8 @@ pub enum Dialect {
 
 pub const ONE_STATEMENT: &str = "Run one statement at a time";
 pub const READ_ONLY: &str = "Read-only connection: only queries are allowed";
+/// Prefix of the error asking the frontend to confirm a destructive statement: `CONFIRM:<token>:<reason>`.
+pub const CONFIRM: &str = "CONFIRM:";
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Scan {
@@ -14,6 +16,37 @@ pub struct Scan {
     pub has_eq: bool,
     pub depth: i32,
     pub min_depth: i32,
+    /// Unquoted words (uppercased) with their paren depth, in order.
+    pub words: Vec<(String, i32)>,
+}
+
+impl Scan {
+    fn has(&self, w: &str) -> bool {
+        self.words.iter().any(|(x, _)| x == w)
+    }
+
+    /// Why the statement needs an explicit confirmation: DROP/TRUNCATE/ALTER, or UPDATE/DELETE without a WHERE
+    /// at its own level. Mirrors `classify` in src/sqlsafety.ts.
+    pub fn destructive(&self) -> Option<String> {
+        let first = self.first_keyword.as_deref().unwrap_or("");
+        if matches!(first, "DROP" | "TRUNCATE" | "ALTER") {
+            return Some(format!("{first} statement"));
+        }
+        for (k, (w, depth)) in self.words.iter().enumerate() {
+            if w != "UPDATE" && w != "DELETE" {
+                continue;
+            }
+            let prev = k.checked_sub(1).map(|p| self.words[p].0.as_str());
+            if matches!(prev, Some("FOR" | "ON" | "KEY" | "DO" | "NO")) {
+                continue;
+            }
+            let rest = self.words[k + 1..].iter().take_while(|(_, d)| d >= depth);
+            if !rest.filter(|(_, d)| d == depth).any(|(x, _)| x == "WHERE") {
+                return Some(format!("{w} without a WHERE clause"));
+            }
+        }
+        None
+    }
 }
 
 /// Checks `sql` is exactly one statement (trailing `;`, whitespace and comments allowed).
@@ -32,7 +65,7 @@ pub fn check_read_only(s: &Scan, d: Dialect) -> Result<(), String> {
         "SELECT" | "WITH" | "EXPLAIN" | "SHOW" | "VALUES" | "TABLE" | "DESCRIBE" | "DESC" => true,
         "PRAGMA" => d == Dialect::Sqlite && !s.has_eq,
         _ => false,
-    };
+    } && !s.has("INTO") && !s.has("OUTFILE") && !s.has("DUMPFILE");
     ok.then_some(()).ok_or_else(|| READ_ONLY.into())
 }
 
@@ -70,6 +103,11 @@ fn dollar_tag(b: &[u8], i: usize) -> Option<usize> {
     (b.get(j) == Some(&b'$')).then_some(j + 1)
 }
 
+/// MySQL only treats `--` as a comment when whitespace or a control character follows (`1--1` is 1 - -1).
+fn mysql_dash_comment(b: &[u8], i: usize) -> bool {
+    b.get(i + 2).map_or(true, |c| c.is_ascii_whitespace() || c.is_ascii_control())
+}
+
 fn scan(sql: &str, d: Dialect, backslash: bool) -> Result<Scan, String> {
     let b = sql.as_bytes();
     let mut s = Scan::default();
@@ -81,7 +119,7 @@ fn scan(sql: &str, d: Dialect, backslash: bool) -> Result<Scan, String> {
             i += 1;
             continue;
         }
-        if (c == b'-' && next == Some(b'-')) || (c == b'#' && d == Dialect::Mysql) {
+        if (c == b'-' && next == Some(b'-') && (d != Dialect::Mysql || mysql_dash_comment(b, i))) || (c == b'#' && d == Dialect::Mysql) {
             i = b[i..].iter().position(|&x| x == b'\n').map_or(b.len(), |p| i + p + 1);
             continue;
         }
@@ -147,8 +185,10 @@ fn scan(sql: &str, d: Dialect, backslash: bool) -> Result<Scan, String> {
                 let word = &sql[start..i];
                 if d == Dialect::Postgres && word.eq_ignore_ascii_case("e") && b.get(i) == Some(&b'\'') {
                     i = skip_quoted(b, i, b'\'', true)?;
-                } else if s.first_keyword.is_none() {
-                    s.first_keyword = Some(word.to_ascii_uppercase());
+                } else {
+                    let up = word.to_ascii_uppercase();
+                    s.first_keyword.get_or_insert_with(|| up.clone());
+                    s.words.push((up, s.depth));
                 }
             }
             _ => {
@@ -353,6 +393,47 @@ mod tests {
         assert!(ro("PRAGMA table_info(t)", Sqlite));
         assert!(!ro("PRAGMA query_only = OFF", Sqlite));
         assert!(!ro("PRAGMA table_info(t)", Postgres));
+    }
+
+    #[test]
+    fn mysql_dash_needs_whitespace_to_start_a_comment() {
+        let attack = "SELECT 1--1; COMMIT; SET SESSION TRANSACTION READ WRITE; DELETE FROM t";
+        assert_eq!(check_single(attack, Mysql).unwrap_err(), ONE_STATEMENT);
+        assert!(page_sql(Mysql, "app", "t", Some("1--1) OR (1"), None, false, 10, 0).is_err());
+        assert!(page_sql(Mysql, "app", "t", Some("id = 1--1; DELETE FROM t"), None, false, 10, 0).is_err());
+        assert!(one("SELECT 1 -- ; DROP\n", Mysql));
+        assert!(one("SELECT 1 --\t; x\n", Mysql));
+        assert!(one("SELECT 1 --", Mysql));
+        assert!(one("SELECT 1--1; ", Postgres));
+        assert!(!one("SELECT 1--1; DROP TABLE t", Mysql));
+    }
+
+    #[test]
+    fn read_only_refuses_into_outfile_and_select_into() {
+        let ro = |s: &str, d| check_read_only(&check_single(s, d).unwrap(), d).is_ok();
+        assert!(!ro("SELECT * FROM t INTO OUTFILE '/tmp/x'", Mysql));
+        assert!(!ro("SELECT 'x' INTO DUMPFILE '/tmp/x'", Mysql));
+        assert!(!ro("SELECT * INTO t2 FROM t", Postgres));
+        assert!(ro("SELECT 'into' AS \"into\" FROM t", Postgres));
+    }
+
+    #[test]
+    fn destructive_statements_need_confirmation() {
+        let why = |s: &str| check_single(s, Postgres).unwrap().destructive();
+        for (sql, reason) in [
+            ("DROP TABLE t", "DROP statement"),
+            ("truncate t", "TRUNCATE statement"),
+            ("ALTER TABLE t ADD c int", "ALTER statement"),
+            ("DELETE FROM t", "DELETE without a WHERE clause"),
+            ("update t set a = 1", "UPDATE without a WHERE clause"),
+            ("UPDATE t SET a = (SELECT b FROM u WHERE u.id = 1)", "UPDATE without a WHERE clause"),
+            ("WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x", "DELETE without a WHERE clause"),
+        ] {
+            assert_eq!(why(sql).as_deref(), Some(reason), "{sql}");
+        }
+        for sql in ["DELETE FROM t WHERE id = 1", "UPDATE t SET a = 1 WHERE id = 2", "SELECT * FROM t FOR UPDATE", "INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING", "SELECT 'drop table t'"] {
+            assert_eq!(why(sql), None, "{sql}");
+        }
     }
 
     #[test]

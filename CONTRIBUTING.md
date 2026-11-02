@@ -16,7 +16,8 @@ judged on two things: does it fully work, and does it keep the app fast.
   stashes), `merge.ts` (conflict resolver), `difflogic.ts` + `diffworker.ts`
   (line diff, patches), `toolbar.ts` (project/worktree/branch switchers,
   GitHub), `rails.ts`, `settings.ts` + `settingsui.ts`, `commands.ts` (keymap,
-  palette), `smoke.ts` (end-to-end harness).
+  palette), `languages/` (HAML/Slim grammars, live templates), `replace.ts`,
+  `breadcrumbs.ts`, `semantic.ts` (pure helpers), `smoke.ts` (end-to-end harness).
 
 ## Development
 

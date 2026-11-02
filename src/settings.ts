@@ -1,5 +1,6 @@
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "./ipc";
+import { applyWindowTheme, resolveTheme, systemPrefersDark, toggledAppearance, watchSystemTheme } from "./theme";
 import { toast } from "./ui";
 
 export type SettingType = "boolean" | "number" | "string" | "enum" | "map" | "list";
@@ -20,7 +21,7 @@ const LANGS = ["ruby", "erb", "yaml", "javascript", "typescript", "css", "scss",
 
 /// Every setting Garnet understands. The settings window is generated from this list.
 export const SCHEMA: SettingDef[] = [
-  { key: "appearance.theme", page: "Appearance", label: "Theme", type: "enum", options: ["dark", "light", "system"], default: "dark" },
+  { key: "appearance.theme", page: "Appearance", label: "Theme", type: "enum", options: ["system", "light", "dark"], default: "system", description: "system follows macOS (System Settings › Appearance) live." },
   { key: "appearance.uiFontSize", page: "Appearance", label: "UI font size", type: "number", min: 10, max: 20, default: 13 },
   { key: "appearance.zoom", page: "Appearance", label: "Zoom (%)", type: "number", min: 70, max: 200, default: 100, description: "Scales the whole window." },
   { key: "appearance.sidebarPosition", page: "Appearance", label: "Tool window bar position", type: "enum", options: ["left", "right"], default: "left" },
@@ -68,9 +69,9 @@ export const SCHEMA: SettingDef[] = [
   { key: "git.autoFetchMinutes", page: "Version Control/Git", label: "Auto-fetch every N minutes (0 = off)", type: "number", min: 0, max: 240, default: 0 },
   { key: "git.checkProblemsBeforeCommit", page: "Version Control/Git", label: "Warn before committing files with errors", type: "boolean", default: true },
 
-  { key: "ruby.versionManager", page: "Languages/Ruby", label: "Default Ruby version manager for new run configurations", type: "enum", options: ["auto", "rbenv", "asdf", "chruby", "rvm", "mise", "none"], default: "auto" },
+  { key: "ruby.versionManager", page: "Languages/Ruby", label: "Ruby version manager", type: "enum", options: ["auto", "mise", "rbenv", "asdf", "chruby", "rvm", "none"], default: "auto", description: "Used to start ruby-lsp and as the default for new run configurations. auto picks the first installed manager that reads the project's mise.toml, .tool-versions or .ruby-version (in that order), else the first installed of mise, rbenv, asdf, chruby, rvm." },
   { key: "ruby.useBundler", page: "Languages/Ruby", label: "Use bundler for new run configurations", type: "boolean", default: true },
-  { key: "ruby.lspCommand", page: "Languages/Ruby", label: "ruby-lsp command (empty = auto)", type: "string", default: "", description: "Auto uses bundle exec ruby-lsp when the bundle includes it, else the global ruby-lsp. Restart Ruby LSP to apply." },
+  { key: "ruby.lspCommand", page: "Languages/Ruby", label: "ruby-lsp command (empty = auto)", type: "string", default: "", description: "Auto runs the global ruby-lsp with the project's Ruby (it builds its own bundle in .ruby-lsp/, so missing project gems don't stop it). Restart Ruby LSP to apply." },
   { key: "ruby.lspEnabled", page: "Languages/Ruby", label: "Start Ruby LSP when a project opens", type: "boolean", default: true },
 
   { key: "rails.environment", page: "Rails", label: "RAILS_ENV for Rails server/console/tasks", type: "string", default: "development" },
@@ -118,19 +119,21 @@ export function onSettingsChange(fn: () => void) {
   listeners.push(fn);
 }
 
+let windowTheme = "";
 function applyChrome() {
-  const theme = setting<string>("appearance.theme");
-  const dark = theme === "system" ? matchMedia("(prefers-color-scheme: dark)").matches : theme !== "light";
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  const pref = setting<string>("appearance.theme");
+  if (pref !== windowTheme) applyWindowTheme((windowTheme = pref));
+  document.documentElement.dataset.theme = resolveTheme(pref, systemPrefersDark());
   document.documentElement.style.setProperty("--ui-font-size", `${setting("appearance.uiFontSize")}px`);
   document.body.style.zoom = `${setting<number>("appearance.zoom") / 100}`;
   document.body.classList.toggle("sidebar-right", setting("appearance.sidebarPosition") === "right");
 }
 
 export const isDarkTheme = () => document.documentElement.dataset.theme !== "light";
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
-  if (setting("appearance.theme") === "system") notify();
-});
+watchSystemTheme(() => setting("appearance.theme") === "system", () => notify());
+
+/// Switches to the opposite of the theme on screen and pins it (Appearance › Theme).
+export const toggleTheme = () => updateSetting("appearance.theme", toggledAppearance(isDarkTheme() ? "dark" : "light"));
 
 function notify() {
   applyChrome();

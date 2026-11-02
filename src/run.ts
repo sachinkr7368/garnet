@@ -3,6 +3,7 @@ import { checkPublishedPort, composeCommand, debugPortFor, defaultDocker, hostSo
 import { activeTab, editor, events, monaco, saveAll } from "./editor";
 import { api } from "./ipc";
 import { askTrust, isTrusted, setting } from "./settings";
+import { mergeConfigs, projectFile, readLocal, splitConfigs, writeLocal } from "./runstore";
 import { abs, rel, root, shellQuote, state } from "./state";
 import { onTestStatuses, prepareTestRun, startTestRun, statusIcon, testStatusAt } from "./testresults";
 import { PtyTabs, PtyView } from "./terminal";
@@ -20,6 +21,8 @@ export interface RunConfig {
   envFile: string;
   rubyManager: RubyManager;
   bundler: boolean;
+  /// Stored in .garnet/run.json (shared via VCS) instead of Garnet's own config dir.
+  shared?: boolean;
   /// Run inside a docker compose service instead of on the host.
   docker?: DockerTarget;
 }
@@ -45,8 +48,8 @@ const MANAGER_PREFIX: Record<RubyManager, string> = {
   chruby: 'chruby-exec "$(cat .ruby-version)" -- ',
 };
 
-const CONFIG_FILE = () => `${root()}/.garnet/run.json`;
 let configs: RunConfig[] = [];
+let projectFileLoaded = false;
 let selectedName = "";
 let gemfileLock = "";
 let detectedManagers: string[] = [];
@@ -103,30 +106,38 @@ export function validateConfig(raw: unknown): RunConfig | null {
   };
 }
 
+const validList = (list: unknown[], source: string) => {
+  const valid = list.map(validateConfig).filter((c): c is RunConfig => !!c);
+  if (valid.length < list.length) toast(`${source}: skipped ${list.length - valid.length} invalid configuration(s).`, "error");
+  return valid;
+};
+
+/// Local configurations come from Garnet's config dir; shared ones from .garnet/run.json, read only when trusted.
 export async function loadRunConfigs() {
   gemfileLock = await api.readFile(`${root()}/Gemfile.lock`).catch(() => "");
-  // ponytail: an untrusted project gets in-memory defaults; its run.json is neither read nor written
-  if (!isTrusted()) configs = defaults();
-  else {
-    let raw: string | null = null;
-    try {
-      raw = await api.readFile(CONFIG_FILE());
-    } catch {
-      configs = defaults();
-      if (configs.length) await saveRunConfigs();
-    }
+  const local = await readLocal(root());
+  let shared: RunConfig[] = [];
+  let sharedSelected = "";
+  projectFileLoaded = false;
+  if (isTrusted()) {
+    const raw = await api.readFile(projectFile(root())).catch(() => null);
     if (raw !== null) {
       try {
         const parsed = JSON.parse(raw);
-        const list: unknown[] = Array.isArray(parsed?.configurations) ? parsed.configurations : [];
-        configs = list.map(validateConfig).filter((c): c is RunConfig => !!c);
-        if (configs.length < list.length) toast(`.garnet/run.json: skipped ${list.length - configs.length} invalid configuration(s).`, "error");
-        selectedName = typeof parsed?.selected === "string" ? parsed.selected : "";
+        shared = validList(Array.isArray(parsed?.configurations) ? parsed.configurations : [], ".garnet/run.json");
+        sharedSelected = typeof parsed?.selected === "string" ? parsed.selected : "";
+        projectFileLoaded = true;
       } catch (e) {
-        configs = defaults();
-        toast(`.garnet/run.json is not valid JSON (${e}); using defaults.`, "error");
+        toast(`.garnet/run.json is not valid JSON (${e}); ignoring it.`, "error");
       }
     }
+  }
+  if (!local && !projectFileLoaded) {
+    configs = defaults();
+    if (configs.length) await saveRunConfigs();
+  } else {
+    configs = mergeConfigs(local ? validList(local.configurations, "Run configurations") : [], shared);
+    selectedName = local?.selected || sharedSelected;
   }
   if (!configs.some((c) => c.name === selectedName)) selectedName = configs[0]?.name ?? "";
   api
@@ -138,9 +149,19 @@ export async function loadRunConfigs() {
 
 export async function saveRunConfigs(list = configs) {
   configs = list;
-  if (!isTrusted()) return renderWidget();
-  await api.createPath(`${root()}/.garnet`, true).catch(() => {});
-  await api.writeFile(CONFIG_FILE(), JSON.stringify({ selected: selectedName, configurations: configs }, null, 2) + "\n");
+  const { local, shared } = splitConfigs(list);
+  await writeLocal(root(), { selected: selectedName, configurations: local });
+  // ponytail: an untrusted project's .garnet/run.json was never read, so it is never written either
+  if (isTrusted() && (shared.length || projectFileLoaded)) {
+    if (shared.length) {
+      await api.createPath(`${root()}/.garnet`, true).catch(() => {});
+      await api.writeFile(projectFile(root()), JSON.stringify({ configurations: shared }, null, 2) + "\n");
+      projectFileLoaded = true;
+    } else {
+      await api.deletePath(projectFile(root())).catch(() => {});
+      projectFileLoaded = false;
+    }
+  }
   renderWidget();
 }
 
@@ -564,6 +585,8 @@ export function editConfigurations() {
     manager.onchange = () => ((c.rubyManager = manager.value as RubyManager), update());
     const bundler = h("input", { type: "checkbox", checked: c.bundler });
     bundler.onchange = () => ((c.bundler = bundler.checked), update());
+    const shared = h("input", { type: "checkbox", checked: !!c.shared, disabled: !isTrusted() && !c.shared });
+    shared.onchange = () => ((c.shared = shared.checked), renderForm());
     const env = h("textarea", { class: "commit-message", rows: 4, spellcheck: false, placeholder: "RAILS_ENV=development\nPORT=3000" }, Object.entries(c.env).map(([k, v]) => `${k}=${v}`).join("\n"));
     env.oninput = () => ((c.env = parseDotenv(env.value)), update());
     const dockerBox = h("input", { type: "checkbox", checked: !!c.docker, disabled: dockerWhy !== "" && !c.docker });
@@ -616,6 +639,13 @@ export function editConfigurations() {
       field("Env file", text("envFile", ".env"), "loaded before the variables above"),
       field("Ruby version manager", manager, detectedManagers.length ? `detected via login shell: ${detectedManagers.join(", ")}; auto uses your shell setup as is` : "auto uses your login shell setup as is"),
       h("label", { class: "rc-check" }, bundler, " Use bundler (bundle exec)"),
+      h(
+        "label",
+        { class: "rc-check", title: isTrusted() ? "" : "Trust the project to share configurations through it" },
+        shared,
+        " Store as project file (share via VCS)",
+        h("small", { class: "dim" }, c.shared ? "  .garnet/run.json" : "  kept in Garnet's settings, not in the repository"),
+      ),
       h("label", { class: "rc-check", title: dockerWhy || "" }, dockerBox, " Run inside a Docker Compose service", dockerWhy ? h("small", { class: "dim" }, ` (unavailable: ${dockerWhy})`) : dockerWhy === null ? h("small", { class: "dim" }, " (checking Docker…)") : null),
       ...(c.docker ? dockerFields().filter((x): x is HTMLElement => !!x) : []),
       preview,
@@ -659,7 +689,7 @@ export function editConfigurations() {
   const dialog = h(
     "div",
     { class: "rc-dialog" },
-    h("div", { class: "rc-title" }, icon("play"), " Run / Debug Configurations", h("span", { class: "spacer" }), h("small", { class: "dim" }, rel(CONFIG_FILE()))),
+    h("div", { class: "rc-title" }, icon("play"), " Run / Debug Configurations"),
     h(
       "div",
       { class: "rc-body" },

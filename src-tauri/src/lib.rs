@@ -103,6 +103,7 @@ pub fn run() {
             index::find_files,
             index::index_files,
             search::search_text,
+            search::replace_in_file,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

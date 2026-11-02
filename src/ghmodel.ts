@@ -304,38 +304,6 @@ export function checkoutPlan(pr: { number: number; headRefName: string; isCrossR
   };
 }
 
-/// Changed-files tree with single-child folders compacted (`app/models`).
-
-export interface TreeNode {
-  name: string;
-  path: string;
-  children: TreeNode[];
-  file: boolean;
-}
-
-export function buildTree(paths: string[]): TreeNode[] {
-  const root: TreeNode = { name: "", path: "", children: [], file: false };
-  for (const p of [...paths].sort()) {
-    let node = root;
-    const parts = p.split("/");
-    parts.forEach((part, i) => {
-      const file = i === parts.length - 1;
-      let child = node.children.find((c) => c.name === part && c.file === file);
-      if (!child) node.children.push((child = { name: part, path: parts.slice(0, i + 1).join("/"), children: [], file }));
-      node = child;
-    });
-  }
-  const compact = (n: TreeNode): TreeNode => {
-    while (!n.file && n.children.length === 1 && !n.children[0].file && n.name) {
-      const c = n.children[0];
-      n = { ...c, name: `${n.name}/${c.name}` };
-    }
-    n.children = n.children.map(compact).sort((a, b) => Number(a.file) - Number(b.file) || a.name.localeCompare(b.name));
-    return n;
-  };
-  return compact(root).children;
-}
-
 /// Device flow: what to do after one poll response from `github_device_poll`.
 export function deviceNext(interval: number, response: string): { done: string } | { wait: number } {
   if (response.startsWith("ok:")) return { done: response.slice(3) };

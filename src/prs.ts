@@ -1,9 +1,10 @@
 import { ask } from "@tauri-apps/plugin-dialog";
-import { languageFor, monaco, saveAll } from "./editor";
+import { diffEditorOptions, languageFor, monaco, saveAll } from "./editor";
+import { fileTree } from "./git";
 import {
-  ago, buildTree, checkoutPlan, ciIcon, ciLabel, commentableLines, filterPrs, mergeMethods, parsePatch, PR_LIST_FIELDS, rangeError, reconstructBase,
+  ago, checkoutPlan, ciIcon, ciLabel, commentableLines, filterPrs, mergeMethods, parsePatch, PR_LIST_FIELDS, rangeError, reconstructBase,
   reviewLabel, reviewPayload, threadsForFile, toApiComment, toCheck, toSummary, toThread, type Check, type MergeMethod, type PendingComment,
-  type PrSummary, type ReviewEvent, type Side, type Thread, type TreeNode,
+  type PrSummary, type ReviewEvent, type Side, type Thread,
 } from "./ghmodel";
 import { createPullRequest, currentLogin, ensureSignedIn, gh, gql, markdownEditor, modal, onAccountChange, onPullRequestCreated, refreshAccount, remoteRepo, renderHtml, signIn } from "./github";
 import { invoke } from "./ipc";
@@ -417,30 +418,19 @@ function filesPane(p: PrDetail) {
   for (const c of pendingFor(p)) counts.set(c.path, (counts.get(c.path) ?? 0) + 1);
   const treeEl = h("div", { class: "pr-tree" });
   const diffHost = h("div", { class: "pr-diff" });
-  const renderNode = (n: TreeNode, depth: number): HTMLElement[] => {
-    const pad = `padding-left:${8 + depth * 14}px`;
-    if (n.file) {
-      const f = byPath.get(n.path)!;
-      const c = counts.get(n.path);
-      return [
-        h(
-          "div",
-          { class: `pr-file git-${f.status === "added" ? "added" : f.status === "removed" ? "deleted" : f.status === "renamed" ? "renamed" : "modified"}${currentFile === n.path ? " selected" : ""}`, style: pad, title: n.path, onclick: () => showFile(p, f, diffHost) },
-          icon("file"),
-          h("span", { class: "change-name" }, n.name),
-          c ? h("span", { class: "gh-badge" }, icon("comment"), ` ${c}`) : null,
-          h("span", { class: "pr-stat" }, h("span", { class: "add" }, `+${f.additions}`), " ", h("span", { class: "del" }, `−${f.deletions}`)),
-        ),
-      ];
-    }
-    const closed = collapsedDirs.has(n.path);
-    return [
-      h("div", { class: "pr-dir", style: pad, onclick: () => (closed ? collapsedDirs.delete(n.path) : collapsedDirs.add(n.path), renderTree()) }, icon(closed ? "chevron-right" : "chevron-down"), icon("folder"), h("span", {}, n.name)),
-      ...(closed ? [] : n.children.flatMap((c) => renderNode(c, depth + 1))),
-    ];
+  const row = (f: PrFile & { path: string }, depth: number) => {
+    const c = counts.get(f.path);
+    return h(
+      "div",
+      { class: `change-row pr-file git-${f.status === "added" ? "added" : f.status === "removed" ? "deleted" : f.status === "renamed" ? "renamed" : "modified"}${currentFile === f.path ? " selected" : ""}`, style: `padding-left:${6 + depth * 14}px`, title: f.path, onclick: () => showFile(p, f, diffHost) },
+      icon("file"),
+      h("span", { class: "change-name" }, f.path.split("/").pop()!),
+      c ? h("span", { class: "gh-badge" }, icon("comment"), ` ${c}`) : null,
+      h("span", { class: "pr-stat" }, h("span", { class: "add" }, `+${f.additions}`), " ", h("span", { class: "del" }, `−${f.deletions}`)),
+    );
   };
-  const tree = buildTree(files.map((f) => f.filename));
-  const renderTree = () => treeEl.replaceChildren(...tree.flatMap((n) => renderNode(n, 0)));
+  const entries = files.map((f) => ({ ...f, path: f.filename }));
+  const renderTree = () => treeEl.replaceChildren(...fileTree(entries, `pr:${p.slug}#${p.number}`, row, renderTree, collapsedDirs));
   renderTree();
   const first = (currentFile && byPath.get(currentFile)) || files[0];
   if (first) queueMicrotask(() => showFile(p, first, diffHost));
@@ -489,15 +479,13 @@ async function showFile(p: PrDetail, f: PrFile, host: HTMLElement) {
     editorHost,
   );
   diffEd = monaco.editor.createDiffEditor(editorHost, {
+    ...diffEditorOptions(),
     automaticLayout: true,
     readOnly: true,
     originalEditable: false,
-    renderSideBySide: true,
     glyphMargin: true,
     minimap: { enabled: false },
-    scrollBeyondLastLine: false,
     renderOverviewRuler: false,
-    hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 6, revealLineCount: 20 },
   });
   diffEd.setModel({ original, modified });
   const sides: Record<Side, monaco.editor.ICodeEditor> = { LEFT: diffEd.getOriginalEditor(), RIGHT: diffEd.getModifiedEditor() };

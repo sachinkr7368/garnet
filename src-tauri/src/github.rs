@@ -418,15 +418,30 @@ fn progress_lines(buf: &mut String, chunk: &str) -> Vec<String> {
     out
 }
 
+/// A clone target must be a new folder (not even a dangling symlink) directly inside an existing, real directory.
+fn check_clone_dest(dest: &str) -> Res<()> {
+    let p = std::path::Path::new(dest);
+    if !p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err("Choose an absolute destination folder.".into());
+    }
+    if std::fs::symlink_metadata(p).is_ok() {
+        return Err(format!("{dest} already exists."));
+    }
+    let parent = p.parent().ok_or("invalid destination")?;
+    let meta = std::fs::symlink_metadata(parent).map_err(|_| format!("{} does not exist.", parent.display()))?;
+    if !meta.is_dir() {
+        return Err(format!("{} is not a folder (symlinked parents are refused).", parent.display()));
+    }
+    Ok(())
+}
+
 /// `git clone --progress`, streaming progress lines. For github.com HTTPS URLs the signed-in token is passed as an
 /// extra header through GIT_CONFIG_* environment variables, so it is neither in argv nor written to .git/config.
 pub async fn clone_repo(url: &str, dest: &str, token: Option<&str>, on_line: impl Fn(String)) -> Res<()> {
-    if url.starts_with('-') || dest.starts_with('-') {
-        return Err("invalid clone arguments".into());
+    if url.starts_with('-') {
+        return Err("invalid clone URL".into());
     }
-    if std::path::Path::new(dest).exists() {
-        return Err(format!("{dest} already exists."));
-    }
+    check_clone_dest(dest)?;
     let mut cmd = tokio::process::Command::new("git");
     cmd.args(["clone", "--progress", "--", url, dest]).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
     if let Some(t) = token.filter(|_| url.starts_with("https://github.com/")) {
@@ -736,6 +751,12 @@ mod tests {
         assert!(lines.lock().unwrap().iter().any(|l| l.starts_with("Cloning into")));
         assert!(!std::fs::read_to_string(dest.join(".git/config")).unwrap().contains("extraheader"));
         assert!(clone_repo("file:///nope", dest.to_str().unwrap(), None, |_| {}).await.unwrap_err().contains("already exists"));
+        std::os::unix::fs::symlink(base.join("gone"), base.join("dangling")).unwrap();
+        assert!(clone_repo("file:///nope", base.join("dangling").to_str().unwrap(), None, |_| {}).await.unwrap_err().contains("already exists"));
+        std::os::unix::fs::symlink(&src, base.join("linkdir")).unwrap();
+        assert!(clone_repo("file:///nope", base.join("linkdir/x").to_str().unwrap(), None, |_| {}).await.unwrap_err().contains("symlinked"));
+        assert!(clone_repo("file:///nope", "relative/x", None, |_| {}).await.unwrap_err().contains("absolute"));
+        assert!(clone_repo("file:///nope", base.join("a/../b").to_str().unwrap(), None, |_| {}).await.unwrap_err().contains("absolute"));
         let missing = base.join("missing");
         assert!(clone_repo(&format!("file://{}/nope", base.display()), missing.to_str().unwrap(), None, |_| {}).await.is_err());
         assert!(!missing.exists());

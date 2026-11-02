@@ -2,16 +2,23 @@ import { ask, message, open } from "@tauri-apps/plugin-dialog";
 import { saveAll } from "./editor";
 import { refreshGit } from "./git";
 import { cloneDialog, createPullRequest } from "./github";
-import { invoke } from "./ipc";
-import { isTrusted, recentProjects } from "./settings";
+import { api, invoke } from "./ipc";
+import { isDarkTheme, isTrusted, onSettingsChange, recentProjects, toggleTheme } from "./settings";
 import { basename, dirname, root, state } from "./state";
-import { h, icon, inputBox, quickPick, toast, type PickItem } from "./ui";
+import { h, icon, iconButton, inputBox, quickPick, toast, type PickItem } from "./ui";
 
 const switchers = document.getElementById("switchers")!;
 const projectBtn = h("button", { class: "switcher", title: "Projects" });
 const worktreeBtn = h("button", { class: "switcher", title: "Git worktrees" });
 const branchBtn = h("button", { class: "switcher", title: "Git branches" });
 switchers.append(projectBtn, worktreeBtn, branchBtn);
+
+const themeBtn = iconButton("color-mode", "", () => toggleTheme());
+themeBtn.id = "theme-toggle";
+document.getElementById("toolbar")!.append(themeBtn);
+const labelThemeBtn = () => (themeBtn.title = `Toggle theme (now ${isDarkTheme() ? "dark" : "light"})`);
+labelThemeBtn();
+onSettingsChange(labelThemeBtn);
 
 let openProjectHere: (path: string) => void = () => {};
 export function initToolbar(switchProject: (path: string) => void) {
@@ -54,9 +61,42 @@ export async function refreshToolbar() {
     h("span", { class: "counts" }, counts ? `${ahead ? `↑${ahead}` : ""}${behind ? ` ↓${behind}` : ""}`.trim() : ""),
     icon("chevron-down"),
   );
-  const count = worktrees.split("\n").filter((l) => l.startsWith("worktree ")).length;
-  worktreeBtn.hidden = count < 1;
-  worktreeBtn.replaceChildren(icon("repo"), h("span", {}, count > 1 ? `${count} worktrees` : "worktree"), icon("chevron-down"));
+  const label = worktreeLabel(parseWorktrees(worktrees), p.root);
+  worktreeBtn.hidden = !label;
+  if (label)
+    worktreeBtn.replaceChildren(
+      ...[icon(label.main ? "repo" : "repo-forked"), h("span", { class: "name" }, label.name), label.main && h("span", { class: "tag" }, "main worktree"), icon("chevron-down")].filter((n): n is HTMLSpanElement => !!n),
+    );
+}
+
+export interface Worktree {
+  path: string;
+  branch: string;
+  main: boolean;
+}
+
+/// `git worktree list --porcelain`; the first entry is the main checkout.
+export function parseWorktrees(out: string): Worktree[] {
+  return out
+    .split(/\n\n+/)
+    .map((b) => b.trim())
+    .filter((b) => b.startsWith("worktree "))
+    .map((b, i) => ({
+      path: b.match(/^worktree (.+)$/m)![1],
+      branch: b.match(/^branch refs\/heads\/(.+)$/m)?.[1] ?? (/^detached$/m.test(b) ? "detached" : /^bare$/m.test(b) ? "bare" : ""),
+      main: i === 0,
+    }));
+}
+
+/// The worktree that contains `root` (the deepest one, since worktrees can live inside the main checkout).
+export function currentWorktree(trees: Worktree[], root: string): Worktree | undefined {
+  return trees.filter((t) => root === t.path || root.startsWith(t.path + "/")).sort((a, b) => b.path.length - a.path.length)[0];
+}
+
+/// Toolbar label: the current worktree's folder name; the main checkout shows the repository name and a tag.
+export function worktreeLabel(trees: Worktree[], root: string): { name: string; main: boolean } | null {
+  const t = currentWorktree(trees, root);
+  return t ? { name: basename(t.path), main: t.main } : null;
 }
 
 /// Project switcher
@@ -90,7 +130,7 @@ projectBtn.onclick = async () => {
 
 /// Branch switcher
 
-interface Branch {
+export interface Branch {
   name: string;
   remote: boolean;
   current: boolean;
@@ -98,7 +138,7 @@ interface Branch {
   track: string;
 }
 
-async function branches(): Promise<Branch[]> {
+export async function branches(): Promise<Branch[]> {
   const out = await git("for-each-ref", "--sort=-committerdate", "--format=%(refname)%09%(HEAD)%09%(upstream:short)%09%(upstream:track)", "refs/heads", "refs/remotes");
   return out
     .split("\n")
@@ -232,62 +272,65 @@ async function checkout(name: string, from?: string, create = false) {
 
 /// Worktree switcher
 
+export const listWorktrees = async (): Promise<Worktree[]> => parseWorktrees(await git("worktree", "list", "--porcelain"));
+
 worktreeBtn.onclick = async () => {
   const out = await git("worktree", "list", "--porcelain").catch((e) => (toast(String(e), "error"), ""));
-  const trees = out
-    .split("\n\n")
-    .filter((b) => b.startsWith("worktree "))
-    .map((b) => ({
-      path: b.match(/^worktree (.+)$/m)![1],
-      branch: b.match(/^branch refs\/heads\/(.+)$/m)?.[1] ?? (b.includes("detached") ? "detached" : ""),
-    }));
+  const trees = parseWorktrees(out);
+  const current = currentWorktree(trees, state.project?.root ?? "");
   quickPick({
-    placeholder: "Worktrees",
+    title: `${trees.length} worktree${trees.length === 1 ? "" : "s"}`,
+    placeholder: "Switch worktree or type to filter",
     items: [
       ...trees.map((t) => ({
         label: basename(t.path),
-        description: `${t.branch} · ${t.path}`,
-        icon: t.path === state.project?.root ? "check" : "repo",
+        description: `${t.main ? "main worktree · " : ""}${t.branch} · ${t.path}`,
+        icon: t === current ? "check" : t.main ? "repo" : "repo-forked",
         data: t,
       })),
       { label: "New Worktree from Branch…", icon: "add", data: "new" },
     ],
     onAccept: (item) => {
       if (item?.data === "new") return newWorktree();
-      const t = item?.data as { path: string; branch: string } | undefined;
+      const t = item?.data as Worktree | undefined;
       if (t) worktreeActions(t, trees[0]?.path);
     },
   });
 };
 
-function worktreeActions(t: { path: string; branch: string }, mainPath?: string) {
+export const openWorktree = (path: string, newWindow: boolean) => (newWindow ? invoke("open_new_window", { path }) : openProjectHere(path));
+
+export async function removeWorktree(t: Worktree) {
+  const ok = await ask(`Remove worktree ${t.path}? Its folder is deleted; the branch ${t.branch} is kept.`, { kind: "warning", okLabel: "Remove", cancelLabel: "Cancel" });
+  if (!ok) return;
+  await run("Remove worktree", () =>
+    git("worktree", "remove", t.path).catch(async (e) => {
+      if (await ask(`The worktree has local changes.\n\n${e}\n\nRemove anyway and discard them?`, { kind: "warning", okLabel: "Force Remove", cancelLabel: "Cancel" }))
+        return git("worktree", "remove", "--force", t.path);
+      return "kept";
+    }),
+  );
+}
+
+function worktreeActions(t: Worktree, mainPath?: string) {
   const isCurrent = t.path === state.project?.root;
   quickPick({
     placeholder: `${basename(t.path)} (${t.branch})`,
     items: [
       ...(isCurrent ? [] : [{ label: "Open in This Window", icon: "folder", data: "here" }]),
       { label: "Open in New Window", icon: "empty-window", data: "window" },
+      { label: "Reveal in Finder", icon: "go-to-file", data: "reveal" },
       ...(isCurrent || t.path === mainPath ? [] : [{ label: "Remove Worktree…", icon: "trash", data: "remove" }]),
     ],
-    onAccept: async (item) => {
-      if (item?.data === "here") openProjectHere(t.path);
-      if (item?.data === "window") invoke("open_new_window", { path: t.path });
-      if (item?.data === "remove") {
-        const ok = await ask(`Remove worktree ${t.path}? Its folder is deleted; the branch ${t.branch} is kept.`, { kind: "warning", okLabel: "Remove", cancelLabel: "Cancel" });
-        if (!ok) return;
-        run("Remove worktree", () =>
-          git("worktree", "remove", t.path).catch(async (e) => {
-            if (await ask(`The worktree has local changes.\n\n${e}\n\nRemove anyway and discard them?`, { kind: "warning", okLabel: "Force Remove", cancelLabel: "Cancel" }))
-              return git("worktree", "remove", "--force", t.path);
-            return "kept";
-          }),
-        );
-      }
+    onAccept: (item) => {
+      if (item?.data === "here" || item?.data === "window") openWorktree(t.path, item.data === "window");
+      if (item?.data === "reveal") api.revealInFinder(t.path);
+      if (item?.data === "remove") removeWorktree(t);
     },
   });
 }
 
-async function newWorktree() {
+export async function newWorktree() {
   const list = await branches();
   quickPick({
     placeholder: "Branch for the new worktree (or type a new branch name)",

@@ -7,12 +7,15 @@ export const fake = {
   /// Per-command handlers for `invoke`, and every invoke with its arguments.
   handlers: new Map<string, (args: any) => unknown>(),
   invocations: [] as { cmd: string; args: any }[],
+  /// Stdout for `api.runCapture(root, command)`; defaults to "".
+  capture: (_command: string): string => "",
   reset() {
     this.handlers.clear();
     this.invocations.length = 0;
     this.files.clear();
     this.config.clear();
     this.calls.length = 0;
+    this.capture = () => "";
     this.trustedFlag = false;
   },
 };
@@ -40,7 +43,7 @@ export const api = new Proxy(
     configPath: async (name: string) => `/config/${name}`,
     canonicalPath: async (path: string) => path.replace(/\/+$/, ""),
     gitSetTrusted: async (t: boolean) => void (fake.trustedFlag = t),
-    runCapture: async () => "",
+    runCapture: async (_root: string, command: string) => fake.capture(command),
     indexFiles: async () => [...fake.files.keys()],
   } as Record<string, (...a: any[]) => Promise<any>>,
   {

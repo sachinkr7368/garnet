@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  ago, anchorOf, buildTree, checkoutPlan, commentableLines, deviceNext, filterPrs, mergeMethods, parsePatch, rangeError, reconstructBase, reviewPayload,
+  ago, anchorOf, checkoutPlan, commentableLines, deviceNext, filterPrs, mergeMethods, parsePatch, rangeError, reconstructBase, reviewPayload,
   sanitizeHtml, threadsForFile, toApiComment, toCheck, toSummary, toThread, type MergeInfo, type PrSummary,
 } from "../ghmodel";
 
@@ -155,14 +155,6 @@ describe("merge and checkout", () => {
 });
 
 describe("misc", () => {
-  it("builds a compacted changed-files tree, folders first", () => {
-    const tree = buildTree(["app/models/user.rb", "app/models/post.rb", "README.md", "spec/models/user_spec.rb", "app/views/a.erb"]);
-    expect(tree.map((n) => n.name)).toEqual(["app", "spec/models", "README.md"]);
-    expect(tree[0].children.map((n) => n.name)).toEqual(["models", "views", ]);
-    expect(tree[0].children[0].children.map((n) => n.path)).toEqual(["app/models/post.rb", "app/models/user.rb"]);
-    expect(tree[1].children[0]).toMatchObject({ name: "user_spec.rb", file: true });
-  });
-
   it("drives the device-flow poll interval", () => {
     expect(deviceNext(5, "pending")).toEqual({ wait: 5 });
     expect(deviceNext(5, "slow_down:15")).toEqual({ wait: 15 });

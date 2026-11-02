@@ -8,6 +8,7 @@ mod lsp;
 mod project;
 mod pty;
 mod rpc;
+mod ruby;
 mod search;
 mod watch;
 
@@ -103,6 +104,7 @@ pub fn run() {
             index::find_files,
             index::index_files,
             search::search_text,
+            search::replace_in_file,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
@@ -117,7 +119,13 @@ pub fn run() {
             git::git_status,
             git::git_branch,
             git::git_show,
-            git::git_diff_hunks,
+            git::git_file_at,
+            git::git_log,
+            git::git_diff_files,
+            git::git_commit_details,
+            git::git_stage_patch,
+            git::git_op_state,
+            git::git_merge_input,
             git::git_stage,
             git::git_unstage,
             git::git_commit,

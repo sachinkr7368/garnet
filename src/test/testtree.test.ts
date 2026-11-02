@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { backtraceLink, buildTree, counts, emptyRun, feedEvents, filterTree, lineStatuses, plannedUnreliable, progress, rerunArgs } from "../testtree";
+import { backtraceLink, buildTree, counts, emptyRun, feedEvents, filterTree, lineStatuses, plannedUnreliable, prependRubylib, progress, rerunArgs } from "../testtree";
 import { shellQuote } from "../state";
 
 const ROOT = "/work/blog";
@@ -113,5 +113,16 @@ describe("backtraceLink", () => {
     expect(backtraceLink("./spec/calc_spec.rb:8:in `block (3 levels)'")).toEqual({ path: "spec/calc_spec.rb", line: 8 });
     expect(backtraceLink("/usr/lib/ruby/gems/x.rb:120:in `call'")).toEqual({ path: "/usr/lib/ruby/gems/x.rb", line: 120 });
     expect(backtraceLink("no link here")).toBeNull();
+  });
+});
+
+describe("prependRubylib", () => {
+  it("puts Garnet's reporter dir in front of the inherited value", () => {
+    expect(prependRubylib("/cfg/ruby", undefined, undefined, "/opt/lib:/home/me/lib")).toBe("/cfg/ruby:/opt/lib:/home/me/lib");
+  });
+  it("uses the highest-precedence non-empty value and drops empties and duplicates", () => {
+    expect(prependRubylib("/cfg/ruby", "lib::/cfg/ruby", "/term", "/shell")).toBe("/cfg/ruby:lib");
+    expect(prependRubylib("/cfg/ruby", "", "  ", "/shell")).toBe("/cfg/ruby:/shell");
+    expect(prependRubylib("/cfg/ruby")).toBe("/cfg/ruby");
   });
 });

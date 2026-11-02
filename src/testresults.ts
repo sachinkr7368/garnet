@@ -4,7 +4,7 @@ import { launch, runs, stopRun, type RunConfig } from "./run";
 import rspecFormatter from "./ruby/garnet_rspec_formatter.rb?raw";
 import minitestPlugin from "./ruby/minitest/garnet_plugin.rb?raw";
 import { setting } from "./settings";
-import { abs, dirname, rel, shellQuote, state } from "./state";
+import { abs, dirname, rel, root, shellQuote, state } from "./state";
 import type { PtyTabs } from "./terminal";
 import {
   backtraceLink,
@@ -15,6 +15,7 @@ import {
   filterTree,
   lineStatuses,
   plannedUnreliable,
+  prependRubylib,
   progress,
   rerunArgs,
   type TestKind,
@@ -69,9 +70,12 @@ function support(): Promise<string> {
 }
 
 let runCounter = 0;
+let shellRubylibValue: Promise<string> | null = null;
+/// RUBYLIB from the login shell environment Garnet runs commands in (read once per window).
+const shellRubylib = () => (shellRubylibValue ??= api.runCapture(root(), 'printf %s "$RUBYLIB"', 20).catch(() => ""));
 
 /// Formatter arguments and environment for an RSpec / Minitest configuration; null for anything else.
-export async function prepareTestRun(cfg: RunConfig): Promise<TestRunHandle | null> {
+export async function prepareTestRun(cfg: RunConfig, runEnv: Record<string, string> = {}): Promise<TestRunHandle | null> {
   if (cfg.type !== "rspec" && cfg.type !== "minitest") return null;
   let dir: string;
   try {
@@ -88,7 +92,7 @@ export async function prepareTestRun(cfg: RunConfig): Promise<TestRunHandle | nu
   if (cfg.type === "rspec") {
     args = `--require ${shellQuote(`${dir}/garnet_rspec_formatter.rb`)} --format GarnetFormatter`;
     if (!/(^|\s)(-f|--format)\b/.test(userArgs)) args = `--format progress ${args}`;
-  } else env.RUBYLIB = dir; // ponytail: replaces an inherited RUBYLIB; prepend it here if anyone relies on one
+  } else env.RUBYLIB = prependRubylib(dir, runEnv.RUBYLIB, setting<Record<string, string>>("terminal.env")?.RUBYLIB, await shellRubylib());
   return { kind: cfg.type, eventsPath, args, env, ignorePlanned: plannedUnreliable(cfg.type, userArgs), finished: () => {} };
 }
 

@@ -202,6 +202,9 @@ async function uiChecks(check: (n: string, ok: boolean | string) => void) {
   await loadSettings(state.project!.root);
   check("run.json validation", validateConfig({ name: "x", type: "rspec", args: ["rm"] }) === null && validateConfig({ name: "x", type: "evil" }) === null && validateConfig({ name: "ok", type: "rspec", env: { PATH: "/tmp", RUBYOPT: "-r/tmp/x", DYLD_INSERT_LIBRARIES: "x", FOO: "1" } })?.env.FOO === "1");
   check("blocked env overrides", JSON.stringify(safeEnv({ PATH: "x", BASH_ENV: "x", ENV: "x", LD_PRELOAD: "x", KEEP: "1" }, "smoke")) === '{"KEEP":"1"}');
+  await invoke("git_set_trusted", { trusted: false });
+  check("git refuses to run while untrusted", await invoke("git_run", { root: state.project!.root, args: ["status"] }).then(() => false, (e) => String(e).includes("Trust project")));
+  await invoke("git_set_trusted", { trusted: true });
   check("git.path rejects relative path", await invoke("git_set_path", { path: "./git" }).then(() => false, () => true));
   await invoke("git_set_path", { path: setting<string>("git.path") });
   const before = setting<number>("editor.fontSize");

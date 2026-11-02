@@ -3,7 +3,7 @@ import { activeTab, editor, events, monaco, openDiffTab, openFile } from "./edit
 import { api, invoke, type GitStatusEntry } from "./ipc";
 import { abs, basename, debounce, root, state } from "./state";
 import { setGitDecorations } from "./tree";
-import { onSettingsChange, setting } from "./settings";
+import { askTrust, isTrusted, onSettingsChange, setting } from "./settings";
 import { h, icon, iconButton, statusSlot, toast } from "./ui";
 
 const branchEl = statusSlot("branch", "left");
@@ -73,6 +73,13 @@ export async function refreshGit() {
     branchEl.textContent = "";
     return;
   }
+  if (!isTrusted()) {
+    list.replaceChildren(h("div", { class: "empty" }, "Trust project to enable Git. ", h("button", { class: "btn", onclick: () => askTrust() }, "Trust Project…")));
+    branchEl.textContent = "Trust project to enable Git";
+    branchEl.onclick = () => askTrust();
+    return;
+  }
+  branchEl.onclick = null;
   const [status, branch] = await Promise.all([api.gitStatus(root()).catch(() => []), api.gitBranch(root()).catch(() => "")]);
   entries = status;
   branchEl.replaceChildren(icon("git-branch"), ` ${branch}`);
@@ -195,12 +202,19 @@ export async function blameCurrentLine() {
 
 export const onGitChanged = debounce(() => refreshGit(), 400);
 let fetchTimer = 0;
-onSettingsChange(() => {
-  invoke("git_set_path", { path: setting<string>("git.path") }).catch((e) => toast(String(e), "error"));
+function scheduleFetch() {
   clearInterval(fetchTimer);
   const minutes = setting<number>("git.autoFetchMinutes");
-  if (minutes > 0)
+  if (minutes > 0 && isTrusted())
     fetchTimer = window.setInterval(() => {
       if (state.project?.git) invoke("git_fetch", { root: root() }).then(() => refreshGit(), () => {});
     }, minutes * 60000);
+}
+onSettingsChange(() => {
+  invoke("git_set_path", { path: setting<string>("git.path") }).catch((e) => toast(String(e), "error"));
+  scheduleFetch();
+});
+window.addEventListener("garnet:trusted", () => {
+  scheduleFetch();
+  refreshGit();
 });

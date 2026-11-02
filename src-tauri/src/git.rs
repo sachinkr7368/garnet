@@ -4,6 +4,14 @@ use std::path::Path;
 use std::process::Command;
 
 static GIT: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+/// A repo's own .git/config can run programs (filters, textconv, hooks, sshCommand), so git stays off until the
+/// project is trusted. Reset on every project open.
+pub static TRUSTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[tauri::command]
+pub fn git_set_trusted(trusted: bool) {
+    TRUSTED.store(trusted, std::sync::atomic::Ordering::SeqCst);
+}
 
 #[tauri::command]
 pub fn git_set_path(path: String) -> Result<(), String> {
@@ -23,6 +31,9 @@ pub fn git_set_path(path: String) -> Result<(), String> {
 }
 
 fn git(root: &str, args: &[&str]) -> Result<String, String> {
+    if !TRUSTED.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Trust project to enable Git".into());
+    }
     let bin = GIT.read().unwrap().clone();
     let out = Command::new(if bin.is_empty() { "git" } else { bin.as_str() })
         .args(["-c", "core.fsmonitor=false"])
@@ -77,7 +88,7 @@ pub async fn git_branch(root: String) -> Result<String, String> {
 #[tauri::command]
 pub async fn git_show(root: String, path: String, rev: String) -> Result<String, String> {
     let rel = rel(&root, &path);
-    Ok(git(&root, &["show", &format!("{rev}:{rel}")]).unwrap_or_default())
+    Ok(git(&root, &["show", "--no-textconv", "--no-ext-diff", &format!("{rev}:{rel}")]).unwrap_or_default())
 }
 
 fn rel(root: &str, path: &str) -> String {
@@ -124,7 +135,7 @@ pub async fn git_diff_hunks(root: String, path: String) -> Result<Vec<Hunk>, Str
     if git(&root, &["ls-files", "--error-unmatch", &rel]).is_err() {
         return Ok(Vec::new());
     }
-    git(&root, &["diff", "-U0", "--no-color", "--no-ext-diff", "HEAD", "--", &rel]).map(|d| parse_hunks(&d))
+    git(&root, &["diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "HEAD", "--", &rel]).map(|d| parse_hunks(&d))
 }
 
 #[tauri::command]
@@ -173,7 +184,7 @@ pub struct Blame {
 #[tauri::command]
 pub async fn git_blame_line(root: String, path: String, line: u32) -> Result<Blame, String> {
     let range = format!("{line},{line}");
-    let out = git(&root, &["blame", "--porcelain", "-L", &range, "--", &rel(&root, &path)])?;
+    let out = git(&root, &["blame", "--porcelain", "--no-textconv", "-L", &range, "--", &rel(&root, &path)])?;
     let field = |key: &str| {
         out.lines()
             .find_map(|l| l.strip_prefix(key))

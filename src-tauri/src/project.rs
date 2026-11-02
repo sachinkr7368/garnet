@@ -42,6 +42,7 @@ pub async fn open_project(app: AppHandle, path: String) -> Result<ProjectInfo, S
     if !root.is_dir() {
         return Err(format!("{path} is not a folder"));
     }
+    crate::git::git_set_trusted(false);
     app.state::<Ptys>().kill_all();
     app.state::<Lsp>().stop();
     app.state::<Index>().set_root(root.clone());

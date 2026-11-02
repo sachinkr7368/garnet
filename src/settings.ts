@@ -248,6 +248,7 @@ export const isTrusted = () => trusted;
 export async function checkTrust(root: string): Promise<boolean> {
   const canonical = await api.canonicalPath(root).catch(() => root);
   trusted = (await readConfig<string[]>("trusted.json", [])).includes(canonical);
+  await api.gitSetTrusted(trusted);
   return trusted;
 }
 
@@ -257,6 +258,7 @@ export async function trustProject(root: string, silent = false) {
   list.push(canonical);
   await api.configWrite("trusted.json", JSON.stringify(list, null, 2));
   trusted = true;
+  await api.gitSetTrusted(true);
   if (!silent) window.dispatchEvent(new Event("garnet:trusted"));
 }
 

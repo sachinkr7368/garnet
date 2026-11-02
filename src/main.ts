@@ -367,6 +367,7 @@ listen<{ count: number; ms: number }>("index-ready", (e) => {
 });
 listen<string>("menu", (e) => runCommand(e.payload));
 window.addEventListener("garnet:trusted", () => {
+  refreshToolbar();
   loadRunConfigs();
   if (setting("ruby.lspEnabled")) startLsp();
 });

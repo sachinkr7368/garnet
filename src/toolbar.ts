@@ -2,7 +2,7 @@ import { ask, message, open } from "@tauri-apps/plugin-dialog";
 import { activeTab, editor, saveAll } from "./editor";
 import { refreshGit } from "./git";
 import { api, invoke } from "./ipc";
-import { recentProjects } from "./settings";
+import { isTrusted, recentProjects } from "./settings";
 import { basename, dirname, rel, root, state } from "./state";
 import { h, icon, inputBox, quickPick, toast, type PickItem } from "./ui";
 
@@ -36,7 +36,7 @@ export async function refreshToolbar() {
   const p = state.project;
   if (!p) return;
   projectBtn.replaceChildren(icon("folder"), h("span", { class: "name" }, p.name), icon("chevron-down"));
-  if (!p.git) {
+  if (!p.git || !isTrusted()) {
     worktreeBtn.hidden = branchBtn.hidden = true;
     return;
   }

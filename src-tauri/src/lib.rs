@@ -130,6 +130,7 @@ pub fn run() {
             github::open_url,
             github::open_new_window,
             git::git_set_path,
+            git::git_set_trusted,
             git::git_blame_line,
             project::open_project,
             project::run_capture,

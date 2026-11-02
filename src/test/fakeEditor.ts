@@ -29,3 +29,4 @@ export const ensureModel = async () => null;
 export const handlePathMoved = () => {};
 export const uriFor = (p: string) => ({ toString: () => `file://${p}` });
 export const saveAll = async () => {};
+export const languageFor = () => "plaintext";

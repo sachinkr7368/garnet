@@ -66,6 +66,7 @@ export const SCHEMA: SettingDef[] = [
 
   { key: "git.path", page: "Version Control/Git", label: "Path to git", type: "string", default: "git" },
   { key: "git.autoFetchMinutes", page: "Version Control/Git", label: "Auto-fetch every N minutes (0 = off)", type: "number", min: 0, max: 240, default: 0 },
+  { key: "github.oauthClientId", page: "Version Control/GitHub", label: "OAuth app client ID for browser sign-in (empty = built-in)", type: "string", default: "", description: "Client ID of a GitHub OAuth app with device flow enabled. No client secret is needed." },
   { key: "git.checkProblemsBeforeCommit", page: "Version Control/Git", label: "Warn before committing files with errors", type: "boolean", default: true },
 
   { key: "ruby.versionManager", page: "Languages/Ruby", label: "Default Ruby version manager for new run configurations", type: "enum", options: ["auto", "rbenv", "asdf", "chruby", "rvm", "mise", "none"], default: "auto" },
@@ -98,7 +99,7 @@ const DEFAULTS: Record<string, unknown> = Object.fromEntries(SCHEMA.map((d) => [
 
 /// Keys that decide which programs run or with what environment. A cloned repo must not be able to set them,
 /// so they are read from the global settings only.
-const GLOBAL_ONLY = /^(ruby\.(lspCommand|lspEnabled|versionManager|useBundler)|git\.path|terminal\.(shell|env)|debug\.rdbgPath|testing\.|rails\.)/;
+const GLOBAL_ONLY = /^(ruby\.(lspCommand|lspEnabled|versionManager|useBundler)|git\.path|github\.|terminal\.(shell|env)|debug\.rdbgPath|testing\.|rails\.)/;
 export const globalOnly = (key: string) => GLOBAL_ONLY.test(key);
 
 let globalValues: Record<string, unknown> = {};

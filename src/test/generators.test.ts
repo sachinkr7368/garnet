@@ -33,7 +33,7 @@ Options:
       [--skip-namespace], [--no-skip-namespace]              # Skip namespace (affects only isolated engines)
                                                              # Default: false
       [--skip-routes], [--no-skip-routes]                    # Don't add routes to config/routes.rb.
-      [--helper], [--no-helper]                              # Indicates when to generate helper
+      [--helper], [--no-helper], [--skip-helper]             # Indicates when to generate helper
                                                              # Default: true
   -e, [--template-engine=NAME]                               # Template engine to be invoked
                                                              # Default: erb
@@ -46,7 +46,7 @@ Options:
 
 Runtime options:
   -f, [--force]                                      # Overwrite files that already exist
-  -p, [--pretend], [--no-pretend]                    # Run but do not make any changes
+  -p, [--pretend], [--no-pretend], [--skip-pretend]  # Run but do not make any changes
   -q, [--quiet], [--no-quiet]                        # Suppress status output
   -s, [--skip], [--no-skip]                          # Skip files that already exist
 

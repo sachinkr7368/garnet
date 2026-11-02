@@ -73,7 +73,7 @@ export function parseGeneratorHelp(out: string): GeneratorHelp {
       else last.description += ` ${cont[1].trim()}`;
       continue;
     }
-    const m = line.match(/^\s+(?:-(\w),\s+)?\[?--([\w-]+)(?:=([^\]\s]+(?:\s[^\]\s#]+)*))?\]?(?:,\s*\[--no-[\w-]+\])?\s*(?:#\s?(.*))?$/);
+    const m = line.match(/^\s+(?:-(\w),\s+)?\[?--([\w-]+)(?:=([^\]\s]+(?:\s[^\]\s#]+)*))?\]?(?:,\s*\[--(?:no|skip)-[\w-]+\])*\s*(?:#\s?(.*))?$/);
     if (!m) continue;
     const [, alias, name, value, description = ""] = m;
     last = null;

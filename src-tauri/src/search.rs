@@ -88,6 +88,8 @@ fn search(
     emit: impl Fn(SearchEvent) + Clone + Send + Sync + 'static,
 ) -> Result<std::thread::JoinHandle<()>, String> {
     let matcher = RegexMatcherBuilder::new()
+        .multi_line(true)
+        .line_terminator(Some(b'\n'))
         .case_insensitive(!opts.case_sensitive)
         .word(opts.whole_word)
         .fixed_strings(!opts.regex)
@@ -199,6 +201,15 @@ mod tests {
         }
         files.sort();
         (files, done.expect("search finished with a Done event"))
+    }
+
+    #[test]
+    fn anchors_match_at_line_starts() {
+        let root = project("anchors");
+        let (files, _) = run(&root, SearchOpts { regex: true, ..opts(r"^\s*def \w+") });
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].1, vec![(3, vec![(0, 12)])]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -337,7 +348,7 @@ mod replace_tests {
     use super::*;
 
     fn matcher(q: &str, regex: bool, word: bool) -> RegexMatcher {
-        RegexMatcherBuilder::new().word(word).fixed_strings(!regex).build(q).unwrap()
+        RegexMatcherBuilder::new().multi_line(true).line_terminator(Some(b'\n')).word(word).fixed_strings(!regex).build(q).unwrap()
     }
 
     fn edit(line: u64, start: usize, end: usize, old: &str, new: &str) -> ReplaceEdit {
@@ -379,6 +390,15 @@ mod replace_tests {
         let lm = line_match(&m, 1, &long, Some(&r));
         assert_eq!(lm.text.len(), 601);
         assert_eq!(lm.ranges, vec![(600, 601)]);
+    }
+
+    #[test]
+    fn implementation_pattern_from_frontend_compiles() {
+        // implementationPattern("ApplicationRecord") in src/implementations.ts
+        let pattern = r"^\s*(class\s+[\w:]+\s*<\s*([\w:]*::)?ApplicationRecord([^\w:]|$)|(include|extend|prepend)(\s+|\s*\()(.*[\s,(])?([\w:]*::)?ApplicationRecord([^\w:]|$))";
+        let m = matcher(pattern, true, false);
+        assert_eq!(line_match(&m, 1, "class Post < ApplicationRecord", None).ranges.len(), 1);
+        assert!(line_match(&m, 1, "class ApplicationRecord < ActiveRecord::Base", None).ranges.is_empty());
     }
 
     #[test]

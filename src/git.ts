@@ -1,10 +1,10 @@
 import { ask } from "@tauri-apps/plugin-dialog";
 import DiffWorker from "./diffworker?worker";
 import { activeTab, editor, events, monaco, openDiffTab, openFile, openTextDiff } from "./editor";
-import { buildTree, filterPaths, hunkKind, overlapsNew, splitLines, stageRange, applyHunks, revertHunks, type LineHunk } from "./difflogic";
+import { buildPatch, buildTree, displayLine, filterPaths, hunkKind, overlapsNew, patchHunks, patchLines, splitLines, stagePatch, swapHunk, type LineHunk } from "./difflogic";
 import { api, invoke, type ChangedFile, type GitStatusEntry, type OpState } from "./ipc";
 import { abortOperation, acceptSide, continueOperation, openResolver, showConflicts } from "./merge";
-import { abs, basename, debounce, root, state } from "./state";
+import { abs, basename, debounce, rel, root, state } from "./state";
 import { setGitDecorations } from "./tree";
 import { askTrust, isTrusted, onSettingsChange, setting, updateSetting } from "./settings";
 import { branches, listWorktrees, newWorktree, openWorktree, removeWorktree, type Worktree } from "./toolbar";
@@ -272,9 +272,9 @@ async function renderHunks(box: HTMLElement, r: Row) {
     const [a, b] = r.staged
       ? [(await api.gitFileAt(root(), "HEAD", path)) ?? "", (await api.gitFileAt(root(), "", path)) ?? ""]
       : [(await api.gitFileAt(root(), "", path)) ?? "", await api.readFile(path)];
-    const hunks = await diffAsync(a, b);
-    const al = splitLines(a);
-    const bl = splitLines(b);
+    const hunks = patchHunks(a, b);
+    const al = patchLines(a).map(displayLine);
+    const bl = patchLines(b).map(displayLine);
     if (!hunks.length) return box.replaceChildren(h("div", { class: "dim" }, "No line changes."));
     box.replaceChildren(
       ...hunks.map((hk) => {
@@ -293,8 +293,8 @@ async function renderHunks(box: HTMLElement, r: Row) {
               {
                 class: "btn small",
                 onclick: async () => {
-                  const next = r.staged ? revertHunks(al, bl, [hk]) : applyHunks(al, bl, [hk]);
-                  await api.gitStageContent(root(), path, next.join("\n")).then(refreshGit, (err) => toast(String(err), "error"));
+                  const patch = r.staged ? buildPatch(r.path, b, a, [swapHunk(hk)]) : buildPatch(r.path, a, b, [hk]);
+                  await api.gitStagePatch(root(), path, patch).then(refreshGit, (err) => toast(String(err), "error"));
                 },
               },
               r.staged ? "Unstage Hunk" : "Stage Hunk",
@@ -628,10 +628,11 @@ async function stageHunk(hk: LineHunk) {
   const t = activeTab();
   if (!t) return;
   try {
-    const index = (await api.gitFileAt(root(), "", t.path)) ?? "";
-    const next = stageRange(index, t.model.getValue(), hk.b0, hk.b1);
-    if (next === null) return toast("This change is already staged.");
-    await api.gitStageContent(root(), t.path, next);
+    const index = await api.gitFileAt(root(), "", t.path);
+    if (index === null) return toast("The file is not tracked yet; stage the whole file from the Commit tool window.");
+    const patch = stagePatch(rel(t.path), index, t.model.getValue(), hk.b0, hk.b1);
+    if (patch === null) return toast("This change is already staged.");
+    await api.gitStagePatch(root(), t.path, patch);
     toast("Hunk staged.");
     refreshGit();
   } catch (e) {

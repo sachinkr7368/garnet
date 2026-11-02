@@ -18,7 +18,7 @@ export async function runGitOp(label: string, args: string[]): Promise<boolean> 
     const st = await api.gitOpState(root()).catch((): OpState => ({ op: "", conflicts: [] }));
     if (st.conflicts.length) {
       toast(`${label} stopped with ${st.conflicts.length} conflict${st.conflicts.length > 1 ? "s" : ""}.`, "error", [{ label: "Resolve…", run: () => showConflicts() }]);
-      showConflicts();
+      await showConflicts();
     } else toast(`${label} failed: ${e}`, "error");
     return false;
   } finally {
@@ -139,6 +139,15 @@ export async function openResolver(relPath: string): Promise<Resolver | null> {
     input = await api.gitMergeInput(root(), path);
   } catch (e) {
     toast(`Cannot read conflict: ${e}`, "error");
+    return null;
+  }
+  if (input.symlink) {
+    const answer = await message(`${relPath} is a symbolic link on at least one side. Links can only be resolved by taking one side as a whole.`, {
+      kind: "warning",
+      buttons: { yes: "Accept Yours", no: "Accept Theirs", cancel: "Cancel" },
+    });
+    if (answer === "Accept Yours" || answer === "Yes") await acceptSide(relPath, "ours");
+    else if (answer === "Accept Theirs" || answer === "No") await acceptSide(relPath, "theirs");
     return null;
   }
   if (input.ours === null || input.theirs === null) {

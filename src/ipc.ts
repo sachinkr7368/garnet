@@ -79,6 +79,7 @@ export interface OpState {
 }
 
 export interface MergeInput {
+  symlink: boolean;
   base: string | null;
   ours: string | null;
   theirs: string | null;
@@ -111,7 +112,7 @@ export const api = {
   gitLog: (root: string, opts: LogOpts) => invoke<LogCommit[]>("git_log", { root, opts }),
   gitDiffFiles: (root: string, spec: string[]) => invoke<ChangedFile[]>("git_diff_files", { root, spec }),
   gitCommitDetails: (root: string, rev: string) => invoke<CommitDetails>("git_commit_details", { root, rev }),
-  gitStageContent: (root: string, path: string, content: string) => invoke<void>("git_stage_content", { root, path, content }),
+  gitStagePatch: (root: string, path: string, patch: string) => invoke<void>("git_stage_patch", { root, path, patch }),
   gitOpState: (root: string) => invoke<OpState>("git_op_state", { root }),
   gitMergeInput: (root: string, path: string) => invoke<MergeInput>("git_merge_input", { root, path }),
   git: (root: string, ...args: string[]) => invoke<string>("git_run", { root, args }),

@@ -121,7 +121,7 @@ pub fn run() {
             git::git_log,
             git::git_diff_files,
             git::git_commit_details,
-            git::git_stage_content,
+            git::git_stage_patch,
             git::git_op_state,
             git::git_merge_input,
             git::git_stage,

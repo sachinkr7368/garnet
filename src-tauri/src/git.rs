@@ -436,14 +436,22 @@ pub async fn git_commit_details(root: String, rev: String) -> Result<CommitDetai
     })
 }
 
-/// Writes `content` as the staged version of `path` without touching the working tree (hunk staging).
+/// The clean/smudge filter configured for `rel` in .gitattributes, if any (git-crypt, git-lfs, ...).
+fn filter_of(root: &str, rel: &str) -> Result<Option<String>, String> {
+    let out = git(root, &["check-attr", "filter", "--", rel])?;
+    let value = out.trim().rsplit(": ").next().unwrap_or("").to_string();
+    Ok((!matches!(value.as_str(), "" | "unspecified" | "unset")).then_some(value))
+}
+
+/// Applies a zero-context patch of selected hunks to the index (hunk staging/unstaging). Files with a clean
+/// filter are refused so their content never reaches the index unfiltered.
 #[tauri::command]
-pub async fn git_stage_content(root: String, path: String, content: String) -> Result<(), String> {
+pub async fn git_stage_patch(root: String, path: String, patch: String) -> Result<(), String> {
     let rel = rel(&root, &path);
-    let sha = git_in(&root, &["hash-object", "-w", "--no-filters", "--stdin"], Some(&content))?;
-    let staged = git(&root, &["ls-files", "-s", "--", &rel])?;
-    let mode = staged.split_whitespace().next().filter(|m| m.starts_with("100") || *m == "120000").unwrap_or("100644");
-    git(&root, &["update-index", "--add", "--cacheinfo", &format!("{mode},{},{rel}", sha.trim())]).map(|_| ())
+    if let Some(name) = filter_of(&root, &rel)? {
+        return Err(format!("This file uses the '{name}' filter; stage the whole file instead"));
+    }
+    git_in(&root, &["apply", "--cached", "--unidiff-zero", "--whitespace=nowarn", "-"], Some(&patch)).map(|_| ())
 }
 
 #[derive(Serialize)]
@@ -484,6 +492,8 @@ pub async fn git_op_state(root: String) -> Result<OpState, String> {
 
 #[derive(Serialize)]
 pub struct MergeInput {
+    /// A stage or the working path is a symlink: only whole-side resolution is safe.
+    symlink: bool,
     base: Option<String>,
     ours: Option<String>,
     theirs: Option<String>,
@@ -499,8 +509,11 @@ pub async fn git_merge_input(root: String, path: String) -> Result<MergeInput, S
         let out = run_git(&root, &["show", "--no-ext-diff", "--no-textconv", &spec], None)?;
         Ok(out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned()))
     };
+    let symlink = git(&root, &["ls-files", "-u", "-s", "--", &rel])?.lines().any(|l| l.starts_with("120000"))
+        || std::fs::symlink_metadata(Path::new(&root).join(&rel)).is_ok_and(|m| m.file_type().is_symlink());
     let (base, ours, theirs) = (stage(1)?, stage(2)?, stage(3)?);
     let merged = match (&ours, &theirs) {
+        _ if symlink => String::new(),
         (Some(o), Some(t)) => {
             let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
             let dir = std::env::temp_dir().join(format!("garnet-merge-{}-{nanos}", std::process::id()));
@@ -523,7 +536,7 @@ pub async fn git_merge_input(root: String, path: String) -> Result<MergeInput, S
         }
         _ => String::new(),
     };
-    Ok(MergeInput { base, ours, theirs, merged })
+    Ok(MergeInput { symlink, base, ours, theirs, merged })
 }
 
 #[derive(Serialize)]
@@ -667,11 +680,17 @@ mod tests {
         assert_eq!(hist.len(), 2);
         assert!(block(git_log(root.clone(), LogOpts { limit: 10, branch: "--output=x".into(), ..Default::default() })).is_err());
 
-        // Hunk staging writes the index only.
-        block(git_stage_content(root.clone(), format!("{root}/f.rb"), "a\nSTAGED\nc\n".into())).unwrap();
-        assert_eq!(block(git_file_at(root.clone(), String::new(), "f.rb".into())).unwrap().as_deref(), Some("a\nSTAGED\nc\n"));
+        // Hunk staging applies a zero-context patch to the index only.
+        let patch = "diff --git a/f.rb b/f.rb\n--- a/f.rb\n+++ b/f.rb\n@@ -2 +2 @@\n-OURS\n+STAGED\n@@ -3,0 +4 @@\n+d\n";
+        block(git_stage_patch(root.clone(), format!("{root}/f.rb"), patch.into())).unwrap();
+        assert_eq!(block(git_file_at(root.clone(), String::new(), "f.rb".into())).unwrap().as_deref(), Some("a\nSTAGED\nc\nd\n"));
         assert_eq!(std::fs::read_to_string(dir.join("f.rb")).unwrap(), "a\nOURS\nc\n");
         sh("git reset -q");
+        // Filtered files (git-crypt, LFS) are never hunk-staged.
+        sh("echo 'secret.env filter=crypt' > .gitattributes && echo x > secret.env");
+        let err = block(git_stage_patch(root.clone(), format!("{root}/secret.env"), "diff --git a/secret.env b/secret.env\n".into())).unwrap_err();
+        assert_eq!(err, "This file uses the 'crypt' filter; stage the whole file instead");
+        sh("rm .gitattributes secret.env");
 
         // Stash with an untracked file lists it in the stash's details.
         sh("echo x >> f.rb && echo new > u.rb && git stash push -q --include-untracked -m wip");
@@ -685,6 +704,7 @@ mod tests {
         let op = block(git_op_state(root.clone())).unwrap();
         assert_eq!((op.op, op.conflicts.clone()), ("merge", vec!["f.rb".to_string()]));
         let m = block(git_merge_input(root.clone(), format!("{root}/f.rb"))).unwrap();
+        assert!(!m.symlink);
         assert_eq!((m.base.as_deref(), m.ours.as_deref(), m.theirs.as_deref()), (Some("a\nb\nc\n"), Some("a\nOURS\nc\n"), Some("a\nTHEIRS\nc\n")));
         assert!(m.merged.contains("<<<<<<< Yours\nOURS\n||||||| Base\nb\n=======\nTHEIRS\n>>>>>>> Theirs\n"), "{}", m.merged);
         std::fs::write(dir.join("f.rb"), "a\nOURS\nTHEIRS\nc\n").unwrap();

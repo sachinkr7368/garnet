@@ -88,12 +88,50 @@ export function applyHunks(a: string[], b: string[], chosen: LineHunk[]): string
 export const revertHunks = (a: string[], b: string[], chosen: LineHunk[]) =>
   applyHunks(b, a, chosen.map((h) => ({ a0: h.b0, a1: h.b1, b0: h.a0, b1: h.a1 })));
 
-/// New staged text after staging the part of `work` covered by work lines [r0, r1); null when already staged.
-export function stageRange(index: string, work: string, r0: number, r1: number): string | null {
-  const a = splitLines(index);
-  const b = splitLines(work);
-  const chosen = diffLines(a, b).filter((h) => overlapsNew(h, r0, r1));
-  return chosen.length ? applyHunks(a, b, chosen).join("\n") : null;
+/// Lines for a patch: a missing final newline is folded into the last line so it diffs like any other change.
+const NOEOL = "\u0000noeol";
+export function patchLines(text: string): string[] {
+  const lines = text.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  else lines[lines.length - 1] += NOEOL;
+  return lines;
+}
+export const displayLine = (line: string) => (line.endsWith(NOEOL) ? `${line.slice(0, -NOEOL.length)} ⏎̸` : line);
+export const patchHunks = (oldText: string, newText: string) => diffLines(patchLines(oldText), patchLines(newText));
+export const swapHunk = (h: LineHunk): LineHunk => ({ a0: h.b0, a1: h.b1, b0: h.a0, b1: h.a1 });
+
+function quotePath(p: string) {
+  if (!/[^\x20-\x7e]|["\\]/.test(p)) return p;
+  let out = "";
+  for (const byte of new TextEncoder().encode(p)) {
+    const ch = String.fromCharCode(byte);
+    out += ch === '"' || ch === "\\" ? `\\${ch}` : byte < 0x20 || byte > 0x7e ? `\\${byte.toString(8).padStart(3, "0")}` : ch;
+  }
+  return `"${out}"`;
+}
+
+/// Zero-context unified patch (for `git apply --cached --unidiff-zero`) of the chosen hunks of patchHunks(oldText, newText).
+export function buildPatch(path: string, oldText: string, newText: string, chosen: LineHunk[]): string {
+  const a = patchLines(oldText);
+  const b = patchLines(newText);
+  const q = (side: string) => quotePath(`${side}/${path}`);
+  const line = (prefix: string, l: string) => (l.endsWith(NOEOL) ? `${prefix}${l.slice(0, -NOEOL.length)}\n\\ No newline at end of file\n` : `${prefix}${l}\n`);
+  let out = `diff --git ${q("a")} ${q("b")}\n--- ${q("a")}\n+++ ${q("b")}\n`;
+  let delta = 0;
+  for (const h of [...chosen].sort((x, y) => x.a0 - y.a0)) {
+    const oc = h.a1 - h.a0;
+    const nc = h.b1 - h.b0;
+    out += `@@ -${oc ? h.a0 + 1 : h.a0},${oc} +${(nc ? h.a0 + 1 : h.a0) + delta},${nc} @@\n`;
+    out += a.slice(h.a0, h.a1).map((l) => line("-", l)).join("") + b.slice(h.b0, h.b1).map((l) => line("+", l)).join("");
+    delta += nc - oc;
+  }
+  return out;
+}
+
+/// Patch staging the part of `work` covered by work lines [r0, r1) onto `index`; null when already staged.
+export function stagePatch(path: string, index: string, work: string, r0: number, r1: number): string | null {
+  const chosen = patchHunks(index, work).filter((h) => overlapsNew(h, r0, r1));
+  return chosen.length ? buildPatch(path, index, work, chosen) : null;
 }
 
 /// Conflict file segments from a diff3-style merge: plain lines, or a conflict with the three sides.

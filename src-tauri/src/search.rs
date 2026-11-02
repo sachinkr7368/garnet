@@ -15,6 +15,7 @@ use tauri::State;
 const MAX_MATCHES: usize = 5000;
 const MAX_LINE: usize = 400;
 const MAX_RANGES: usize = 200;
+const MAX_LINES: usize = 500;
 
 #[derive(Default)]
 pub struct SearchState {
@@ -45,7 +46,8 @@ pub struct LineMatch {
 #[derive(Serialize, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SearchEvent {
-    File { path: String, matches: Vec<LineMatch> },
+    /// `truncated`: the file has more matches than listed (over MAX_LINES lines or MAX_RANGES on a line).
+    File { path: String, matches: Vec<LineMatch>, truncated: bool },
     Done { total: usize, truncated: bool },
 }
 
@@ -130,20 +132,29 @@ fn search(
                     return WalkState::Continue;
                 }
                 let mut matches = Vec::new();
+                let mut more = false;
                 let _ = searcher.search_path(
                     &matcher,
                     entry.path(),
                     UTF8(|line_no, line| {
                         let line = line.trim_end_matches(['\n', '\r']);
-                        matches.push(line_match(&matcher, line_no, line, replace.as_ref()));
-                        Ok(matches.len() < 500)
+                        if matches.len() >= MAX_LINES {
+                            more = true;
+                            return Ok(false);
+                        }
+                        let m = line_match(&matcher, line_no, line, replace.as_ref());
+                        more |= m.ranges.len() >= MAX_RANGES;
+                        matches.push(m);
+                        Ok(true)
                     }),
                 );
-                if !matches.is_empty() {
-                    total.fetch_add(matches.len(), Ordering::Relaxed);
+                // A newer search (e.g. the next keystroke in Replace) supersedes this one; its results must not land.
+                if !matches.is_empty() && current.load(Ordering::SeqCst) == generation {
+                    total.fetch_add(matches.iter().map(|m| m.ranges.len()).sum(), Ordering::Relaxed);
                     emit(SearchEvent::File {
                         path: entry.path().to_string_lossy().into_owned(),
                         matches,
+                        truncated: more,
                     });
                 }
                 WalkState::Continue
@@ -192,7 +203,7 @@ mod tests {
         let mut done = None;
         for e in events.lock().unwrap().drain(..) {
             match e {
-                SearchEvent::File { path, matches } => files.push((
+                SearchEvent::File { path, matches, .. } => files.push((
                     Path::new(&path).strip_prefix(root).unwrap().to_string_lossy().into_owned(),
                     matches.into_iter().map(|m| (m.line, m.ranges)).collect(),
                 )),
@@ -240,6 +251,54 @@ mod tests {
         let mut bad = opts("(");
         bad.regex = true;
         assert!(search(root.clone(), bad, 1, Arc::new(AtomicU64::new(1)), |_| {}).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn counts_matches_not_lines_and_flags_truncated_files() {
+        let root = project("counts");
+        std::fs::write(root.join("many.txt"), "x\n".repeat(MAX_LINES + 20)).unwrap();
+        std::fs::write(root.join("wide.txt"), "x".repeat(MAX_RANGES + 5)).unwrap();
+        std::fs::write(root.join("two.txt"), "x x\nx\n").unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut o = opts("x");
+        o.include = Some("*.txt".into());
+        search(root.clone(), o, 1, Arc::new(AtomicU64::new(1)), move |e| sink.lock().unwrap().push(e)).unwrap().join().unwrap();
+        let mut by_name = std::collections::HashMap::new();
+        let mut total = 0;
+        for e in events.lock().unwrap().drain(..) {
+            match e {
+                SearchEvent::File { path, matches, truncated } => {
+                    by_name.insert(Path::new(&path).file_name().unwrap().to_string_lossy().into_owned(), (matches.iter().map(|m| m.ranges.len()).sum::<usize>(), truncated));
+                }
+                SearchEvent::Done { total: t, .. } => total = t,
+            }
+        }
+        assert_eq!(by_name["two.txt"], (3, false));
+        assert_eq!(by_name["many.txt"], (MAX_LINES, true));
+        assert_eq!(by_name["wide.txt"], (MAX_RANGES, true));
+        assert_eq!(total, 3 + MAX_LINES + MAX_RANGES);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replace_refuses_symlinks_and_paths_outside_the_project() {
+        let root = project("guard");
+        let outside = root.with_extension("outside");
+        std::fs::write(&outside, "foo\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link.rb")).unwrap();
+        let roots = [std::fs::canonicalize(&root).unwrap()];
+        let e = vec![ReplaceEdit { line: 1, start: 0, end: 3, old: "foo".into(), new: "bar".into() }];
+        let link = root.join("link.rb").to_string_lossy().into_owned();
+        assert!(replace_file(&link, &e, &roots).unwrap_err().contains("symlink"));
+        assert!(replace_file(&outside.to_string_lossy(), &e, &roots).unwrap_err().contains("outside the project"));
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "foo\n");
+        let inside = root.join("app/models/user.rb");
+        let e = vec![ReplaceEdit { line: 1, start: 6, end: 10, old: "User".into(), new: "Member".into() }];
+        assert_eq!(replace_file(&inside.to_string_lossy(), &e, &roots), Ok(1));
+        assert_eq!(std::fs::read_to_string(&inside).unwrap(), "class Member\nend\n");
+        std::fs::remove_file(outside).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -333,12 +392,18 @@ pub fn apply_edits(text: &str, edits: &[ReplaceEdit]) -> (String, usize) {
 }
 
 #[tauri::command]
-pub async fn replace_in_file(path: String, edits: Vec<ReplaceEdit>) -> Result<usize, String> {
-    let bytes = std::fs::read(&path).map_err(e2s)?;
+pub async fn replace_in_file(app: tauri::AppHandle, index: State<'_, Index>, path: String, edits: Vec<ReplaceEdit>) -> Result<usize, String> {
+    replace_file(&path, &edits, &crate::fsops::write_roots(&app, &index))
+}
+
+/// Same guard as `write_file`: inside the project, never through a symlink.
+fn replace_file(path: &str, edits: &[ReplaceEdit], roots: &[std::path::PathBuf]) -> Result<usize, String> {
+    crate::fsops::check_write(path, roots, false)?;
+    let bytes = std::fs::read(path).map_err(e2s)?;
     let text = String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8"))?;
-    let (next, applied) = apply_edits(&text, &edits);
+    let (next, applied) = apply_edits(&text, edits);
     if applied > 0 {
-        std::fs::write(&path, next).map_err(e2s)?;
+        crate::fsops::write_new(std::path::Path::new(path), &next, false)?;
     }
     Ok(applied)
 }

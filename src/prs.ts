@@ -271,11 +271,16 @@ export async function closePullRequest() {
   pr = null;
 }
 
+let openSeq = 0;
+
 export async function openPullRequest(slug: string, number: number) {
+  const mine = ++openSeq;
   viewEl.hidden = false;
   viewEl.replaceChildren(h("div", { class: "empty" }, `Loading ${slug}#${number}…`));
   try {
     const [detail, fileList] = await Promise.all([fetchDetail(slug, number), gh<PrFile[]>("GET", `/repos/${slug}/pulls/${number}/files?per_page=100`, undefined, { pages: 30 })]);
+    // A later open (another PR clicked while this one loaded) wins.
+    if (mine !== openSeq) return;
     if (pr?.slug !== slug || pr?.number !== number) {
       tab = "overview";
       currentFile = null;
@@ -284,6 +289,7 @@ export async function openPullRequest(slug: string, number: number) {
     files = fileList;
     renderView();
   } catch (e) {
+    if (mine !== openSeq) return;
     viewEl.replaceChildren(h("div", { class: "empty" }, `Could not load ${slug}#${number}: ${errText(e)} `, h("button", { class: "btn", onclick: () => openPullRequest(slug, number) }, "Retry"), " ", h("button", { class: "btn", onclick: closePullRequest }, "Close")));
   }
 }

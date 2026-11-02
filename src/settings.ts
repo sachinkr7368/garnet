@@ -87,6 +87,8 @@ export const SCHEMA: SettingDef[] = [
   { key: "rails.environment", page: "Rails", label: "RAILS_ENV for Rails server/console/tasks", type: "string", default: "development" },
   { key: "rails.serverPort", page: "Rails", label: "Default Rails server port", type: "number", min: 1, max: 65535, default: 3000 },
   { key: "rails.serverBinding", page: "Rails", label: "Rails server binding", type: "string", default: "127.0.0.1" },
+  { key: "database.autoLimit", page: "Database", label: "Add LIMIT to console SELECTs without one", type: "boolean", default: true, description: "Default for the Limit toggle in each SQL console." },
+  { key: "database.autoLimitRows", page: "Database", label: "Auto LIMIT rows", type: "number", min: 1, max: 100000, default: 500 },
 
   { key: "testing.rspecRunner", page: "Testing", label: "RSpec runner", type: "enum", options: ["auto", "bundle exec rspec", "bin/rspec", "rspec"], default: "auto" },
   { key: "testing.rspecArgs", page: "Testing", label: "Extra RSpec arguments", type: "string", default: "" },

@@ -6,11 +6,14 @@ export const fake = {
   calls: [] as string[],
   /// Stdout for `api.runCapture(root, command)`; defaults to "".
   capture: (_command: string): string => "",
+  /// Result for `invoke(cmd, args)`; defaults to null.
+  invokeResult: (_cmd: string, _args?: any): unknown => null,
   reset() {
     this.files.clear();
     this.config.clear();
     this.calls.length = 0;
     this.capture = () => "";
+    this.invokeResult = () => null;
     this.trustedFlag = false;
   },
 };
@@ -20,9 +23,9 @@ const missing = (path: string) => Promise.reject(new Error(`No such file: ${path
 export class Channel<T> {
   onmessage: (m: T) => void = () => {};
 }
-export const invoke = async (cmd: string) => {
+export const invoke = async (cmd: string, args?: any): Promise<any> => {
   fake.calls.push(cmd);
-  return null;
+  return fake.invokeResult(cmd, args);
 };
 
 export const api = new Proxy(

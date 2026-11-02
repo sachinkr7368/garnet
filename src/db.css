@@ -1,0 +1,265 @@
+.db-view {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+.db-side {
+  width: 300px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  min-height: 0;
+}
+.db-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.db-tab-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.db-tab-body > [hidden] {
+  display: none;
+}
+
+.db-tree .tree-row {
+  gap: 5px;
+}
+.db-tree .tree-label {
+  flex: none;
+}
+.db-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+}
+.db-note {
+  padding: 4px 10px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.db-warn,
+.db-warn .codicon {
+  color: var(--warn);
+}
+.db-live {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--added);
+  flex: none;
+  margin-left: auto;
+}
+
+.db-tag {
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  flex: none;
+  background: var(--tag, transparent);
+}
+.db-tag-red,
+.db-head-red {
+  --tag: var(--deleted);
+}
+.db-tag-orange,
+.db-head-orange {
+  --tag: var(--warn);
+}
+.db-tag-yellow,
+.db-head-yellow {
+  --tag: var(--yellow);
+}
+.db-tag-green,
+.db-head-green {
+  --tag: var(--added);
+}
+.db-tag-blue,
+.db-head-blue {
+  --tag: var(--blue);
+}
+.db-tag-purple,
+.db-head-purple {
+  --tag: var(--purple);
+}
+.db-ro {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 0 5px;
+  border-radius: 4px;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+
+.db-tabs {
+  display: flex;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex: none;
+}
+.db-tabs[hidden] {
+  display: none;
+}
+.db-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 4px 0 8px;
+  height: 28px;
+  white-space: nowrap;
+  cursor: default;
+  color: var(--dim);
+  border-right: 1px solid var(--border);
+}
+.db-tab:hover {
+  background: var(--hover);
+}
+.db-tab.active {
+  color: var(--text);
+  background: var(--bg);
+}
+.db-tab .icon-btn {
+  width: 18px;
+  height: 18px;
+}
+.db-result-tabs .db-tab {
+  padding-right: 8px;
+  height: 24px;
+  font: 11px ui-monospace, Menlo, monospace;
+}
+.db-tab.db-failed {
+  color: var(--deleted);
+}
+
+.db-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.db-conn-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  min-height: 28px;
+  border-bottom: 1px solid var(--border);
+  border-left: 4px solid var(--tag, transparent);
+  background: var(--panel-2);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.db-range {
+  font-size: 12px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+.db-limit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--dim);
+  margin: 0 6px;
+}
+.db-console .view-toolbar .btn.small {
+  margin-left: 4px;
+}
+.db-split {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.db-editor {
+  flex: 2;
+  min-height: 60px;
+  border-bottom: 1px solid var(--border);
+}
+.db-results,
+.db-result {
+  flex: 3;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.db-status {
+  padding: 2px 10px;
+  font-size: 11px;
+  border-top: 1px solid var(--border);
+  flex: none;
+}
+
+.db-grid-wrap {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+.db-grid {
+  border-collapse: collapse;
+  font: 12px/18px ui-monospace, Menlo, monospace;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.db-grid th,
+.db-grid td {
+  border: 1px solid var(--border);
+  padding: 1px 8px;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.db-grid th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: 600;
+  z-index: 1;
+}
+.db-grid th .codicon {
+  font-size: 12px;
+  vertical-align: middle;
+  margin-left: 3px;
+}
+.db-grid th.db-sortable {
+  cursor: pointer;
+}
+.db-grid th.db-sortable:hover {
+  background: var(--hover);
+}
+.db-grid tbody tr:hover {
+  background: var(--hover);
+}
+.db-null {
+  color: var(--dim);
+  font-style: italic;
+}
+
+.db-dialog {
+  width: min(560px, 94vw);
+  height: auto;
+  max-height: 86vh;
+}
+.db-form-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.db-unresolved input,
+.db-unresolved select {
+  border-color: var(--warn);
+}

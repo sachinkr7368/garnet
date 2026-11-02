@@ -68,11 +68,11 @@ Feature status compared with RubyMine. The full checklist lives in
 
 ## Install
 
-1. Download `Garnet_<version>_aarch64.dmg` (Apple Silicon) or `_x64.dmg` (Intel)
-   from the GitHub Releases page.
+1. Download `Garnet_<version>_universal.dmg` (Apple Silicon and Intel) from the
+   GitHub Releases page.
 2. Open the DMG and drag Garnet to Applications.
-3. Release builds are unsigned unless the maintainer has configured signing.
-   macOS will refuse to open an unsigned app on first launch: right-click
+3. Release builds are ad-hoc signed unless the maintainer has configured a
+   Developer ID. macOS will refuse to open such an app on first launch: right-click
    Garnet in Applications, choose **Open**, then confirm **Open** in the
    dialog. You only need to do this once.
 

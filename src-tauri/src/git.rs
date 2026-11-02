@@ -203,14 +203,43 @@ pub async fn git_blame_line(root: String, path: String, line: u32) -> Result<Bla
 mod tests {
     use super::*;
 
+    /// GIT and TRUSTED are process-wide; tests that touch them take this lock.
+    static GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn git_path_must_be_absolute_executable() {
+        let _g = GLOBALS.lock().unwrap();
         assert!(git_set_path("git".into()).is_ok());
         assert!(git_set_path("./git".into()).is_err());
         assert!(git_set_path("bin/git".into()).is_err());
         assert!(git_set_path("/etc/hosts".into()).is_err());
         assert!(git_set_path("/bin/sh".into()).is_ok());
         assert!(git_set_path(String::new()).is_ok());
+    }
+
+    #[test]
+    fn git_is_gated_on_trust_and_ignores_repo_fsmonitor() {
+        let _g = GLOBALS.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("garnet-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_str().unwrap();
+        let sh = |c: &str| assert!(Command::new("/bin/sh").args(["-c", c]).current_dir(&dir).status().unwrap().success());
+        sh("git init -q && git config user.email t@example.com && git config user.name t && echo a > a.rb && git add a.rb && git commit -qm init");
+        let pwned = dir.join("pwned");
+        std::fs::write(dir.join("hook.sh"), format!("#!/bin/sh\ntouch {}\n", pwned.display())).unwrap();
+        sh("chmod +x hook.sh && git config core.fsmonitor \"$PWD/hook.sh\" && echo b >> a.rb");
+
+        TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(git(root, &["status"]).unwrap_err(), "Trust project to enable Git");
+        TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let status = git(root, &["status", "--porcelain=v1", "-z"]).unwrap();
+        let entries = parse_status(&status);
+        assert!(entries.iter().any(|e| e.path == "a.rb" && e.worktree == 'M'));
+        assert!(!pwned.exists(), "core.fsmonitor from .git/config must not run");
+        assert!(git(root, &["show", "no-such-revision"]).unwrap_err().contains("no-such-revision"));
+        TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

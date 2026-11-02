@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_call:
 
 jobs:
   check:
@@ -25,6 +26,7 @@ jobs:
           workspaces: src-tauri
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      - run: pnpm test
       - run: pnpm vite build
       - run: cargo clippy --all-targets -- -D warnings
         working-directory: src-tauri

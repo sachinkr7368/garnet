@@ -84,15 +84,18 @@ fn walk(root: &Path) -> Vec<String> {
 
 #[tauri::command]
 pub async fn find_files(index: State<'_, Index>, query: String, limit: usize) -> Result<Vec<String>, String> {
-    let files = index.files();
+    Ok(rank(&index.files(), &query, limit))
+}
+
+fn rank(files: &[String], query: &str, limit: usize) -> Vec<String> {
     if query.trim().is_empty() {
-        return Ok(files.iter().take(limit).cloned().collect());
+        return files.iter().take(limit).cloned().collect();
     }
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-    let pattern = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let mut hits = pattern.match_list(files.iter(), &mut matcher);
     hits.truncate(limit);
-    Ok(hits.into_iter().map(|(p, _)| p.clone()).collect())
+    hits.into_iter().map(|(p, _)| p.clone()).collect()
 }
 
 #[tauri::command]
@@ -118,5 +121,19 @@ mod tests {
         let files = walk(&dir);
         assert_eq!(files, vec![".gitignore", "app/models/user.rb"]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rank_is_fuzzy_smart_case_and_limited() {
+        let files: Vec<String> = ["app/controllers/posts_controller.rb", "app/models/post.rb", "app/views/posts/index.html.erb", "config/routes.rb"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(rank(&files, "", 2), files[..2].to_vec());
+        assert_eq!(rank(&files, "models/post", 10), vec!["app/models/post.rb"]);
+        assert_eq!(rank(&files, "pc", 10)[0], "app/controllers/posts_controller.rb");
+        assert!(rank(&files, "Routes", 10).is_empty());
+        assert_eq!(rank(&files, "routes", 10), vec!["config/routes.rb"]);
+        assert_eq!(rank(&files, "rb", 1).len(), 1);
+        assert!(rank(&files, "zzz", 10).is_empty());
     }
 }

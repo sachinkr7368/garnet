@@ -16,7 +16,7 @@ import { importJetBrainsKeymap, showKeymapReference } from "./keymapref";
 import { editConfigurations, launch, loadRunConfigs, newConfig, pickConfiguration, rakeTask, rerun, runs, runTests, selected } from "./run";
 import { findInFiles, searchView } from "./search";
 import { loadCodeStyle } from "./codestyle";
-import { addRecentProject, askTrust, checkTrust, isTrusted, loadSession, trustProject, loadSettings, recentProjects, saveSession, setting, settingsPath } from "./settings";
+import { addRecentProject, askTrust, checkTrust, isTrusted, loadSession, trustProject, loadSettings, recentProjects, saveSession, setting, settingsPath, toggleTheme } from "./settings";
 import { openSettingsWindow } from "./settingsui";
 import { createGist, createPullRequest, githubSignIn, initToolbar, openOnGitHub, pullCurrent, pushCurrent, refreshToolbar, showBranches, showProjects, showWorktrees } from "./toolbar";
 import { abs, debounce, rel, state } from "./state";
@@ -184,6 +184,7 @@ commands(
   { id: "switcher", title: "Window: Switcher", key: "ctrl+tab", run: () => pickPaths("Switch to file", recentFileList(), 1) },
   { id: "hideAll", title: "Window: Hide All Tool Windows", key: "cmd+shift+f12", run: hideAll },
   { id: "settings", title: "Preferences: Settings…", key: "cmd+,", run: () => openSettingsWindow() },
+  { id: "toggleTheme", title: "View: Toggle Theme (Light/Dark)", run: toggleTheme },
   { id: "settingsJson", title: "Preferences: Open Settings (JSON)", run: async () => openFile(await settingsPath()) },
   { id: "keymapSettings", title: "Preferences: Keymap…", run: () => openSettingsWindow("Keymap") },
   { id: "importKeymap", title: "Preferences: Import JetBrains Keymap…", run: importKeymap },

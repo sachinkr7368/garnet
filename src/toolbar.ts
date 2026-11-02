@@ -2,15 +2,22 @@ import { ask, message, open } from "@tauri-apps/plugin-dialog";
 import { activeTab, editor, saveAll } from "./editor";
 import { refreshGit } from "./git";
 import { api, invoke } from "./ipc";
-import { isTrusted, recentProjects } from "./settings";
+import { isDarkTheme, isTrusted, onSettingsChange, recentProjects, toggleTheme } from "./settings";
 import { basename, dirname, rel, root, state } from "./state";
-import { h, icon, inputBox, quickPick, toast, type PickItem } from "./ui";
+import { h, icon, iconButton, inputBox, quickPick, toast, type PickItem } from "./ui";
 
 const switchers = document.getElementById("switchers")!;
 const projectBtn = h("button", { class: "switcher", title: "Projects" });
 const worktreeBtn = h("button", { class: "switcher", title: "Git worktrees" });
 const branchBtn = h("button", { class: "switcher", title: "Git branches" });
 switchers.append(projectBtn, worktreeBtn, branchBtn);
+
+const themeBtn = iconButton("color-mode", "", () => toggleTheme());
+themeBtn.id = "theme-toggle";
+document.getElementById("toolbar")!.append(themeBtn);
+const labelThemeBtn = () => (themeBtn.title = `Toggle theme (now ${isDarkTheme() ? "dark" : "light"})`);
+labelThemeBtn();
+onSettingsChange(labelThemeBtn);
 
 let openProjectHere: (path: string) => void = () => {};
 export function initToolbar(switchProject: (path: string) => void) {

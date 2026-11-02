@@ -28,4 +28,18 @@ HTMLCanvasElement.prototype.getContext = (() => null) as never;
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(async () => false), message: vi.fn(async () => {}), open: vi.fn(async () => null), save: vi.fn(async () => null) }));
 vi.mock("../ipc", async () => await import("./fakeIpc"));
 
+/// Fake Tauri window: tests drive `emitWindowTheme` and read `windowTheme.set`.
+export const windowTheme = { current: "light" as "light" | "dark", set: [] as (string | null)[], handlers: [] as ((e: { payload: string }) => void)[] };
+export const emitWindowTheme = (t: "light" | "dark") => {
+  windowTheme.current = t;
+  windowTheme.handlers.forEach((fn) => fn({ payload: t }));
+};
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    theme: async () => windowTheme.current,
+    setTheme: async (t: string | null) => void windowTheme.set.push(t),
+    onThemeChanged: async (fn: (e: { payload: string }) => void) => (windowTheme.handlers.push(fn), () => {}),
+  }),
+}));
+
 export { fake };

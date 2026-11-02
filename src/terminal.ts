@@ -1,20 +1,17 @@
-import { Terminal, type ITheme } from "@xterm/xterm";
+import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { openFile } from "./editor";
 import { Channel, invoke, type PtyEvent } from "./ipc";
 import { isDarkTheme, onSettingsChange, setting } from "./settings";
 import { abs, root } from "./state";
+import { TERMINAL } from "./theme";
 import { bottom, h, icon, iconButton } from "./ui";
 
-const themes: Record<string, ITheme> = {
-  dark: { background: "#141418", foreground: "#d4d4d8", cursor: "#e0476a", selectionBackground: "#3a3d4a" },
-  light: { background: "#fbfbfc", foreground: "#26262b", cursor: "#b8263d", selectionBackground: "#cfd3e0" },
-};
 
 const views = new Set<PtyView>();
 const termOptions = () => ({
-  theme: themes[isDarkTheme() ? "dark" : "light"],
+  theme: TERMINAL[isDarkTheme() ? "dark" : "light"],
   fontSize: setting<number>("terminal.fontSize"),
   fontFamily: setting<string>("terminal.fontFamily") || setting<string>("editor.fontFamily"),
   cursorBlink: setting<boolean>("terminal.cursorBlink"),

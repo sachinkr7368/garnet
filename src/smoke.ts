@@ -5,7 +5,10 @@ import { allCommands, keymap } from "./commands";
 import { importJetBrainsKeymap, jetbrainsKeystroke } from "./keymapref";
 import { debugState, evaluate, resume, smokeHooks, stopDebug, toggleBreakpoint } from "./debug";
 import { editor, openFile } from "./editor";
-import { refreshGit } from "./git";
+import { commitView, gutterHunks, refreshGit, updateGutterNow } from "./git";
+import { logState, showGitLog } from "./gitlog";
+import { continueOperation, openResolver, runGitOp } from "./merge";
+import { stagePatch } from "./difflogic";
 import { api, Channel, invoke, type PtyEvent } from "./ipc";
 import { lspReady, request } from "./lsp";
 import { buildCommand, configList, editConfigurations, launch, newConfig, safeEnv, validateConfig } from "./run";
@@ -129,6 +132,7 @@ export async function runSmoke(project: string, withDebug: boolean, openProject:
     }
 
     await uiChecks(check);
+    await gitChecks(controller, check);
     if (withDebug) await debugRailsRequest(report, controller, check);
   } catch (e) {
     check("exception", String(e));
@@ -225,4 +229,76 @@ async function uiChecks(check: (n: string, ok: boolean | string) => void) {
   const listed = await invoke<string>("git_run", { root: state.project!.root, args: ["branch", "--list", "garnet-smoke"] });
   await invoke("git_run", { root: state.project!.root, args: ["branch", "-D", "garnet-smoke"] });
   check("git_run branch create/delete", listed.includes("garnet-smoke"));
+}
+
+async function gitChecks(controller: string, check: (n: string, ok: boolean | string) => void) {
+  const root = state.project!.root;
+  showGitLog("");
+  const listed = await until(() => logState().commits.length > 0 && logState().details.querySelector(".log-meta"), 10000);
+  check("git log lists commits with details", !!listed);
+  check("git log draws the graph", !!document.querySelector(".log-row svg.log-graph"));
+  const total = logState().commits.length;
+  showGitLog(controller);
+  await until(() => logState().commits.length > 0 && logState().commits.length <= total && logState().details.querySelector(".change-row.selected"), 10000);
+  check("file history filters the log to the file", logState().commits.length > 0 && !!logState().details.querySelector(".change-row.selected"));
+  showGitLog("");
+
+  await openFile(controller);
+  const model = editor.getModel()!;
+  await updateGutterNow();
+  const before = gutterHunks().length;
+  editor.setPosition({ lineNumber: 1, column: 1 });
+  editor.trigger("keyboard", "type", { text: "# garnet smoke\n" });
+  await updateGutterNow();
+  check("live gutter marks unsaved edits", gutterHunks().length === before + 1 || JSON.stringify(gutterHunks()));
+  while (model.getAlternativeVersionId() !== 1 && model.canUndo()) model.undo();
+  await refreshGit();
+  check("commit panel renders the changes tree", !!commitView.querySelector(".changes"));
+
+  const dir = `${root}/tmp/garnet-smoke-git`;
+  const sh = (cmd: string) => api.runCapture(root, `cd ${JSON.stringify(dir)} && ${cmd}`, 30);
+  await api.runCapture(root, `rm -rf ${JSON.stringify(dir)} && mkdir -p ${JSON.stringify(dir)}`, 30);
+  const saved = state.project!;
+  state.project = { ...saved, root: dir };
+  try {
+    await sh(
+      "git init -q -b main && git config user.email s@example.com && git config user.name smoke && printf 'a\\nb\\nc\\n' > f.rb && git add f.rb && git commit -qm init" +
+        " && git checkout -qb feature && printf 'a\\nTHEIRS\\nc\\n' > f.rb && git commit -qam theirs && git checkout -q main && printf 'a\\nOURS\\nc\\n' > f.rb && git commit -qam ours",
+    );
+    const merged = await runGitOp("Merge", ["merge", "feature"]);
+    document.getElementById("overlay-root")!.replaceChildren();
+    const op = await api.gitOpState(dir);
+    check("merge conflict detected", !merged && op.op === "merge" && op.conflicts.join() === "f.rb");
+    const r = await openResolver("f.rb");
+    check("resolver shows one conflict in three panes", r?.chunks.length === 1 && document.querySelectorAll(".merge-pane .monaco-editor").length === 3);
+    if (r) {
+      r.accept(0, "both");
+      check("accept both yields yours then theirs", r.result.getValue() === "a\nOURS\nTHEIRS\nc\n" || r.result.getValue());
+      check("resolver applies and marks resolved", await r.apply());
+    }
+    check("no conflicts left", (await api.gitOpState(dir)).conflicts.length === 0);
+    await continueOperation("merge");
+    check("merge continued into a merge commit", (await api.gitOpState(dir)).op === "" && (await api.gitCommitDetails(dir, "HEAD")).parents.length === 2);
+
+    await sh("echo x >> f.rb && echo new > u.rb && git stash push -q --include-untracked -m wip");
+    const st = await api.gitCommitDetails(dir, "stash@{0}");
+    check("stash details list tracked and untracked files", st.files.some((f) => f.path === "f.rb") && st.files.some((f) => f.path === "u.rb" && f.status === "?"));
+    await runGitOp("Pop stash", ["stash", "pop"]);
+    const index = (await api.gitFileAt(dir, "", "f.rb")) ?? "";
+    const work = await api.readFile(`${dir}/f.rb`);
+    const patch = stagePatch("f.rb", index, `X\n${work}`, 0, 1);
+    await api.gitStagePatch(dir, `${dir}/f.rb`, patch!);
+    check("hunk staging stages only the chosen hunk", (await api.gitFileAt(dir, "", "f.rb")) === `X\n${index}`);
+    await sh("echo 'f.rb filter=crypt' > .gitattributes");
+    check("hunk staging refuses filtered files", await api.gitStagePatch(dir, `${dir}/f.rb`, patch!).then(() => false, (e) => String(e).includes("'crypt' filter")));
+    await sh("ln -s /etc/hosts link.rb");
+    check("writes through symlinks are refused", await api.writeFile(`${dir}/link.rb`, "x").then(() => false, (e) => String(e).includes("symlink")));
+    check("writes outside the project are refused", await api.writeFile(`${root}/../garnet-smoke-outside`, "x").then(() => false, () => true));
+  } catch (e) {
+    check("git scenario", String(e));
+  } finally {
+    state.project = saved;
+    await api.runCapture(root, `rm -rf ${JSON.stringify(dir)}`, 30);
+    document.getElementById("overlay-root")!.replaceChildren();
+  }
 }

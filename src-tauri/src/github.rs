@@ -100,3 +100,46 @@ pub async fn open_new_window(path: String) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(e2s)?;
     Command::new(exe).arg(path).spawn().map(|_| ()).map_err(e2s)
 }
+
+/// Latest published release of Garnet (tag and page URL), for the opt-in update check. Unauthenticated.
+#[tauri::command]
+pub async fn latest_release() -> Result<(String, String), String> {
+    let out = Command::new("curl")
+        .args([
+            "-sS",
+            "-f",
+            "--max-time",
+            "15",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-A",
+            "Garnet",
+            "https://api.github.com/repos/sachinkr7368/garnet/releases/latest",
+        ])
+        .output()
+        .map_err(e2s)?;
+    if !out.status.success() {
+        return Err(format!("update check failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    parse_release(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_release(body: &str) -> Result<(String, String), String> {
+    let v: serde_json::Value = serde_json::from_str(body).map_err(e2s)?;
+    let tag = v["tag_name"].as_str().ok_or("no tag_name in release")?;
+    let url = v["html_url"].as_str().filter(|u| u.starts_with("https://github.com/")).ok_or("no release URL")?;
+    Ok((tag.to_string(), url.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_latest_release() {
+        let body = r#"{"tag_name":"v0.2.0","html_url":"https://github.com/sachinkr7368/garnet/releases/tag/v0.2.0","assets":[]}"#;
+        assert_eq!(parse_release(body).unwrap(), ("v0.2.0".into(), "https://github.com/sachinkr7368/garnet/releases/tag/v0.2.0".into()));
+        assert!(parse_release(r#"{"tag_name":"v1","html_url":"https://evil.example/x"}"#).is_err());
+        assert!(parse_release("not json").is_err());
+    }
+}

@@ -22,7 +22,8 @@ let loadSeq = 0;
 const detailsCollapsed = new Set<string>();
 
 const textInput = h("input", { class: "log-filter", placeholder: "Text or message", spellcheck: false });
-const authorInput = h("input", { class: "log-filter", placeholder: "User", spellcheck: false, list: "git-log-authors" });
+const authorInput = h("input", { class: "log-filter", placeholder: "User", spellcheck: false });
+authorInput.setAttribute("list", "git-log-authors");
 const pathInput = h("input", { class: "log-filter", placeholder: "Path", spellcheck: false });
 const authors = h("datalist", { id: "git-log-authors" });
 const branchSelect = h("select", { class: "run-select", title: "Branch" });

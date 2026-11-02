@@ -15,11 +15,11 @@ partial row is meant to become a GitHub issue.
 | Reload on external change, conflict prompt for dirty buffers | done | |
 | Auto-save (delay / focus change), trim trailing whitespace, final newline | done | |
 | Code style per language, .editorconfig, .rubocop.yml indentation width | done | |
-| Live templates / snippets | planned | |
-| HAML and Slim highlighting | planned | |
+| Live templates / snippets | partial | built-in Ruby, RSpec (in `*_spec.rb`) and ERB templates with tab stops; no user-defined templates yet |
+| HAML and Slim highlighting | done | Monarch grammars; Ruby lines embedded as Ruby; filter bodies (`:javascript`, `css:`) are not highlighted as their language |
 | Spell checking | planned | |
-| Semantic highlighting from ruby-lsp | planned | disabled for speed; needs a token legend mapping |
-| Inlay hints | planned | |
+| Semantic highlighting from ruby-lsp | done | full + delta requests; colors for dark and light themes; toggle in Settings › Editor › General |
+| Inlay hints | done | whatever ruby-lsp provides (implicit rescue, hash shorthand); toggle in Settings |
 
 ## Navigation
 
@@ -31,9 +31,11 @@ partial row is meant to become a GitHub issue.
 | Find Usages (panel) and inline usages | done | |
 | Find in Files (regex, case, word, include globs) | done | |
 | Search Everywhere (files, symbols, actions), Go to Class, Go to Test, recent files (⌘E), recent locations (⌘⇧E), back/forward, switcher | done | history is per window session |
-| Breadcrumbs | planned | |
-| Type / call hierarchy | planned | ruby-lsp support is limited |
-| Replace in Files | planned | |
+| Breadcrumbs | done | above the editor, from document symbols; click to jump; toggle in Settings |
+| Go to Implementation (⌘⌥B) | partial | `textDocument/implementation` when the server has it; with ruby-lsp, subclasses/includers of a class or module via the type hierarchy (no method overrides) |
+| Go to Type Declaration (⌃⇧B) | partial | needs a server with `typeDefinition` (e.g. Sorbet via `ruby.lspCommand`); ruby-lsp has none |
+| Type / call hierarchy views | planned | ruby-lsp support is limited |
+| Replace in Files (⌘⇧R) | done | preview with per-file/line/match include, Replace All / Selected, `$1`/`${name}` groups in regex mode, open buffers edited with undo, .gitignore respected; line-based (no multi-line matches); only listed matches when results are truncated at 5000 |
 
 ## Refactoring
 
@@ -123,7 +125,7 @@ partial row is meant to become a GitHub issue.
 | --- | --- | --- |
 | ERB highlighting with embedded Ruby, ERB documents synced to ruby-lsp | done | |
 | JS/TS, CSS, JSON, HTML language features (Monaco workers) | partial | per-file only; no project-wide TS server |
-| HAML / Slim | planned | |
+| HAML / Slim | partial | highlighting only; no language server features |
 
 ## App
 
@@ -146,12 +148,12 @@ Independent chunks that touch separate files, so they can be built in parallel:
 3. **OAuth device flow** — `src-tauri/src/github.rs`: device code + polling; requires registering an OAuth app and embedding its client id.
 4. **Git history and stash** — new `src/gitlog.ts`: `git log --graph` view, commit details, stash list/apply/drop, hunk staging via `git apply --cached`.
 5. **Merge conflict resolver** — new `src/merge.ts`: three-way view using Monaco diff editors.
-6. **Breadcrumbs and Go to Implementation** — `src/editor.ts`/`src/lsp.ts`: breadcrumbs from document symbols; bind ⌘⌥B once ruby-lsp offers implementations.
-7. **Replace in Files** — `src/search.ts` + Rust `search.rs` replace command with preview.
+6. **Method implementations** — `src/lsp.ts`: find overrides of a method in subtypes from the type hierarchy plus document symbols.
+7. **User live templates** — `src/languages/snippets.ts`: templates editable in Settings, per-language contexts.
 8. **Breakpoint persistence and tracking** — `src/debug.ts`: decorations with stickiness to follow edits, persist per project in `.garnet/breakpoints.json`; hit-count breakpoints.
 9. **Multiple debug sessions** — `src-tauri/src/dap.rs` keyed sessions + `src/debug.ts` session tabs.
 10. **Docker run targets** — `src/run.ts`: config type for `docker compose run/exec` with rdbg port publishing and automatic `localfsMap`.
-11. **HAML/Slim grammars and snippets** — `src/editor.ts` Monarch definitions, snippet provider.
+11. **Embedded filter highlighting** — `src/languages/haml.ts`/`slim.ts`: indentation-aware `:javascript`/`css:` bodies.
 12. **Database tools** — new Rust module + `src/db.ts`: read `config/database.yml`, connect via `psql`/`mysql`/`sqlite3` CLIs, table browser and SQL console.
 13. **Rails generators and i18n/partials navigation** — `src/rails.ts`.
 14. **Live gutter diff while typing** — `src/git.ts`: diff buffer against cached HEAD text in a worker.

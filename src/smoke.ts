@@ -236,6 +236,7 @@ async function editorFeatureChecks(check: (n: string, ok: boolean | string) => v
   const root = state.project!.root;
   const overlay = document.getElementById("overlay-root")!;
   openSettingsWindow();
+  [...overlay.querySelectorAll<HTMLElement>(".st-node")].find((n) => n.textContent === "General" && n.previousElementSibling?.textContent === "Editor")?.click();
   const settingsText = overlay.textContent ?? "";
   check("settings list breadcrumbs/semantic/inlay/templates toggles", ["breadcrumbs", "Semantic highlighting", "Inlay hints", "Live templates"].every((t) => settingsText.includes(t)));
   overlay.replaceChildren();

@@ -301,12 +301,12 @@ export function openViewTab(key: string, title: string, view: NonNullable<Tab["v
   return tab;
 }
 
-export function retitleViewTab(key: string, title: string) {
+export function retitleViewTab(key: string, title: string, tooltip?: string) {
   const tab = tabs.find((t) => t.kind === "view" && t.key === key);
-  if (tab && tab.title !== title) {
-    tab.title = title;
-    renderTabs();
-  }
+  if (!tab || (tab.title === title && (tooltip === undefined || tab.view!.tooltip === tooltip))) return;
+  tab.title = title;
+  if (tooltip !== undefined) tab.view!.tooltip = tooltip;
+  renderTabs();
 }
 
 export const findViewTab = (key: string) => tabs.find((t) => t.kind === "view" && t.key === key);
@@ -558,6 +558,8 @@ export function activate(tab: Tab | null) {
   diffEl.hidden = diffBar.hidden = tab?.kind !== "diff";
   for (const t of tabs) if (t.view) t.view.el.hidden = t !== tab;
   if (tab?.kind === "view") {
+    // Detach the hidden main editor so editor commands and Save All can't touch the last file behind the view.
+    editor.setModel(null);
     langSlot.textContent = "";
     cursorSlot.textContent = "";
     tab.view!.onActivate?.();
@@ -669,7 +671,28 @@ window.addEventListener("blur", () => {
 export const saveActive = () => active && save(active);
 export const saveAll = () => Promise.all(tabs.filter(isDirty).map(save));
 export const closeActive = () => active && closeTab(active);
-export const activeTab = () => active;
+/// The active file or diff tab; view tabs (database console, table data, DDL) have no file path, see activeViewTab().
+export const activeTab = () => (active?.kind === "view" ? null : active);
+export const activeViewTab = () => (active?.kind === "view" ? active : null);
+
+/// The Monaco editor that should receive editor commands: the one with keyboard focus (a SQL console, a diff side,
+/// the main editor), else the main editor when a file tab is showing; null when nothing editable is showing.
+export function targetEditor(): monaco.editor.ICodeEditor | null {
+  const focused = monaco.editor.getEditors().find((e) => e.hasTextFocus());
+  if (focused) return focused;
+  return active?.kind === "file" ? editor : null;
+}
+
+/// Puts focus back in what the active tab shows: the main editor, the diff, or a view tab's own editor/element.
+export function focusActiveTab() {
+  if (!active) return;
+  if (active.kind === "file") return editor.focus();
+  if (active.kind === "diff") return diffEditor?.getModifiedEditor().focus();
+  const el = active.view!.el;
+  const inner = monaco.editor.getEditors().find((e) => el.contains(e.getContainerDomNode()));
+  if (inner) return inner.focus();
+  el.querySelector<HTMLElement>("input, textarea, [tabindex]")?.focus();
+}
 export const allTabs = () => [...tabs];
 
 export function cycleTab(delta: number) {

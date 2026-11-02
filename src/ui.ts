@@ -202,35 +202,47 @@ export const bottom = new Dock(
   null,
 );
 
+const DRAG_ENDS = ["pointerup", "pointercancel", "lostpointercapture"] as const;
+
+/// Tracks one pointer drag from `e` on `handle`. `body.resizing` turns off pointer events everywhere, so every way
+/// a drag can end clears it: a release outside the window ends in pointercancel/lostpointercapture, not pointerup.
+export function trackDrag(handle: HTMLElement, e: PointerEvent, onMove: (ev: PointerEvent) => void) {
+  handle.setPointerCapture?.(e.pointerId);
+  document.body.classList.add("resizing");
+  const end = () => {
+    handle.removeEventListener("pointermove", onMove);
+    document.body.classList.remove("resizing");
+    for (const t of DRAG_ENDS) handle.removeEventListener(t, end);
+    window.removeEventListener("blur", end);
+  };
+  handle.addEventListener("pointermove", onMove);
+  for (const t of DRAG_ENDS) handle.addEventListener(t, end);
+  window.addEventListener("blur", end);
+}
+
+/// New width of a side panel dragged by its inner edge. `edgeOnRight` is true when the handle sits on the panel's
+/// right edge (panel on the left of the window), false when it sits on its left edge (panel on the right).
+export function dragWidth(rect: { left: number; right: number }, clientX: number, edgeOnRight: boolean, min: number, max: number) {
+  return Math.max(min, Math.min(max, edgeOnRight ? clientX - rect.left : rect.right - clientX));
+}
+
 export function setupResizers() {
-  const drag = (handle: HTMLElement, onMove: (e: PointerEvent) => void) => {
-    handle.addEventListener("pointerdown", (e) => {
-      handle.setPointerCapture?.(e.pointerId);
-      document.body.classList.add("resizing");
-      const move = (ev: PointerEvent) => {
+  const drag = (handle: HTMLElement, onMove: (e: PointerEvent) => void) =>
+    handle.addEventListener("pointerdown", (e) =>
+      trackDrag(handle, e, (ev) => {
         onMove(ev);
         window.dispatchEvent(new Event("resize"));
-      };
-      // `body.resizing` turns off pointer events everywhere, so every way a drag can end must clear it:
-      // a release outside the window ends in pointercancel/lostpointercapture, not pointerup.
-      const end = () => {
-        handle.removeEventListener("pointermove", move);
-        document.body.classList.remove("resizing");
-        for (const t of ["pointerup", "pointercancel", "lostpointercapture"]) handle.removeEventListener(t, end);
-        window.removeEventListener("blur", end);
-      };
-      handle.addEventListener("pointermove", move);
-      for (const t of ["pointerup", "pointercancel", "lostpointercapture"]) handle.addEventListener(t, end);
-      window.addEventListener("blur", end);
-    });
-  };
+      }),
+    );
+  // With "Tool window bar position: right" the row is reversed: the sidebar sits on the right and the rightbar on the left.
+  const flipped = () => document.body.classList.contains("sidebar-right");
   const side = document.getElementById("sidebar")!;
   drag(document.getElementById("sidebar-resizer")!, (e) => {
-    side.style.width = `${Math.max(160, Math.min(700, e.clientX - side.getBoundingClientRect().left))}px`;
+    side.style.width = `${dragWidth(side.getBoundingClientRect(), e.clientX, !flipped(), 160, 700)}px`;
   });
   const right = document.getElementById("rightbar")!;
   drag(document.getElementById("rightbar-resizer")!, (e) => {
-    right.style.width = `${Math.max(200, Math.min(800, right.getBoundingClientRect().right - e.clientX))}px`;
+    right.style.width = `${dragWidth(right.getBoundingClientRect(), e.clientX, flipped(), 200, 800)}px`;
   });
   const bottomEl = document.getElementById("bottom")!;
   drag(document.getElementById("bottom-resizer")!, (e) => {
@@ -291,6 +303,19 @@ interface QuickPickOptions {
 
 let closeActiveOverlay: (() => void) | null = null;
 
+/// WebKit fires a mousemove with unchanged coordinates when a list scrolls under a still pointer; only a real
+/// move may change a hovered list's selection, so arrow-key paging never jumps to the row under the pointer.
+let pointerMoved = false;
+let lastPointer = { x: NaN, y: NaN };
+window.addEventListener(
+  "mousemove",
+  (e) => {
+    pointerMoved = e.clientX !== lastPointer.x || e.clientY !== lastPointer.y;
+    lastPointer = { x: e.clientX, y: e.clientY };
+  },
+  true,
+);
+
 export function quickPick(opts: QuickPickOptions) {
   closeActiveOverlay?.();
   const previousFocus = document.activeElement as HTMLElement | null;
@@ -318,7 +343,7 @@ export function quickPick(opts: QuickPickOptions) {
           "div",
           {
             class: `qp-item${i === selected ? " selected" : ""}`,
-            onmousemove: () => select(i),
+            onmousemove: () => pointerMoved && select(i),
             onmousedown: (e: MouseEvent) => {
               e.preventDefault();
               selected = i;
@@ -462,7 +487,7 @@ export function contextMenu(e: MouseEvent, items: (MenuItem | null)[]) {
         {
           class: `ctx-item${item.disabled ? " disabled" : ""}`,
           role: "menuitem",
-          onmousemove: () => selected !== i && select(i),
+          onmousemove: () => pointerMoved && selected !== i && select(i),
           onmousedown: (ev: MouseEvent) => (ev.preventDefault(), runItem(item)),
         },
         icon(item.icon ?? menuIconFor(item.label), "ctx-icon"),
@@ -544,7 +569,8 @@ export function modal(box: HTMLElement, onClose: () => void, opts: { class?: str
   const observer = new MutationObserver(() => {
     if (backdrop.isConnected) return;
     observer.disconnect();
-    if (previousFocus?.isConnected && !document.querySelector(".qp-backdrop")) previousFocus.focus?.();
+    // Back to where focus was: the outer dialog's field for a nested dialog, or the editor/panel for a top-level one.
+    if (previousFocus?.isConnected && (previousFocus.closest(".qp-backdrop") || !document.querySelector(".qp-backdrop"))) previousFocus.focus?.();
   });
   const root = document.getElementById("overlay-root")!;
   root.append(backdrop);

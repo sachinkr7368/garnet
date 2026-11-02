@@ -6,7 +6,7 @@ import { importJetBrainsKeymap, jetbrainsKeystroke } from "./keymapref";
 import { breakpointsIn, debugSessions, debugState, evaluate, flushBreakpoints, loadBreakpoints, resume, resumeSession, selectDebugSession, smokeHooks, stopAllSessions, stopDebug, toggleBreakpoint } from "./debug";
 import { rerunFailed, testRunState, testStatusAt } from "./testresults";
 import { defaultDocker } from "./docker";
-import { activeTab, allTabs, closeTab, editor, languageFor, openFile } from "./editor";
+import { activeTab, activeViewTab, allTabs, closeTab, editor, languageFor, openFile } from "./editor";
 import { symbolPath } from "./breadcrumbs";
 import { snippetsFor } from "./languages/snippets";
 import { replaceInFiles, searchView } from "./search";
@@ -672,7 +672,7 @@ async function databaseChecks(report: Report, check: Check) {
     click(dbPane()?.querySelector('[title="Next page"]'));
     const second = await until(() => range() === `rows 101–${total} of ${total}` && range(), 15000);
     check("db: table viewer pages forward", !!second || range());
-    check("db: table data opens as an editor tab", allTabs().some((t) => t.kind === "view" && t.title === "posts" && t === activeTab()));
+    check("db: table data opens as an editor tab", allTabs().some((t) => t.kind === "view" && t.title === "posts" && t === activeViewTab() && activeTab() === null));
 
     const tree = document.querySelector<HTMLElement>(".db-tree")!;
     for (const name of ["posts", "comments", "schema_migrations", "ar_internal_metadata"]) {
@@ -683,6 +683,9 @@ async function databaseChecks(report: Report, check: Check) {
     document.getElementById("rightbar")!.style.height = "220px";
     const scrollable = await until(() => tree.scrollHeight > tree.clientHeight + 10, 3000);
     tree.scrollTop = tree.scrollHeight;
+    const keysTw = dbRow("keys")?.querySelector(".twisty");
+    if (keysTw) click(keysTw);
+    check("db: primary key node is labelled, not a guessed constraint name", !!dbRow("primary key") || String(tree.textContent?.slice(0, 200)));
     check("db: tree scrolls and stays inside its tool window", (!!scrollable && tree.scrollTop > 0 && inside(tree, document.getElementById("rightbar"))) || JSON.stringify({ sh: tree.scrollHeight, ch: tree.clientHeight, top: tree.scrollTop }));
     tree.scrollTop = 0;
     document.getElementById("rightbar")!.style.height = oldHeight;
@@ -704,10 +707,21 @@ async function databaseChecks(report: Report, check: Check) {
     const devRow = dbRow("development")!;
     devRow.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
     const consoleItem = await until(() => [...document.querySelectorAll<HTMLElement>(".ctx-item")].find((i) => i.textContent?.includes("Query Console")), 3000);
-    check("db: data source context menu has icons and New › Query Console", !!consoleItem && !!consoleItem.querySelector(".codicon:not(.codicon-blank)") || String(document.querySelector(".ctx-menu")?.textContent));
+    check("db: data source context menu has icons and Open Query Console", !!consoleItem && !!consoleItem.querySelector(".codicon:not(.codicon-blank)") || String(document.querySelector(".ctx-menu")?.textContent));
     consoleItem?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-    const fromMenu = await until(() => dbPane()?.classList.contains("db-console") && activeTab()?.title === "console [development]", 5000);
-    check("db: console opens from the context menu as an editor tab", !!fromMenu || String(activeTab()?.title));
+    const fromMenu = await until(() => dbPane()?.classList.contains("db-console") && activeViewTab()?.title === "console [development]", 5000);
+    check("db: console opens from the context menu as an editor tab", !!fromMenu || String(activeViewTab()?.title));
+    {
+      const sqlModel = monaco.editor.getModels().filter((m) => m.getLanguageId() === "sql").pop();
+      const sqlEd = monaco.editor.getEditors().find((e) => e.getModel() === sqlModel);
+      sqlModel?.setValue("select 1");
+      sqlEd?.setPosition({ lineNumber: 1, column: 1 });
+      sqlEd?.focus();
+      runCommand("duplicateLine");
+      await until(() => sqlModel?.getLineCount() === 2, 2000);
+      check("db: editor shortcuts act on the focused SQL console, not the hidden file editor", (editor.getModel() === null && sqlModel?.getValue() === "select 1\nselect 1") || JSON.stringify({ main: editor.getModel()?.uri.toString(), sql: sqlModel?.getValue() }));
+      sqlModel?.setValue("");
+    }
 
     const limit = await until(() => dbPane()?.querySelector<HTMLInputElement>(".db-limit input"), 5000);
     if (limit) limit.checked = true;

@@ -209,3 +209,67 @@ describe("read-only explanation, DDL and explain plan", async () => {
     expect(explainSql("  ", "postgres")).toBeNull();
   });
 });
+
+describe("database editor tabs", async () => {
+  const { dbTesting, resizeHandle } = await import("../db");
+  const { state } = await import("../state");
+  const { viewTabs } = await import("./fakeEditor");
+
+  it("recolour and retitle open tabs when the data source is edited", async () => {
+    fake.reset();
+    state.project = { root: "/r", name: "r" } as typeof state.project;
+    fake.handlers.set("db_detect", () => [det()]);
+    fake.handlers.set("db_password_exists", () => false);
+    await dbTesting.ensureLoaded();
+    dbTesting.openConsole("/r::env::development");
+    const [el] = dbTesting.tabEls();
+    expect(el.classList.contains("db-head-none")).toBe(true);
+    await dbTesting.updateConn("/r::env::development", { color: "green" });
+    expect(el.classList.contains("db-head-green")).toBe(true);
+    expect(el.classList.contains("db-head-none")).toBe(false);
+    expect(viewTabs.find((t) => t.key === "console:/r::env::development")?.title).toBe("console [development]");
+    state.project = null;
+  });
+
+  it.each(["pointerup", "pointercancel", "lostpointercapture"])("column resize ends cleanly on %s", (end) => {
+    const th = document.createElement("th");
+    const handle = resizeHandle(th);
+    th.append(handle);
+    handle.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 100 }));
+    expect(document.body.classList.contains("resizing")).toBe(true);
+    handle.dispatchEvent(new MouseEvent("pointermove", { clientX: 160 }));
+    const width = th.style.width;
+    handle.dispatchEvent(new MouseEvent(end));
+    expect(document.body.classList.contains("resizing")).toBe(false);
+    handle.dispatchEvent(new MouseEvent("pointermove", { clientX: 400 }));
+    expect(th.style.width).toBe(width);
+  });
+});
+
+describe("multi-statement strings never run as one read", async () => {
+  const { runBatch, explainSql } = await import("../db");
+  const { classify } = await import("../sqlsafety");
+  const conn = (readOnly: boolean): Conn => ({ ...mergeConnections("/r", [det()], { manual: [], overrides: {} })[0], readOnly });
+  const sneaky = ["SELECT 1; DROP TABLE x", "EXPLAIN SELECT 1; DELETE FROM users", "SELECT 1; SELECT 2"];
+
+  it("classify treats several statements in one string as dangerous, with the worst kind", () => {
+    expect(classify("EXPLAIN SELECT 1; DELETE FROM users")).toMatchObject({ kind: "write", dangerous: true });
+    expect(classify("SELECT 1; DROP TABLE x", "mysql")).toMatchObject({ kind: "ddl", dangerous: true });
+    expect(classify("SELECT 1;")).toEqual({ kind: "read", dangerous: false });
+  });
+
+  it("explain only accepts a single statement", () => {
+    expect(explainSql("SELECT 1; DELETE FROM users", "postgres")).toBeNull();
+    expect(explainSql("EXPLAIN SELECT 1; DELETE FROM users", "postgres")).toBeNull();
+    expect(explainSql("SELECT 1;", "postgres")).toBe("EXPLAIN SELECT 1");
+  });
+
+  it.each(sneaky.flatMap((sql) => [[sql, true], [sql, false]] as [string, boolean][]))("runBatch refuses %j (read-only: %s) before anything reaches db_query", async (sql, readOnly) => {
+    fake.reset();
+    vi.mocked(ask).mockClear();
+    const res = await runBatch(conn(readOnly), [sql], { autoLimit: 100 });
+    expect(res.blocked).toMatch(/one statement at a time/);
+    expect(fake.calls).not.toContain("db_query");
+    expect(ask).not.toHaveBeenCalled();
+  });
+});

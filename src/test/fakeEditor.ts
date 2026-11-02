@@ -38,7 +38,7 @@ export const openViewTab = (key: string, title: string, view: { el: HTMLElement;
   if (!t) viewTabs.push((t = { key, title, view }));
   return t;
 };
-export const retitleViewTab = (key: string, title: string) => {
+export const retitleViewTab = (key: string, title: string, _tooltip?: string) => {
   const t = findViewTab(key);
   if (t) t.title = title;
 };

@@ -6,8 +6,8 @@ import { allCommands, commandIcon, commands, installKeyHandler, keyLabel, runCom
 import { attachToProcess, debugView, evaluateSelection, gotoBreakpoint, loadBreakpoints, restartDebug, resume, step, stopAllSessions, stopDebug, toggleBreakpoint, toggleBreakpointEnabled, viewBreakpoints } from "./debug";
 import { rerunAll, rerunFailed, testResultsView } from "./testresults";
 import {
-  activeTab, allTabs, closeActive, closeAll, cycleTab, diffActive, editor, events, goToDiff, handleFsChanged, monaco, navigateBack, navigateForward, openFile,
-  recentFileList, recentLocations, saveActive, saveAll,
+  activeTab, allTabs, closeActive, closeAll, cycleTab, diffActive, events, goToDiff, handleFsChanged, monaco, navigateBack, navigateForward, openFile,
+  focusActiveTab, recentFileList, recentLocations, saveActive, saveAll, targetEditor,
 } from "./editor";
 import {
   blameCurrentLine, commitView, compareWithBranch, diffActiveFile, gitOpState, goToChange, onGitChanged, refreshGit, rollbackLines, showChangeAtCaret, stageHunkAtCaret,
@@ -79,7 +79,7 @@ function goToFile() {
 }
 
 function editorAction(id: string) {
-  return () => editor.getAction(id)?.run();
+  return () => targetEditor()?.getAction(id)?.run();
 }
 
 async function openFolder() {
@@ -198,9 +198,9 @@ function jumpToLastToolWindow() {
 function hideActiveToolWindow() {
   const focused = docks.find((d) => d.active && d.views.get(d.active)?.el.contains(document.activeElement));
   (focused ?? (bottom.active ? bottom : rightbar.active ? rightbar : sidebar)).hide();
-  editor.focus();
+  focusActiveTab();
 }
-Dock.afterHide = () => editor.focus();
+Dock.afterHide = focusActiveTab;
 
 async function importKeymap() {
   const file = await open({ title: "Import JetBrains Keymap", filters: [{ name: "Keymap XML", extensions: ["xml"] }] });

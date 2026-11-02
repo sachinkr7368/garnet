@@ -1,20 +1,26 @@
-import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { commands, eventKey, installKeyHandler, keymap } from "../commands";
+vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {}, emit: async () => {} }));
+Element.prototype.scrollIntoView ??= () => {};
+(globalThis as any).Worker ??= class {
+  onmessage = null;
+  postMessage() {}
+  terminate() {}
+  addEventListener() {}
+};
+
+import { allCommands, eventKey, keymap } from "../commands";
+import { MONACO_CONFLICTS } from "../editor";
 import { welcomeHints } from "../keymapref";
+import { state } from "../state";
 import { bottom } from "../ui";
 
-/// Defaults declared in the sources (`key:` on commands, `E(id, title, key, …)` editor actions).
-function sourceDefaults(): Map<string, string[]> {
-  const out = new Map<string, string[]>();
-  for (const file of ["main.ts", "db.ts"]) {
-    const src = readFileSync(`${process.cwd()}/src/${file}`, "utf8");
-    for (const m of src.matchAll(/\{ id: "([^"]+)",[^\n]*?\bkey: "([^"]+)"/g)) out.set(m[1], m[2].split(" "));
-    for (const m of src.matchAll(/\bE\("([^"]+)", "[^"]*", "([^"]+)"/g)) out.set(m[1], m[2].split(" "));
-    for (const m of src.matchAll(/id: "([^"]+)",\n\s+title: "[^"]*",\n\s+key: "([^"]+)"/g)) out.set(m[1], m[2].split(" "));
-  }
-  return out;
-}
+// The real app: main.ts registers every command (and db.ts its own) and installs the key handler.
+beforeAll(async () => {
+  await import("../main");
+});
+
+/// Live defaults from the command registry (no user bindings are loaded in tests).
+const defaults = () => new Map(allCommands().map((c) => [c.id, (c.key ?? "").split(" ").filter(Boolean)]));
 
 /// RubyMine's predefined macOS keymap, from https://www.jetbrains.com/help/ruby/reference-keymap-mac-default.html
 /// (JetBrains action → keystroke), for every action Garnet implements.
@@ -104,59 +110,50 @@ const RUBYMINE_MACOS: [string, string, string][] = [
   ["Push", "push", "cmd+shift+k"],
   ["Next Change", "nextChange", "ctrl+alt+shift+down"],
   ["Previous Change", "prevChange", "ctrl+alt+shift+up"],
-  ["New Query Console (DataGrip/RubyMine database)", "dbConsole", "cmd+shift+l"],
 ];
 
 describe("RubyMine macOS default keymap", () => {
-  const defaults = sourceDefaults();
-
   it.each(RUBYMINE_MACOS)("%s → %s is bound to %s", (_action, id, key) => {
-    expect(defaults.get(id) ?? []).toContain(key);
+    expect(keymap().get(key)).toBe(id);
   });
 
   it("binds no keystroke to two commands", () => {
     const seen = new Map<string, string>();
     const dupes: string[] = [];
-    for (const [id, keys] of defaults) for (const k of keys) seen.has(k) ? dupes.push(`${k}: ${seen.get(k)} / ${id}`) : seen.set(k, id);
+    for (const [id, keys] of defaults()) for (const k of keys) seen.has(k) ? dupes.push(`${k}: ${seen.get(k)} / ${id}`) : seen.set(k, id);
     expect(dupes).toEqual([]);
   });
 
-  it("drops the old non-RubyMine bindings", () => {
-    expect(defaults.get("goToTypeDefinition")).not.toContain("ctrl+shift+b");
-    expect(defaults.get("save") ?? []).not.toContain("cmd+s");
-    expect(defaults.get("saveAll")).not.toContain("cmd+alt+s");
+  it("drops the old non-RubyMine bindings and anything the docs don't list", () => {
+    const km = keymap();
+    expect(km.has("ctrl+shift+b")).toBe(false);
+    expect(km.has("cmd+alt+s")).toBe(false);
+    expect(km.get("cmd+s")).toBe("saveAll");
+    expect(km.has("cmd+shift+l")).toBe(false);
   });
 
   it("only unbinds Monaco defaults on keys Garnet owns", () => {
-    const src = readFileSync(`${process.cwd()}/src/editor.ts`, "utf8");
-    const block = src.slice(src.indexOf("MONACO_CONFLICTS"), src.indexOf("};", src.indexOf("MONACO_CONFLICTS")));
-    const owned = new Set([...defaults.values()].flat());
-    const keys = [...block.matchAll(/^\s+"?([a-z0-9+,.[\]]+)"?: "/gm)].map((m) => m[1]);
-    expect(keys).toContain("alt+f12");
-    expect(keys.filter((k) => !owned.has(k))).toEqual([]);
+    const km = keymap();
+    expect(Object.keys(MONACO_CONFLICTS)).toContain("alt+f12");
+    expect(Object.keys(MONACO_CONFLICTS).filter((k) => !km.has(k))).toEqual([]);
   });
 });
 
 describe("terminal shortcut (⌥F12)", () => {
-  const ran = vi.fn();
-  beforeAll(() => {
-    commands({ id: "terminalView", title: "View: Terminal", key: "alt+f12", run: ran }, { id: "goToFile", title: "Go to File", key: "cmd+shift+o", run: () => {} });
-    installKeyHandler();
-  });
-
   it("names ⌥F12 from the physical key, as WKWebView reports it", () => {
     expect(eventKey(new KeyboardEvent("keydown", { code: "F12", key: "F12", altKey: true }))).toBe("alt+f12");
     expect(keymap().get("alt+f12")).toBe("terminalView");
   });
 
   it.each([
-    ["the Monaco editor", ".monaco-editor", "textarea"],
-    ["the terminal", ".xterm", "textarea"],
-    ["a plain input", "div", "input"],
-  ])("opens the terminal from %s and keeps Monaco/xterm from seeing the key", async (_where, wrapper, field) => {
-    ran.mockClear();
+    ["the Monaco editor", "monaco-editor", "textarea"],
+    ["the terminal", "xterm", "textarea"],
+    ["a plain input", "x", "input"],
+  ])("activates the Terminal tool window from %s and keeps Monaco/xterm from seeing the key", async (_where, cls, field) => {
+    const activate = vi.spyOn(bottom, "activate").mockImplementation(() => {});
+    state.project = { root: "/p", name: "p" } as typeof state.project;
     const host = document.createElement("div");
-    host.className = wrapper.replace(".", "");
+    host.className = cls;
     const target = document.createElement(field);
     host.append(target);
     document.body.append(host);
@@ -164,12 +161,13 @@ describe("terminal shortcut (⌥F12)", () => {
     target.addEventListener("keydown", inner);
     const e = new KeyboardEvent("keydown", { code: "F12", key: "F12", altKey: true, bubbles: true, cancelable: true });
     target.dispatchEvent(e);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(ran).toHaveBeenCalledTimes(1);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(activate).toHaveBeenCalledWith("terminal");
     expect(e.defaultPrevented).toBe(true);
     expect(inner).not.toHaveBeenCalled();
     host.remove();
+    activate.mockRestore();
+    state.project = null;
   });
 
   it("activates like RubyMine: shows and focuses, hides only when already focused", () => {
@@ -193,5 +191,6 @@ describe("terminal shortcut (⌥F12)", () => {
     const hints = Object.fromEntries(welcomeHints());
     expect(hints.Terminal).toBe("⌥F12");
     expect(hints["Go to File"]).toBe("⌘⇧O");
+    expect(hints["Find Action"]).toBe("⌘⇧A");
   });
 });

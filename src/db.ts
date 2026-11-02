@@ -6,7 +6,7 @@ import { api, invoke } from "./ipc";
 import { setting } from "./settings";
 import { classify, defaultReadOnly, envSegment, isLocalHost, csvLine, splitStatements, statementAt, toCsv, toJson, withAutoLimit, type Dialect, type Kind } from "./sqlsafety";
 import { state } from "./state";
-import { contextMenu, h, icon, iconButton, modal, quickPick, rightbar, toast, type MenuItem } from "./ui";
+import { contextMenu, h, icon, iconButton, modal, quickPick, rightbar, toast, trackDrag, type MenuItem } from "./ui";
 
 export type Color = "none" | "red" | "orange" | "yellow" | "green" | "blue" | "purple";
 export const COLORS: Color[] = ["none", "red", "orange", "yellow", "green", "blue", "purple"];
@@ -173,8 +173,10 @@ export function tableDdl(d: Dialect, schema: string, t: TableInfo): string {
 
 /// Plain EXPLAIN (never ANALYZE, so nothing executes) for a single read statement; null when not cheap or not a read.
 export function explainSql(sql: string, d: Dialect): string | null {
-  const text = sql.trim().replace(/;\s*$/, "");
-  if (!text || classify(text, d).kind !== "read" || /^\s*explain\b/i.test(text)) return null;
+  const parts = splitStatements(sql, d);
+  if (parts.length !== 1) return null;
+  const text = parts[0].text;
+  if (classify(text, d).kind !== "read" || /^\s*explain\b/i.test(text)) return null;
   return d === "sqlite" ? `EXPLAIN QUERY PLAN ${text}` : `EXPLAIN ${text}`;
 }
 const dialect = (c: Conn): Dialect => c.engine ?? "postgres";
@@ -182,6 +184,14 @@ const KIND_LABEL: Record<Kind, string> = { read: "read", write: "data-modifying"
 
 /// For the smoke script (src/smoke.ts): answers the dangerous-statement confirmation instead of the native dialog.
 export const dbSmokeHooks: { ask?: typeof ask } = {};
+
+/// For vitest only: drive the module's internals without the tree UI.
+export const dbTesting = {
+  ensureLoaded: () => ensureLoaded(),
+  openConsole: (id: string) => openConsole(id),
+  updateConn: (id: string, patch: { readOnly?: boolean; color?: Color }) => updateConn(connById(id)!, patch),
+  tabEls: () => tabs.map((t) => t.el),
+};
 
 export interface Outcome {
   sql: string;
@@ -195,6 +205,8 @@ export async function runBatch(
   sqls: string[],
   opts: { autoLimit?: number; onResult?: (o: Outcome) => void; cancelled?: () => boolean } = {},
 ): Promise<{ outcomes: Outcome[]; blocked?: string }> {
+  const multi = sqls.find((sql) => splitStatements(sql, dialect(conn)).length !== 1);
+  if (multi !== undefined) return { outcomes: [], blocked: `Run one statement at a time; nothing was run. This text holds ${splitStatements(multi, dialect(conn)).length || "no"} statements:\n\n${multi}` };
   const checks = sqls.map((sql) => ({ sql, c: classify(sql, dialect(conn)) }));
   if (conn.readOnly) {
     const bad = checks.find((x) => x.c.kind !== "read");
@@ -591,6 +603,8 @@ const describe = (c: Conn) =>
 
 interface RowOpts {
   onOpen?: () => void;
+  /// F4 when it differs from double-click/Enter: on a data source it opens (or jumps to) its query console.
+  onF4?: () => void;
   onDdl?: () => void;
   menu?: () => (MenuItem | null)[];
   connId?: string;
@@ -665,6 +679,7 @@ treeEl.addEventListener("keydown", (e) => {
   else if (e.key === "ArrowUp") move(i - 1);
   else if (e.key === "ArrowRight") cur?.key && !expanded.has(cur.key) ? toggle(true) : move(i + 1);
   else if (e.key === "ArrowLeft") cur?.key && expanded.has(cur.key) ? toggle(false) : undefined;
+  else if (e.key === "F4" && cur?.opts.onF4) cur.opts.onF4();
   else if (e.key === "Enter" || e.key === "F4") cur?.opts.onOpen ? cur.opts.onOpen() : toggle(!expanded.has(cur?.key ?? ""));
   else return;
   e.preventDefault();
@@ -675,7 +690,7 @@ function connMenu(c: Conn): (MenuItem | null)[] {
   const on = live.has(c.id);
   return [
     on ? { label: "Disconnect", icon: "debug-disconnect", run: () => disconnect(c.id) } : { label: "Connect", icon: "plug", run: () => connect(c) },
-    { label: "New › Query Console", icon: "terminal", command: "dbConsole", run: () => openConsole(c.id) },
+    { label: "Open Query Console", icon: "terminal", shortcut: "F4", run: () => openConsole(c.id) },
     on ? { label: "Refresh", icon: "refresh", run: () => loadSchema(c.id) } : null,
     { label: "Copy Name", icon: "copy", run: () => navigator.clipboard.writeText(c.name) },
     null,
@@ -715,7 +730,7 @@ function renderTree() {
           h("span", { class: "dim db-detail" }, describe(c)),
           l ? h("span", { class: "db-live", title: l.version }) : null,
         ],
-        { connId: c.id, onOpen: l ? undefined : () => connect(c), menu: () => connMenu(c), title: c.source === "detected" ? `config/database.yml › ${c.environment}` : "" },
+        { connId: c.id, onOpen: l ? undefined : () => connect(c), onF4: () => openConsole(c.id), menu: () => connMenu(c), title: c.source === "detected" ? `config/database.yml › ${c.environment}` : "" },
       ),
     );
     if (!l || !expanded.has(c.id)) continue;
@@ -728,7 +743,7 @@ function renderTree() {
           row(1, sk, sk, "symbol-namespace", [h("span", { class: "tree-label" }, s.name), h("span", { class: "dim db-detail" }, String(s.tables.length))], {
             connId: c.id,
             menu: () => [
-              { label: "New › Query Console", icon: "terminal", command: "dbConsole", run: () => openConsole(c.id) },
+              { label: "Open Query Console", icon: "terminal", run: () => openConsole(c.id) },
               { label: "Refresh", icon: "refresh", run: () => loadSchema(c.id) },
               { label: "Copy Name", icon: "copy", run: () => navigator.clipboard.writeText(s.name) },
             ],
@@ -747,7 +762,7 @@ function renderTree() {
               menu: () => [
                 { label: "Edit Data", icon: "table", shortcut: "F4", run: openData },
                 { label: "Jump to DDL", icon: "go-to-file", shortcut: "⌘↓", run: openDdl },
-                { label: "New › Query Console", icon: "terminal", command: "dbConsole", run: () => openConsole(c.id) },
+                { label: "Open Query Console", icon: "terminal", run: () => openConsole(c.id) },
                 null,
                 { label: "Refresh", icon: "refresh", run: () => loadSchema(c.id) },
                 { label: "Copy Name", icon: "copy", run: () => navigator.clipboard.writeText(t.name) },
@@ -769,7 +784,7 @@ function renderTree() {
             const kk = `${tk}|keys`;
             rows.push(row(3, kk, kk, "key", [h("span", { class: "tree-label" }, "keys"), h("span", { class: "dim db-detail" }, String((pk.length ? 1 : 0) + t.foreignKeys.length))]));
             if (expanded.has(kk)) {
-              if (pk.length) rows.push(row(4, `${kk}|pk`, null, "key", [h("span", { class: "tree-label" }, `${t.name}_pkey`), h("span", { class: "dim db-detail" }, `(${pk.map((x) => x.name).join(", ")}) primary key`)]));
+              if (pk.length) rows.push(row(4, `${kk}|pk`, null, "key", [h("span", { class: "tree-label" }, "primary key"), h("span", { class: "dim db-detail" }, `(${pk.map((x) => x.name).join(", ")})`)]));
               for (const f of t.foreignKeys)
                 rows.push(
                   row(4, `${kk}|${f.name}`, null, "references", [
@@ -852,21 +867,18 @@ function grid(columns: string[], rows: (string | null)[][], sort?: { col?: strin
 }
 
 /// Drag handle on a header cell's right edge; the column keeps the width it's dragged to.
-function resizeHandle(th: HTMLElement) {
+export function resizeHandle(th: HTMLElement) {
   const handle = h("span", { class: "db-col-resize", title: "Drag to resize" });
   handle.addEventListener("click", (e) => e.stopPropagation());
   handle.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    handle.setPointerCapture(e.pointerId);
     const start = e.clientX;
     const width = th.getBoundingClientRect().width;
-    const move = (ev: PointerEvent) => {
+    trackDrag(handle, e, (ev) => {
       const w = `${Math.max(40, width + ev.clientX - start)}px`;
       th.style.width = th.style.minWidth = th.style.maxWidth = w;
-    };
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", () => handle.removeEventListener("pointermove", move), { once: true });
+    });
   });
   return handle;
 }
@@ -885,9 +897,20 @@ interface DbTab {
 
 const tabs: DbTab[] = [];
 
+/// Keeps open editor tabs in step with their data source (name, colour, description) after an edit.
 function renderTabs() {
-  for (const t of tabs) retitleViewTab(t.key, t.title());
+  for (const t of tabs) {
+    const c = connById(t.connId);
+    for (const cls of [...t.el.classList]) if (cls.startsWith("db-head-")) t.el.classList.remove(cls);
+    t.el.classList.add(`db-head-${c?.color ?? "none"}`);
+    retitleViewTab(t.key, t.title(), tabTooltip(t));
+  }
 }
+
+const tabTooltip = (t: DbTab) => {
+  const c = connById(t.connId);
+  return c ? `${t.title()} · ${c.name} (${describe(c)})` : t.title();
+};
 
 function activate(key: string) {
   const t = findViewTab(key);
@@ -896,12 +919,11 @@ function activate(key: string) {
 
 function addTab(t: DbTab) {
   tabs.push(t);
-  const c = connById(t.connId);
-  t.el.classList.add(`db-head-${c?.color ?? "none"}`);
+  t.el.classList.add(`db-head-${connById(t.connId)?.color ?? "none"}`);
   openViewTab(t.key, t.title(), {
     el: t.el,
     icon: t.iconName,
-    tooltip: c ? `${t.title()} · ${c.name} (${describe(c)})` : t.title(),
+    tooltip: tabTooltip(t),
     onClose: () => {
       const i = tabs.indexOf(t);
       if (i >= 0) tabs.splice(i, 1);
@@ -1158,7 +1180,7 @@ function openConsole(id: string) {
     const sel = ed.getSelection();
     const stmt = sel && !sel.isEmpty() ? model.getValueInRange(sel) : statementAt(model.getValue(), model.getOffsetAt(ed.getPosition()!), dialect(c))?.text;
     const sql = stmt ? explainSql(stmt, dialect(c)) : null;
-    if (!sql) return toast("Explain Plan works on a single read statement (SELECT/WITH).");
+    if (!sql) return toast("Select a single read statement (SELECT/WITH) for Explain Plan.");
     running = true;
     message = "";
     outcomes = [];
@@ -1304,8 +1326,7 @@ commands(
   { id: "dbRedetect", title: "Database: Re-read config/database.yml", run: needProject(async () => (await showPanel(), detect())) },
   {
     id: "dbConsole",
-    title: "Database: New Query Console…",
-    key: "cmd+shift+l",
+    title: "Database: Open Query Console…",
     run: needProject(async () => {
       await showPanel();
       const c = selected();

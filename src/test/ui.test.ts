@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 vi.mock("../editor", async () => await import("./fakeEditor"));
 
-import { contextMenu, fileIconName, iconButton, menuIconFor, modal, quickPick, setShortcutResolver, tip, h } from "../ui";
+import { contextMenu, dragWidth, fileIconName, iconButton, menuIconFor, modal, quickPick, setShortcutResolver, tip, h } from "../ui";
 
 Element.prototype.scrollIntoView ??= () => {};
 (globalThis as any).Worker ??= class {
@@ -12,7 +12,9 @@ Element.prototype.scrollIntoView ??= () => {};
   addEventListener() {}
 };
 const overlay = () => document.getElementById("overlay-root")!;
-const move = (el: Element) => el.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+let px = 0;
+/// A real pointer move (new coordinates each time); `still` repeats the last position, like WebKit after a scroll.
+const move = (el: Element, still = false) => el.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: still ? px : ++px, clientY: 10 }));
 const key = (el: Element, k: string, extra: KeyboardEventInit = {}) => el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...extra }));
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -30,6 +32,21 @@ describe("quick pick hover", () => {
     expect(items()[3].classList.contains("selected")).toBe(true);
     move(items()[1]);
     expect(overlay().querySelectorAll(".qp-item.selected")).toHaveLength(1);
+    key(overlay().querySelector(".qp-input")!, "Escape");
+  });
+
+  it("ignores the synthetic mousemove WebKit sends when the list scrolls under a still pointer", async () => {
+    quickPick({ placeholder: "x", items: ["a", "b", "c", "d"].map((label) => ({ label })), onAccept: () => {} });
+    await tick();
+    const items = () => [...overlay().querySelectorAll(".qp-item")];
+    move(items()[1]);
+    key(overlay().querySelector(".qp-input")!, "ArrowDown");
+    key(overlay().querySelector(".qp-input")!, "ArrowDown");
+    expect(items()[3].classList.contains("selected")).toBe(true);
+    move(items()[0], true);
+    expect(items()[3].classList.contains("selected")).toBe(true);
+    move(items()[0]);
+    expect(items()[0].classList.contains("selected")).toBe(true);
     key(overlay().querySelector(".qp-input")!, "Escape");
   });
 
@@ -120,7 +137,20 @@ describe("modal dialogs", () => {
     backdrop.remove();
   });
 
-  it("honours locked (e.g. while signing in)", () => {
+  it("returns focus to the outer dialog's field when a nested dialog closes", async () => {
+    const outer = form();
+    const outerBackdrop = modal(outer.box, () => {});
+    outer.b.focus();
+    const inner = form();
+    const innerBackdrop = modal(inner.box, () => {});
+    expect(document.activeElement).toBe(inner.a);
+    innerBackdrop.remove();
+    await tick();
+    expect(document.activeElement).toBe(outer.b);
+    outerBackdrop.remove();
+  });
+
+  it("honours locked (the GitHub clone dialog locks itself while cloning)", () => {
     const f = form();
     const close = vi.fn();
     const backdrop = modal(f.box, close, { locked: () => true });
@@ -207,6 +237,13 @@ describe("layout guards (no pane paints outside itself; every tool window scroll
 });
 
 describe("panel resizers", () => {
+  it("compute side-panel widths for both sides (tool window bar left or right)", () => {
+    const rect = { left: 1000, right: 1300 };
+    expect(dragWidth(rect, 950, false, 200, 800)).toBe(350);
+    expect(dragWidth({ left: 40, right: 340 }, 400, true, 200, 800)).toBe(360);
+    expect(dragWidth({ left: 40, right: 340 }, 100, true, 200, 800)).toBe(200);
+  });
+
   it.each(["pointerup", "pointercancel", "lostpointercapture"])("never leave the window click-dead after a drag that ends with %s", async (end) => {
     const { setupResizers } = await import("../ui");
     setupResizers();

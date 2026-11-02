@@ -3,26 +3,9 @@ import { activeTab, monaco, openFile } from "./editor";
 import { api } from "./ipc";
 import { abs, rel, root, state } from "./state";
 import { h, iconButton, quickPick, toast } from "./ui";
+import { pluralize, singularize } from "./inflect";
 
-// ponytail: naive English inflection covers Rails' common cases; irregular nouns fall back to plain "s".
-const IRREGULAR: Record<string, string> = { person: "people", man: "men", child: "children", mouse: "mice", datum: "data" };
-
-export function pluralize(word: string): string {
-  if (IRREGULAR[word]) return IRREGULAR[word];
-  if (/(s|x|z|ch|sh)$/.test(word)) return word + "es";
-  if (/[^aeiou]y$/.test(word)) return word.slice(0, -1) + "ies";
-  return word + "s";
-}
-
-export function singularize(word: string): string {
-  const irregular = Object.entries(IRREGULAR).find(([, p]) => p === word);
-  if (irregular) return irregular[0];
-  if (/ies$/.test(word)) return word.slice(0, -3) + "y";
-  if (/(s|x|z|ch|sh)es$/.test(word)) return word.slice(0, -2);
-  if (/ss$/.test(word)) return word;
-  if (/s$/.test(word)) return word.slice(0, -1);
-  return word;
-}
+export { pluralize, singularize };
 
 /// Resource name (e.g. "admin/user") from a project-relative path.
 export function resourceOf(path: string): string | null {

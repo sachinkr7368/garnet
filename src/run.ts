@@ -1,8 +1,10 @@
 import { debugSession, sessionFor, stopSession } from "./debug";
+import { checkPublishedPort, composeCommand, debugPortFor, defaultDocker, hostSocket, localfsMap, mapPath, rdbgListen, validateDocker, type DockerTarget } from "./docker";
 import { activeTab, editor, events, monaco, saveAll } from "./editor";
 import { api } from "./ipc";
 import { askTrust, isTrusted, setting } from "./settings";
 import { abs, rel, root, shellQuote, state } from "./state";
+import { onTestStatuses, prepareTestRun, startTestRun, statusIcon, testStatusAt } from "./testresults";
 import { PtyTabs, PtyView } from "./terminal";
 import { bottom, h, icon, iconButton, quickPick, toast } from "./ui";
 
@@ -18,6 +20,8 @@ export interface RunConfig {
   envFile: string;
   rubyManager: RubyManager;
   bundler: boolean;
+  /// Run inside a docker compose service instead of on the host.
+  docker?: DockerTarget;
 }
 
 export const TYPE_LABELS: Record<RunType, string> = {
@@ -84,6 +88,8 @@ export function validateConfig(raw: unknown): RunConfig | null {
   if (c.rubyManager !== undefined && !(typeof c.rubyManager === "string" && c.rubyManager in MANAGER_PREFIX)) return null;
   if (c.bundler !== undefined && typeof c.bundler !== "boolean") return null;
   if (c.env !== undefined && (!c.env || typeof c.env !== "object" || Array.isArray(c.env) || Object.values(c.env).some((v) => typeof v !== "string"))) return null;
+  const docker = c.docker === undefined ? undefined : validateDocker(c.docker);
+  if (docker === null) return null;
   const base = newConfig(c.type as RunType, c.name);
   return {
     ...base,
@@ -93,6 +99,7 @@ export function validateConfig(raw: unknown): RunConfig | null {
     env: safeEnv((c.env as Record<string, string>) ?? {}, `run.json "${c.name}"`),
     rubyManager: (c.rubyManager as RubyManager) ?? base.rubyManager,
     bundler: (c.bundler as boolean) ?? base.bundler,
+    ...(docker ? { docker } : {}),
   };
 }
 
@@ -140,15 +147,27 @@ export async function saveRunConfigs(list = configs) {
 export const managersDetected = () => detectedManagers;
 const debugBundled = () => /^\s{4}debug \(/m.test(gemfileLock);
 
-/// Command line for a configuration; with `debugPort` it is wrapped in rdbg.
-export function buildCommand(cfg: RunConfig, debug?: { port: number; globalRdbg?: boolean }): string {
+export interface BuildOptions {
+  /// Wrap the command in rdbg listening on this port.
+  debug?: { port: number; globalRdbg?: boolean };
+  /// Extra test runner arguments (the results-tree formatter).
+  testArgs?: string;
+  /// Variables passed into a docker container; defaults to the configuration's own env keys.
+  envNames?: string[];
+}
+
+/// Command line for a configuration, optionally under rdbg and/or inside a docker compose service.
+export function buildCommand(cfg: RunConfig, opts: BuildOptions = {}): string {
   const p = state.project!;
+  const { debug, testArgs } = opts;
+  const docker = cfg.docker;
   const be = cfg.bundler ? "bundle exec " : "";
   let args = cfg.args.trim();
   if (cfg.type === "rails-server") {
     if (!/(^|\s)(-p|--port)\b/.test(args)) args = `-p ${setting("rails.serverPort")} ${args}`;
     if (!/(^|\s)(-b|--binding)\b/.test(args)) args = `-b ${setting("rails.serverBinding")} ${args}`;
   }
+  if (testArgs) args = `${args} ${testArgs}`;
   const runner = setting<string>("testing.rspecRunner");
   const rspec = runner !== "auto" ? runner : cfg.bundler ? "bundle exec rspec" : p.binRspec ? "bin/rspec" : "rspec";
   const raw = {
@@ -162,11 +181,16 @@ export function buildCommand(cfg: RunConfig, debug?: { port: number; globalRdbg?
     custom: args,
   }[cfg.type];
   const base = cfg.type === "custom" ? raw.trim() : raw.replace(/\s+/g, " ").trim();
-  const rdbg = setting<string>("debug.rdbgPath") || `${cfg.bundler && debugBundled() && !debug?.globalRdbg ? "bundle exec " : ""}rdbg`;
-  const cmd = debug
-    ? `${rdbg} --open --port=${debug.port} --host=127.0.0.1 --command -- ${base}`
-    : base;
-  return MANAGER_PREFIX[cfg.rubyManager] + cmd;
+  const bundledRdbg = `${cfg.bundler && debugBundled() && !debug?.globalRdbg ? "bundle exec " : ""}rdbg`;
+  const rdbg = docker ? bundledRdbg : setting<string>("debug.rdbgPath") || bundledRdbg;
+  const cmd = debug ? `${rdbg} --open ${docker ? rdbgListen(docker, debug.port) : `--port=${debug.port} --host=127.0.0.1`} --command -- ${base}` : base;
+  if (!docker) return MANAGER_PREFIX[cfg.rubyManager] + cmd;
+  return composeCommand(
+    docker,
+    cmd,
+    { envNames: opts.envNames ?? Object.keys(cfg.env), cwd: cfg.cwd.trim() ? rel(abs(cfg.cwd.trim())) : "", publish: debug && docker.mode === "run" && !docker.socketPath ? debug.port : undefined },
+    shellQuote,
+  );
 }
 
 /// Parses KEY=VALUE lines (comments, `export` and quotes allowed).
@@ -219,7 +243,16 @@ function stopItem(item: RunItem) {
   item.view.kill();
 }
 
+/// Console header for Docker runs: where it runs and the effective Rails binding.
+export function dockerHeader(cfg: RunConfig, d: DockerTarget): string {
+  const binding = cfg.args.match(/(?:^|\s)(?:-b|--binding)[\s=](\S+)/)?.[1] ?? setting<string>("rails.serverBinding");
+  const parts = [`service ${d.service} (docker compose ${d.mode})`, `${root()} ↔ ${d.containerRoot}`];
+  if (cfg.type === "rails-server") parts.push(`Rails binding ${binding}${/^(127\.|localhost|::1)/.test(binding) ? " (only reachable inside the container; use -b 0.0.0.0 with published ports to reach it from the host)" : ""}`);
+  return parts.join(" · ");
+}
+
 export interface RunOptions {
+  header?: string;
   env?: Record<string, string>;
   cwd?: string;
   onExit?: (code: number | null) => void;
@@ -242,6 +275,7 @@ export function runInPanel(title: string, command: string, opts: RunOptions = {}
       opts.onExit?.(code);
     },
   });
+  if (opts.header) view.term.writeln(`\x1b[2m[docker] ${opts.header}\x1b[0m`);
   view.term.writeln(`\x1b[2m$ ${command}\x1b[0m`);
   const item = runs.add(title, view);
   runs.setStatus(item, "running");
@@ -258,19 +292,64 @@ export async function launch(cfg: RunConfig, mode: "run" | "debug", opts: { glob
     );
     return;
   }
+  const docker = cfg.docker;
+  if (docker) {
+    const why = await dockerUnavailable();
+    if (why) return toast(`Cannot run "${cfg.name}" in Docker: ${why}`, "error");
+    if (cfg.cwd.trim() && mapPath(abs(cfg.cwd.trim()), root(), docker.containerRoot) === null) return toast(`"${cfg.name}": the working directory must be inside the project to map it into the container.`, "error");
+  }
   last = { cfg, mode };
   if (setting("run.saveBeforeRun")) await saveAll();
   const env = await resolveEnv(cfg);
-  const cwd = cfg.cwd.trim() ? abs(cfg.cwd.trim()) : root();
-  const port = mode === "debug" ? await api.freePort() : 0;
-  const command = buildCommand(cfg, mode === "debug" ? { port, globalRdbg: opts.globalRdbg } : undefined);
+  const cwd = cfg.cwd.trim() && !docker ? abs(cfg.cwd.trim()) : root();
+  const port = mode === "debug" ? (docker ? debugPortFor(docker, await api.freePort()) : await api.freePort()) : 0;
+  let attachPort = port;
+  if (mode === "debug" && docker?.mode === "exec" && !docker.socketPath) {
+    const out = await api.runCapture(root(), `docker compose ${docker.composeFile ? `-f ${shellQuote(docker.composeFile)} ` : ""}port ${docker.service} ${port} 2>&1`, 30).catch((e) => String(e));
+    const checked = checkPublishedPort(out, port);
+    if ("error" in checked) return toast(`Not debugging "${cfg.name}": ${checked.error}`, "error");
+    attachPort = checked.port;
+  }
+  const test = docker ? null : await prepareTestRun(cfg);
+  const command = buildCommand(cfg, { debug: mode === "debug" ? { port, globalRdbg: opts.globalRdbg } : undefined, testArgs: test?.args, envNames: Object.keys(env) });
   const title = mode === "debug" ? `${cfg.name} (debug)` : cfg.name;
-  const item = runInPanel(title, command, { env, cwd, onExit: () => running.delete(item!) });
+  const item = runInPanel(title, command, {
+    header: docker ? dockerHeader(cfg, docker) : undefined,
+    env: { ...env, ...test?.env },
+    cwd,
+    onExit: () => {
+      running.delete(item!);
+      test?.finished();
+    },
+  });
   if (!item) return;
   running.set(item, { cfg, mode });
   renderWidget();
-  if (mode === "debug") debugSession({ target: String(port), cfg, item, timeoutSecs: setting<number>("debug.connectTimeout") });
+  if (test) startTestRun(test, cfg, item);
+  if (mode === "debug")
+    debugSession({
+      target: docker ? (docker.socketPath ? hostSocket(docker, root()) : `127.0.0.1:${attachPort}`) : String(port),
+      cfg,
+      item,
+      localfsMap: docker ? localfsMap(docker, root()) : undefined,
+      timeoutSecs: setting<number>("debug.connectTimeout"),
+    });
 }
+
+let dockerCheck: Promise<string> | null = null;
+
+/// Empty when `docker compose` works; otherwise why Docker run targets are unavailable.
+export function dockerUnavailable(): Promise<string> {
+  dockerCheck ??= api
+    .runCapture(root(), "command -v docker >/dev/null 2>&1 || { echo 'docker is not installed (not found on PATH)'; exit 0; }; docker compose version >/dev/null 2>&1 || { echo 'the docker compose plugin is not installed'; exit 0; }; docker info >/dev/null 2>&1 || echo 'the Docker daemon is not running'", 30)
+    .then((out) => out.trim())
+    .catch((e) => String(e));
+  const check = dockerCheck;
+  check.then((why) => why && check === dockerCheck && (dockerCheck = null));
+  return check;
+}
+
+export const stopRun = (item: RunItem) => stopItem(item);
 
 export function rerun() {
   if (last) launch(last.cfg, last.mode);
@@ -325,14 +404,19 @@ function refreshTestGutter() {
   if (!model || !t || t.kind !== "file" || !isTestFile(t.path)) return gutterDecor.clear();
   const decorations: monaco.editor.IModelDeltaDecoration[] = [];
   for (let i = 1; i <= model.getLineCount(); i++) {
-    if (TEST_LINE.test(model.getLineContent(i)))
-      decorations.push({
-        range: new monaco.Range(i, 1, i, 1),
-        options: { glyphMarginClassName: "codicon codicon-play glyph-run", glyphMarginHoverMessage: { value: "Run (Alt+click to debug)" } },
-      });
+    if (!TEST_LINE.test(model.getLineContent(i))) continue;
+    const last = testStatusAt(t.path, i);
+    decorations.push({
+      range: new monaco.Range(i, 1, i, 1),
+      options: {
+        glyphMarginClassName: last ? `codicon codicon-${statusIcon(last)} glyph-run ${last}` : "codicon codicon-play glyph-run",
+        glyphMarginHoverMessage: { value: `${last ? `Last run: ${last === "pending" ? "ignored" : last}. ` : ""}Run (Alt+click to debug)` },
+      },
+    });
   }
   gutterDecor.set(decorations);
 }
+onTestStatuses(refreshTestGutter);
 
 let gutterTimer = 0;
 editor.onDidChangeModelContent(() => {
@@ -436,6 +520,17 @@ export function editConfigurations() {
   const list = h("div", { class: "rc-list" });
   const form = h("div", { class: "rc-form" });
   const preview = h("code", { class: "rc-preview" });
+  let dockerWhy: string | null = null;
+  let services: string[] = [];
+  dockerUnavailable().then(async (why) => {
+    dockerWhy = why;
+    if (!why && isTrusted()) {
+      const files = [...new Set(draft.map((c) => c.docker?.composeFile.trim() ?? ""))];
+      const lists = await Promise.all(files.map((f) => api.runCapture(root(), `docker compose ${f ? `-f ${shellQuote(f)} ` : ""}config --services 2>/dev/null`, 30).catch(() => "")));
+      services = [...new Set(lists.flatMap((l) => l.split("\n").map((x) => x.trim()).filter(Boolean)))];
+    }
+    if (backdrop.isConnected) renderForm();
+  });
 
   const field = (label: string, input: HTMLElement, hint = "") =>
     h("label", { class: "rc-field" }, h("span", {}, label), input, hint ? h("small", { class: "dim" }, hint) : null);
@@ -471,6 +566,42 @@ export function editConfigurations() {
     bundler.onchange = () => ((c.bundler = bundler.checked), update());
     const env = h("textarea", { class: "commit-message", rows: 4, spellcheck: false, placeholder: "RAILS_ENV=development\nPORT=3000" }, Object.entries(c.env).map(([k, v]) => `${k}=${v}`).join("\n"));
     env.oninput = () => ((c.env = parseDotenv(env.value)), update());
+    const dockerBox = h("input", { type: "checkbox", checked: !!c.docker, disabled: dockerWhy !== "" && !c.docker });
+    dockerBox.onchange = () => {
+      c.docker = dockerBox.checked ? { ...defaultDocker(), service: services[0] ?? "" } : undefined;
+      renderForm();
+    };
+    const dockerFields = () => {
+      const d = c.docker!;
+      const input = (key: "service" | "composeFile" | "containerRoot", placeholder: string, list?: string) => {
+        const el = h("input", { class: "search-input", value: d[key], placeholder, spellcheck: false, list });
+        el.oninput = () => ((d[key] = el.value.trim()), update());
+        return el;
+      };
+      const mode = h("select", { class: "run-select" }, h("option", { value: "run", selected: d.mode === "run" }, "docker compose run (new container)"), h("option", { value: "exec", selected: d.mode === "exec" }, "docker compose exec (running container)"));
+      mode.onchange = () => ((d.mode = mode.value as DockerTarget["mode"]), renderForm());
+      const servicePorts = h("input", { type: "checkbox", checked: d.servicePorts });
+      servicePorts.onchange = () => ((d.servicePorts = servicePorts.checked), update());
+      const socket = h("input", { class: "search-input", value: d.socketPath, placeholder: "tmp/rdbg.sock", spellcheck: false });
+      socket.oninput = () => ((d.socketPath = socket.value.trim()), renderForm());
+      const port = h("input", { class: "search-input", type: "number", min: 1, max: 65535, value: String(d.debugPort) });
+      port.oninput = () => ((d.debugPort = Number(port.value) || d.debugPort), update());
+      return [
+        field("Service", input("service", "web", "rc-services"), services.length ? `services: ${services.join(", ")}` : "service name from the compose file"),
+        h("datalist", { id: "rc-services" }, ...services.map((sv) => h("option", { value: sv }))),
+        field("Mode", mode),
+        field("Compose file", input("composeFile", "docker-compose.yml"), "relative to the project root; empty uses compose's default lookup"),
+        field("Project root in container", input("containerRoot", "/app"), `path mapping for the debugger: ${root()} ↔ container path`),
+        d.mode === "run" ? h("label", { class: "rc-check" }, servicePorts, " Publish the service's ports (--service-ports)") : null,
+        field("rdbg socket on a shared volume (optional)", socket, "relative to the project root, which must be mounted at the container path; preferred over TCP. Docker Desktop for Mac can't share sockets through bind mounts, so leave empty there"),
+        d.socketPath
+          ? null
+          : d.mode === "exec"
+            ? field("rdbg port", port, `debugging with exec needs this port published on loopback only: ports: ["127.0.0.1:${d.debugPort}:${d.debugPort}"]; Garnet refuses ports published on all interfaces`)
+            : h("small", { class: "dim" }, "Debug publishes a free port on 127.0.0.1 only and attaches to rdbg in the container. The service needs the debug gem."),
+        c.type === "rails-server" ? h("small", { class: "dim" }, `Effective Rails binding: ${c.args.match(/(?:^|\s)(?:-b|--binding)[\s=](\S+)/)?.[1] ?? setting<string>("rails.serverBinding")} (from ${/(^|\s)(-b|--binding)\b/.test(c.args) ? "the arguments" : "Settings › Rails"}); inside a container 127.0.0.1 is only reachable from the container itself`) : null,
+      ];
+    };
     const argsHint = {
       "rails-server": "e.g. -p 3001", "rails-console": "e.g. --sandbox", rspec: "files/lines, e.g. spec/models or spec/a_spec.rb:12",
       minitest: "e.g. test/models/user_test.rb:8", rake: "task and args, e.g. db:migrate", ruby: "script and args, e.g. bin/setup",
@@ -485,6 +616,8 @@ export function editConfigurations() {
       field("Env file", text("envFile", ".env"), "loaded before the variables above"),
       field("Ruby version manager", manager, detectedManagers.length ? `detected via login shell: ${detectedManagers.join(", ")}; auto uses your shell setup as is` : "auto uses your login shell setup as is"),
       h("label", { class: "rc-check" }, bundler, " Use bundler (bundle exec)"),
+      h("label", { class: "rc-check", title: dockerWhy || "" }, dockerBox, " Run inside a Docker Compose service", dockerWhy ? h("small", { class: "dim" }, ` (unavailable: ${dockerWhy})`) : dockerWhy === null ? h("small", { class: "dim" }, " (checking Docker…)") : null),
+      ...(c.docker ? dockerFields().filter((x): x is HTMLElement => !!x) : []),
       preview,
     );
     update();
@@ -515,6 +648,9 @@ export function editConfigurations() {
   const save = async () => {
     const names = draft.map((c) => c.name.trim());
     if (names.some((n) => !n) || new Set(names).size !== names.length) return toast("Configuration names must be unique and non-empty.", "error");
+    const badDocker = draft.find((c) => c.docker && !validateDocker(c.docker));
+    if (badDocker) return toast(`"${badDocker.name}": enter a service name, an absolute container path, a relative compose file and a valid port.`, "error");
+    draft = draft.map((c) => (c.docker ? { ...c, docker: validateDocker(c.docker)! } : c));
     if (draft[current]) selectedName = draft[current].name;
     await saveRunConfigs(draft);
     close();

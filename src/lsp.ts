@@ -9,7 +9,7 @@ import { askTrust, onSettingsChange, setting } from "./settings";
 import { showLocations, type Loc } from "./search";
 import { debounce, rel, root, shellQuote, state } from "./state";
 import { runInTerminal } from "./terminal";
-import { bottom, h, icon, quickPick, statusSlot, toast, type PickItem } from "./ui";
+import { bottom, fileIcon, h, icon, quickPick, statusSlot, toast, type PickItem } from "./ui";
 
 type Json = any;
 type Pos = { line: number; character: number };
@@ -29,7 +29,7 @@ let launch: { prefix: string[]; launcher: boolean } = { prefix: [], launcher: tr
 
 /// Status bar + log
 
-const statusEl = statusSlot("lsp", "right", () => lspMenu());
+const statusEl = statusSlot("lsp", "right", () => lspMenu(), "Ruby LSP");
 const logEl = h("pre", { class: "log" });
 export const lspLogView = h("div", { class: "log-view" }, logEl);
 
@@ -767,7 +767,7 @@ export const refreshBreadcrumbs = debounce(async () => {
   const path = symbolPath(symbols, pos.lineNumber, pos.column);
   crumbsEl.hidden = false;
   crumbsEl.replaceChildren(
-    h("span", { class: "crumb file", title: rel(model.uri.fsPath) }, icon("file"), h("span", {}, rel(model.uri.fsPath).split("/").pop()!)),
+    h("span", { class: "crumb file", title: rel(model.uri.fsPath) }, fileIcon(model.uri.fsPath), h("span", {}, rel(model.uri.fsPath).split("/").pop()!)),
     ...path.flatMap((s) => [
       icon("chevron-right", "crumb-sep"),
       h(
@@ -934,7 +934,7 @@ events.modelClosed.on((model) => tokenCache.delete(model.uri.toString()));
 
 const problemsBody = h("div", { class: "problems" });
 export const problemsView = h("div", { class: "problems-view" }, problemsBody);
-const problemsStatus = statusSlot("problems", "left", () => bottom.show("problems"));
+const problemsStatus = statusSlot("problems", "left", () => bottom.show("problems"), "Problems", "problemsView");
 
 function renderProblems() {
   const markers = monaco.editor.getModelMarkers({}).filter((m) => m.resource.scheme === "file");
@@ -949,7 +949,7 @@ function renderProblems() {
       h(
         "div",
         { class: "result-group" },
-        h("div", { class: "result-file" }, icon("file"), h("span", { class: "result-name" }, rel(path)), h("span", { class: "badge" }, String(list.length))),
+        h("div", { class: "result-file" }, fileIcon(path), h("span", { class: "result-name" }, rel(path)), h("span", { class: "badge" }, String(list.length))),
         ...list
           .sort((a, b) => a.startLineNumber - b.startLineNumber)
           .map((m) =>

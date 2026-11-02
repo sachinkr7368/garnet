@@ -2,7 +2,7 @@ import { openFile } from "./editor";
 import { api } from "./ipc";
 import { askTrust, setting } from "./settings";
 import { abs, root, shellQuote, state } from "./state";
-import { h, icon, quickPick, toast } from "./ui";
+import { h, icon, quickPick, modal, toast } from "./ui";
 
 /// Run Rails Generator: generator list and options from `bin/rails generate --help`, preview with --pretend.
 
@@ -214,10 +214,8 @@ async function openGeneratorDialog(generator: string) {
     ),
     h("div", { class: "rc-actions" }, ...buttons),
   );
-  const backdrop = h("div", { class: "qp-backdrop", onmousedown: (e: MouseEvent) => e.target === backdrop && close() }, dialog);
+  const backdrop = modal(dialog, () => close(), { autofocus: argsInput });
   const close = () => backdrop.remove();
-  backdrop.addEventListener("keydown", (e) => e.key === "Escape" && close());
-  document.getElementById("overlay-root")!.append(backdrop);
   update();
   argsInput.focus();
 }

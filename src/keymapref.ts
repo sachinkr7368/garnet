@@ -1,6 +1,6 @@
-import { allCommands, formatKey, keysFor } from "./commands";
+import { allCommands, formatKey, keyLabel, keysFor } from "./commands";
 import { updateSetting, setting } from "./settings";
-import { fuzzyScore, h, icon, toast } from "./ui";
+import { fuzzyScore, h, icon, modal, toast } from "./ui";
 
 /// Help › Keymap Reference: every action with its current shortcuts.
 export function showKeymapReference() {
@@ -22,9 +22,7 @@ export function showKeymapReference() {
   filter.oninput = render;
   render();
   const close = () => backdrop.remove();
-  const backdrop = h(
-    "div",
-    { class: "qp-backdrop", onmousedown: (e: MouseEvent) => e.target === backdrop && close() },
+  const backdrop = modal(
     h(
       "div",
       { class: "st-dialog" },
@@ -32,10 +30,31 @@ export function showKeymapReference() {
       h("div", { class: "st-page" }, filter, table),
       h("div", { class: "rc-actions" }, h("button", { class: "btn primary", onclick: close }, "Close")),
     ),
+    close,
+    { autofocus: filter },
   );
-  backdrop.addEventListener("keydown", (e) => e.key === "Escape" && close());
-  document.getElementById("overlay-root")!.append(backdrop);
-  filter.focus();
+}
+
+const WELCOME_HINTS: [string, string[]][] = [
+  ["Search Everywhere", ["searchEverywhere"]],
+  ["Go to File", ["goToFile"]],
+  ["Find in Files", ["findInFiles"]],
+  ["Find Action", ["commandPalette"]],
+  ["Related Symbol", ["related"]],
+  ["Run / Debug", ["runSelected", "debugSelected"]],
+  ["Run Context Configuration", ["runTestAtCursor"]],
+  ["Terminal", ["terminalView"]],
+];
+
+/// Empty-editor hints, built from the live keymap so they match rebinds and the VS Code preset.
+export function welcomeHints(): [string, string][] {
+  return WELCOME_HINTS.map(([label, ids]): [string, string] => [
+    label,
+    ids
+      .map((id) => (id === "searchEverywhere" ? "⇧⇧" : keyLabel({ id, title: "", run: () => {} })))
+      .filter(Boolean)
+      .join(" / "),
+  ]).filter(([, k]) => k);
 }
 
 /// JetBrains action ids → Garnet command ids, for importing an exported keymap XML.

@@ -172,6 +172,14 @@ function locks(toks: Sig[], from: number, base: number): boolean {
 }
 
 export function classify(sql: string, dialect: Dialect = "postgres"): Classification {
+  // Drivers run every statement in a multi-statement string (Postgres simple query, MySQL text protocol),
+  // so one string with several statements is never treated as a single read.
+  const parts = splitStatements(sql, dialect);
+  if (parts.length > 1) {
+    const kinds = parts.map((p) => classify(p.text, dialect).kind);
+    const kind = (["ddl", "write", "tx", "other"] as Kind[]).find((k) => kinds.includes(k)) ?? "read";
+    return { kind, dangerous: true, reason: `${parts.length} statements in one string` };
+  }
   const toks = significant(sql, dialect);
   const hd = head(toks);
   if (!hd) return { kind: "other", dangerous: false };

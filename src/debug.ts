@@ -6,7 +6,7 @@ import { SessionList } from "./sessionlist";
 import { onSettingsChange, setting } from "./settings";
 import { abs, debounce, rel, root, state } from "./state";
 import type { PtyTabs } from "./terminal";
-import { bottom, contextMenu, h, icon, iconButton, inputBox, quickPick, toast } from "./ui";
+import { bottom, contextMenu, h, icon, iconButton, inputBox, quickPick, modal, toast } from "./ui";
 
 type Json = any;
 type RunItem = PtyTabs["items"][number];
@@ -67,18 +67,18 @@ export const debugView = h(
   h(
     "div",
     { class: "search-bar" },
-    iconButton("debug-continue", "Resume (F9)", () => resume()),
+    iconButton("debug-continue", "Resume Program", () => resume(), "resume"),
     iconButton("debug-pause", "Pause", () => {
       const s = sel();
       if (s && !s.paused) request(s, "pause", { threadId: s.threadId });
     }),
-    iconButton("debug-step-over", "Step Over (F8)", () => step("next")),
-    iconButton("debug-step-into", "Step Into (F7)", () => step("stepIn")),
-    iconButton("debug-step-out", "Step Out (⇧F8)", () => step("stepOut")),
-    iconButton("debug-restart", "Restart (⌘⇧F5)", () => restartDebug()),
-    iconButton("debug-stop", "Stop (⌘F2)", () => stopDebug()),
+    iconButton("debug-step-over", "Step Over", () => step("next"), "stepOver"),
+    iconButton("debug-step-into", "Step Into", () => step("stepIn"), "stepInto"),
+    iconButton("debug-step-out", "Step Out", () => step("stepOut"), "stepOut"),
+    iconButton("debug-restart", "Restart", () => restartDebug(), "restartDebug"),
+    iconButton("debug-stop", "Stop", () => stopDebug(), "stopDebug"),
     h("span", { class: "debug-toolbar-sep" }),
-    iconButton("debug-breakpoint-log-unverified", "View Breakpoints (⌘⇧F8)", () => viewBreakpoints()),
+    iconButton("debug-breakpoint-log-unverified", "View Breakpoints", () => viewBreakpoints(), "viewBreakpoints"),
     filtersEl,
     statusEl,
   ),
@@ -324,7 +324,7 @@ editor.onContextMenu((e) => {
     { label: "Edit condition…", run: () => editBreakpoint(t.path, line, "condition") },
     { label: "Make logpoint…", run: () => editBreakpoint(t.path, line, "logMessage") },
     { label: "Pass count…", run: () => editBreakpoint(t.path, line, "hitCount") },
-    { label: "More (⌘⇧F8)…", run: () => viewBreakpoints(t.path, line) },
+    { label: "More…", icon: "debug-breakpoint-log-unverified", command: "viewBreakpoints", run: () => viewBreakpoints(t.path, line) },
     null,
     { label: "Remove all breakpoints in file", run: () => removeBreakpoints(t.path) },
   ]);
@@ -880,9 +880,7 @@ export function viewBreakpoints(focusPath?: string, focusLine?: number) {
     h("div", { class: "rc-body" }, h("div", { class: "rc-side bp-side" }, listEl), form),
     h("div", { class: "rc-actions" }, h("button", { class: "btn primary", onclick: () => close() }, "Done")),
   );
-  const backdrop = h("div", { class: "qp-backdrop bp-backdrop", onmousedown: (e: MouseEvent) => e.target === backdrop && close() }, dialog);
-  backdrop.addEventListener("keydown", (e) => e.key === "Escape" && close());
-  document.getElementById("overlay-root")!.append(backdrop);
+  const backdrop = modal(dialog, () => close(), { class: "bp-backdrop" });
   render();
 }
 

@@ -2,7 +2,7 @@ import "./railstools.css";
 import { openFile } from "./editor";
 import { api } from "./ipc";
 import { abs } from "./state";
-import { h, icon } from "./ui";
+import { fileIcon, h, icon } from "./ui";
 
 /// Rails project view: a logical tree (Models, Controllers, Views, …) instead of the file system.
 
@@ -64,7 +64,7 @@ function renderNode(node: LogicalNode, depth: number, key: string): HTMLElement[
     "div",
     { class: "tree-row", style: `padding-left:${depth * 14 + 6}px`, title: node.path ?? "" },
     node.path ? h("span", { class: "twisty" }) : icon(open ? "chevron-down" : "chevron-right", "twisty"),
-    icon(node.path ? "file" : depth === 0 ? "symbol-namespace" : open ? "folder-opened" : "folder", `file-icon ${node.path ? "" : "dir"}`),
+    node.path ? fileIcon(node.path) : icon(depth === 0 ? "symbol-namespace" : open ? "folder-opened" : "folder", "file-icon dir"),
     h("span", { class: "tree-label" }, node.label),
     node.detail ? h("span", { class: "dim tree-detail" }, ` ${node.detail}`) : null,
     depth === 0 ? h("span", { class: "dim tree-detail" }, ` ${count(node)}`) : null,

@@ -5,12 +5,12 @@ import { cloneDialog, createPullRequest } from "./github";
 import { api, invoke } from "./ipc";
 import { isDarkTheme, isTrusted, onSettingsChange, recentProjects, toggleTheme } from "./settings";
 import { basename, dirname, root, state } from "./state";
-import { h, icon, iconButton, inputBox, quickPick, toast, type PickItem } from "./ui";
+import { h, icon, iconButton, inputBox, quickPick, toast, withTip, type PickItem } from "./ui";
 
 const switchers = document.getElementById("switchers")!;
-const projectBtn = h("button", { class: "switcher", title: "Projects" });
-const worktreeBtn = h("button", { class: "switcher", title: "Git worktrees" });
-const branchBtn = h("button", { class: "switcher", title: "Git branches" });
+const projectBtn = withTip(h("button", { class: "switcher" }), "Projects", "projects");
+const worktreeBtn = withTip(h("button", { class: "switcher" }), "Git worktrees", "worktrees");
+const branchBtn = withTip(h("button", { class: "switcher" }), "Git branches", "branches");
 switchers.append(projectBtn, worktreeBtn, branchBtn);
 
 const themeBtn = iconButton("color-mode", "", () => toggleTheme());

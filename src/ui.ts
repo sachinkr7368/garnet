@@ -21,8 +21,92 @@ export function h<K extends keyof HTMLElementTagNameMap>(
 
 export const icon = (name: string, extra = "") => h("span", { class: `codicon codicon-${name} ${extra}` });
 
-export function iconButton(name: string, title: string, onclick: (e: MouseEvent) => void) {
-  return h("button", { class: "icon-btn", title, onclick }, icon(name));
+let shortcutFor: (command: string) => string = () => "";
+/// commands.ts registers the keymap lookup here, so tooltips follow rebinds without a circular import.
+export const setShortcutResolver = (fn: (command: string) => string) => (shortcutFor = fn);
+
+/// "Action ⌘K" when the command has a shortcut in the current keymap, else just the action name.
+export function tip(title: string, command?: string) {
+  const key = command ? shortcutFor(command) : "";
+  return key ? `${title} ${key}` : title;
+}
+
+/// Keeps an element's tooltip in sync with the keymap: resolved now and again on every hover.
+export function withTip<T extends HTMLElement>(el: T, title: string, command?: string): T {
+  el.title = tip(title, command);
+  el.setAttribute("aria-label", title);
+  if (command) el.addEventListener("mouseenter", () => (el.title = tip(title, command)));
+  return el;
+}
+
+const FILE_ICONS: [RegExp, string][] = [
+  [/(\.(rb|rake|gemspec|ru|jbuilder)|^(Gemfile|Rakefile|Guardfile|Capfile|Brewfile))$/, "ruby"],
+  [/\.(erb|haml|slim|html?)$/, "code"],
+  [/\.(ya?ml|toml|ini|env)$|^\.env/, "settings"],
+  [/\.json$/, "json"],
+  [/\.(md|markdown)$/, "markdown"],
+  [/\.(js|mjs|cjs|ts|tsx|jsx|coffee)$/, "file-code"],
+  [/\.(css|scss|sass|less)$/, "symbol-color"],
+  [/\.(png|jpe?g|gif|svg|ico|webp)$/, "file-media"],
+  [/\.(sql|sqlite3?|db)$/, "database"],
+  [/\.(sh|bash|zsh)$|^(Procfile.*|Dockerfile.*)$/, "terminal"],
+  [/\.lock$/, "lock"],
+  [/\.log$/, "output"],
+  [/\.(zip|gz|tgz|tar)$/, "file-zip"],
+];
+
+/// Codicon for a file, by type (Ruby, ERB, YAML, JS…), like RubyMine's file-type icons.
+export function fileIconName(path: string): string {
+  const name = path.split("/").pop() ?? path;
+  return FILE_ICONS.find(([re]) => re.test(name))?.[1] ?? "file";
+}
+
+export const fileIcon = (path: string, extra = "") => {
+  const ext = path.match(/\.([a-z0-9]+)$/i)?.[1].toLowerCase();
+  return icon(fileIconName(path), `file-icon${ext ? ` ext-${ext}` : ""}${extra ? ` ${extra}` : ""}`);
+};
+
+const MENU_ICONS: [RegExp, string][] = [
+  [/^(copy|copy \w+)/i, "copy"],
+  [/^(delete|remove|drop)/i, "trash"],
+  [/^rename/i, "edit"],
+  [/^edit/i, "edit"],
+  [/^new file/i, "new-file"],
+  [/^new folder/i, "new-folder"],
+  [/^new\b/i, "add"],
+  [/^(reveal|show in finder|open in finder)/i, "folder-opened"],
+  [/history|log\b/i, "history"],
+  [/^open on github|github/i, "github"],
+  [/^open/i, "go-to-file"],
+  [/^debug/i, "debug-alt"],
+  [/^(run|rerun)/i, "play"],
+  [/^(refresh|reload)/i, "refresh"],
+  [/^(rollback|revert|discard)/i, "discard"],
+  [/^unstage/i, "remove"],
+  [/^stage/i, "add"],
+  [/^(checkout|check out|switch)/i, "git-branch"],
+  [/^cherry/i, "git-commit"],
+  [/^(compare|show diff|diff)/i, "git-compare"],
+  [/^merge/i, "git-merge"],
+  [/^rebase/i, "git-pull-request"],
+  [/^(push)/i, "repo-push"],
+  [/^(pull|update|fetch)/i, "repo-pull"],
+  [/^(stash|unstash)/i, "archive"],
+  [/breakpoint|logpoint/i, "debug-breakpoint"],
+  [/condition|pass count/i, "filter"],
+  [/^(disable|enable)/i, "circle-slash"],
+  [/^(connect)/i, "plug"],
+  [/^(disconnect)/i, "debug-disconnect"],
+  [/^(go to|jump to|navigate)/i, "arrow-right"],
+  [/^(annotate|blame)/i, "person"],
+  [/^(mark|toggle)/i, "check"],
+];
+
+/// Default icon for a context-menu item from its label, so every menu shows icons without each caller listing them.
+export const menuIconFor = (label: string) => MENU_ICONS.find(([re]) => re.test(label))?.[1] ?? "blank";
+
+export function iconButton(name: string, title: string, onclick: (e: MouseEvent) => void, command?: string) {
+  return withTip(h("button", { class: "icon-btn", onclick }, icon(name)), title, command);
 }
 
 /// Sidebar and bottom tool windows
@@ -32,10 +116,11 @@ interface View {
   title: string;
   icon: string;
   el: HTMLElement;
+  command?: string;
   onShow?: () => void;
 }
 
-class Dock {
+export class Dock {
   views = new Map<string, View>();
   active: string | null = null;
   constructor(
@@ -50,7 +135,7 @@ class Dock {
     view.el.classList.add("view");
     view.el.hidden = true;
     this.body.append(view.el);
-    const tab = h("button", { class: "dock-tab", title: view.title, onclick: () => this.toggle(view.id) }, icon(view.icon));
+    const tab = withTip(h("button", { class: "dock-tab", onclick: () => this.toggle(view.id) }, icon(view.icon)), view.title, view.command);
     tab.dataset.view = view.id;
     if (!this.strip) tab.append(h("span", {}, view.title));
     (this.strip ?? this.head).append(tab);
@@ -80,6 +165,22 @@ class Dock {
     if (this.active === id && !this.host.hidden) this.hide();
     else this.show(id);
   }
+
+  /// JetBrains "Activate tool window": show and focus it; hide only when it is already focused.
+  activate(id: string) {
+    const view = this.views.get(id);
+    if (!view) return;
+    if (this.active === id && !this.host.hidden && view.el.contains(document.activeElement)) {
+      this.hide();
+      Dock.afterHide();
+      return;
+    }
+    if (this.active !== id || this.host.hidden) this.show(id);
+    else view.onShow?.();
+    if (!view.el.contains(document.activeElement)) view.el.querySelector<HTMLElement>("[tabindex], input, textarea, .xterm-helper-textarea")?.focus();
+  }
+
+  static afterHide: () => void = () => {};
 }
 
 export const sidebar = new Dock(
@@ -88,6 +189,12 @@ export const sidebar = new Dock(
   document.getElementById("sidebar-body")!,
   document.getElementById("toolstrip")!,
 );
+export const rightbar = new Dock(
+  document.getElementById("rightbar")!,
+  document.getElementById("rightbar-head")!,
+  document.getElementById("rightbar-body")!,
+  document.getElementById("rightstrip")!,
+);
 export const bottom = new Dock(
   document.getElementById("bottom")!,
   document.getElementById("bottom-head")!,
@@ -95,29 +202,47 @@ export const bottom = new Dock(
   null,
 );
 
+const DRAG_ENDS = ["pointerup", "pointercancel", "lostpointercapture"] as const;
+
+/// Tracks one pointer drag from `e` on `handle`. `body.resizing` turns off pointer events everywhere, so every way
+/// a drag can end clears it: a release outside the window ends in pointercancel/lostpointercapture, not pointerup.
+export function trackDrag(handle: HTMLElement, e: PointerEvent, onMove: (ev: PointerEvent) => void) {
+  handle.setPointerCapture?.(e.pointerId);
+  document.body.classList.add("resizing");
+  const end = () => {
+    handle.removeEventListener("pointermove", onMove);
+    document.body.classList.remove("resizing");
+    for (const t of DRAG_ENDS) handle.removeEventListener(t, end);
+    window.removeEventListener("blur", end);
+  };
+  handle.addEventListener("pointermove", onMove);
+  for (const t of DRAG_ENDS) handle.addEventListener(t, end);
+  window.addEventListener("blur", end);
+}
+
+/// New width of a side panel dragged by its inner edge. `edgeOnRight` is true when the handle sits on the panel's
+/// right edge (panel on the left of the window), false when it sits on its left edge (panel on the right).
+export function dragWidth(rect: { left: number; right: number }, clientX: number, edgeOnRight: boolean, min: number, max: number) {
+  return Math.max(min, Math.min(max, edgeOnRight ? clientX - rect.left : rect.right - clientX));
+}
+
 export function setupResizers() {
-  const drag = (handle: HTMLElement, onMove: (e: PointerEvent) => void) => {
-    handle.addEventListener("pointerdown", (e) => {
-      handle.setPointerCapture(e.pointerId);
-      document.body.classList.add("resizing");
-      const move = (ev: PointerEvent) => {
+  const drag = (handle: HTMLElement, onMove: (e: PointerEvent) => void) =>
+    handle.addEventListener("pointerdown", (e) =>
+      trackDrag(handle, e, (ev) => {
         onMove(ev);
         window.dispatchEvent(new Event("resize"));
-      };
-      handle.addEventListener("pointermove", move);
-      handle.addEventListener(
-        "pointerup",
-        () => {
-          handle.removeEventListener("pointermove", move);
-          document.body.classList.remove("resizing");
-        },
-        { once: true },
-      );
-    });
-  };
+      }),
+    );
+  // With "Tool window bar position: right" the row is reversed: the sidebar sits on the right and the rightbar on the left.
+  const flipped = () => document.body.classList.contains("sidebar-right");
   const side = document.getElementById("sidebar")!;
   drag(document.getElementById("sidebar-resizer")!, (e) => {
-    side.style.width = `${Math.max(160, Math.min(700, e.clientX - side.getBoundingClientRect().left))}px`;
+    side.style.width = `${dragWidth(side.getBoundingClientRect(), e.clientX, !flipped(), 160, 700)}px`;
+  });
+  const right = document.getElementById("rightbar")!;
+  drag(document.getElementById("rightbar-resizer")!, (e) => {
+    right.style.width = `${dragWidth(right.getBoundingClientRect(), e.clientX, flipped(), 200, 800)}px`;
   });
   const bottomEl = document.getElementById("bottom")!;
   drag(document.getElementById("bottom-resizer")!, (e) => {
@@ -178,6 +303,19 @@ interface QuickPickOptions {
 
 let closeActiveOverlay: (() => void) | null = null;
 
+/// WebKit fires a mousemove with unchanged coordinates when a list scrolls under a still pointer; only a real
+/// move may change a hovered list's selection, so arrow-key paging never jumps to the row under the pointer.
+let pointerMoved = false;
+let lastPointer = { x: NaN, y: NaN };
+window.addEventListener(
+  "mousemove",
+  (e) => {
+    pointerMoved = e.clientX !== lastPointer.x || e.clientY !== lastPointer.y;
+    lastPointer = { x: e.clientX, y: e.clientY };
+  },
+  true,
+);
+
 export function quickPick(opts: QuickPickOptions) {
   closeActiveOverlay?.();
   const previousFocus = document.activeElement as HTMLElement | null;
@@ -205,6 +343,7 @@ export function quickPick(opts: QuickPickOptions) {
           "div",
           {
             class: `qp-item${i === selected ? " selected" : ""}`,
+            onmousemove: () => pointerMoved && select(i),
             onmousedown: (e: MouseEvent) => {
               e.preventDefault();
               selected = i;
@@ -219,6 +358,15 @@ export function quickPick(opts: QuickPickOptions) {
       ),
     );
     list.children[selected]?.scrollIntoView({ block: "nearest" });
+    opts.onChange?.(items[selected]);
+  };
+
+  /// Hover moves the selection, like JetBrains popups; mousemove (not mouseenter) so keyboard scrolling under a still pointer keeps the keyboard's choice.
+  const select = (i: number) => {
+    if (i === selected) return;
+    list.children[selected]?.classList.remove("selected");
+    selected = i;
+    list.children[i]?.classList.add("selected");
     opts.onChange?.(items[selected]);
   };
 
@@ -290,6 +438,7 @@ export function toast(message: string, kind: "info" | "error" = "info", actions:
   const el = h(
     "div",
     { class: `toast ${kind}` },
+    icon(kind === "error" ? "error" : "info", "toast-icon"),
     h("div", { class: "toast-msg" }, message),
     ...actions.map((a) => h("button", { class: "btn", onclick: () => (el.remove(), a.run()) }, a.label)),
     iconButton("close", "Dismiss", () => el.remove()),
@@ -298,28 +447,136 @@ export function toast(message: string, kind: "info" | "error" = "info", actions:
   if (!actions.length) setTimeout(() => el.remove(), kind === "error" ? 9000 : 4000);
 }
 
-export function contextMenu(e: MouseEvent, items: ({ label: string; run: () => void } | null)[]) {
+export interface MenuItem {
+  label: string;
+  run: () => void;
+  icon?: string;
+  command?: string;
+  /// Fixed context-local shortcut (tree keys), shown when there is no keymap command.
+  shortcut?: string;
+  disabled?: boolean;
+}
+
+export function contextMenu(e: MouseEvent, items: (MenuItem | null)[]) {
   e.preventDefault();
   closeActiveOverlay?.();
+  const previousFocus = document.activeElement as HTMLElement | null;
+  const rows: HTMLElement[] = [];
+  const actions: MenuItem[] = [];
+  let selected = -1;
+  const select = (i: number) => {
+    rows[selected]?.classList.remove("selected");
+    selected = i;
+    rows[i]?.classList.add("selected");
+    rows[i]?.scrollIntoView({ block: "nearest" });
+  };
+  const runItem = (item: MenuItem) => {
+    if (item.disabled) return;
+    close();
+    item.run();
+  };
   const menu = h(
     "div",
-    { class: "ctx-menu", style: `left:${e.clientX}px;top:${e.clientY}px` },
-    ...items.map((item) =>
-      item
-        ? h("div", { class: "ctx-item", onmousedown: (ev: MouseEvent) => (ev.preventDefault(), close(), item.run()) }, item.label)
-        : h("div", { class: "ctx-sep" }),
-    ),
+    { class: "ctx-menu", role: "menu", tabIndex: -1, style: `left:${e.clientX}px;top:${e.clientY}px` },
+    ...items.map((item) => {
+      if (!item) return h("div", { class: "ctx-sep" });
+      const i = rows.length;
+      const key = item.command ? tip("", item.command).trim() : (item.shortcut ?? "");
+      const row = h(
+        "div",
+        {
+          class: `ctx-item${item.disabled ? " disabled" : ""}`,
+          role: "menuitem",
+          onmousemove: () => pointerMoved && selected !== i && select(i),
+          onmousedown: (ev: MouseEvent) => (ev.preventDefault(), runItem(item)),
+        },
+        icon(item.icon ?? menuIconFor(item.label), "ctx-icon"),
+        h("span", { class: "ctx-label" }, item.label),
+        key ? h("span", { class: "ctx-key" }, key) : null,
+      );
+      rows.push(row);
+      actions.push(item);
+      return row;
+    }),
   );
+  menu.addEventListener("mouseleave", () => select(-1));
+  menu.addEventListener("keydown", (ev) => {
+    const step = (d: number) => {
+      for (let n = 1; n <= rows.length; n++) {
+        const i = (Math.max(selected, d > 0 ? -1 : 0) + d * n + rows.length) % rows.length;
+        if (!actions[i].disabled) return select(i);
+      }
+    };
+    if (ev.key === "ArrowDown") step(1);
+    else if (ev.key === "ArrowUp") step(-1);
+    else if (ev.key === "Enter" && selected >= 0) runItem(actions[selected]);
+    else if (ev.key === "Escape") close();
+    else return;
+    ev.preventDefault();
+    ev.stopPropagation();
+  });
   const backdrop = h("div", { class: "ctx-backdrop", onmousedown: () => close(), oncontextmenu: (ev: MouseEvent) => (ev.preventDefault(), close()) }, menu);
+  menu.addEventListener("mousedown", (ev) => ev.stopPropagation());
   const close = () => {
     backdrop.remove();
     closeActiveOverlay = null;
+    previousFocus?.focus?.();
   };
   closeActiveOverlay = close;
   document.getElementById("overlay-root")!.append(backdrop);
+  menu.focus();
   const r = menu.getBoundingClientRect();
   if (r.bottom > window.innerHeight) menu.style.top = `${Math.max(0, window.innerHeight - r.height - 4)}px`;
   if (r.right > window.innerWidth) menu.style.left = `${window.innerWidth - r.width - 4}px`;
+  return { close, menu };
+}
+
+/// Modal dialogs
+
+const FOCUSABLE = 'input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])';
+const FIELD = 'input:not([disabled]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), select:not([disabled]), textarea:not([disabled])';
+
+/// Shared backdrop for every dialog: clicking a field always focuses it, Tab cycles inside the dialog,
+/// Escape and clicking outside close it, and the first field (or `autofocus`) gets focus on open.
+export function modal(box: HTMLElement, onClose: () => void, opts: { class?: string; autofocus?: HTMLElement | null; locked?: () => boolean } = {}) {
+  const previousFocus = document.activeElement as HTMLElement | null;
+  const backdrop = h("div", { class: `qp-backdrop${opts.class ? ` ${opts.class}` : ""}` }, box);
+  box.setAttribute("role", "dialog");
+  box.setAttribute("aria-modal", "true");
+  const close = () => {
+    if (opts.locked?.()) return;
+    onClose();
+  };
+  backdrop.addEventListener("mousedown", (e) => {
+    if (e.target === backdrop) return close();
+    const t = e.target as HTMLElement;
+    const control = t.closest<HTMLElement>(FIELD) ?? (t.closest("label") as HTMLLabelElement | null)?.control ?? null;
+    if (control && box.contains(control) && control.matches(FIELD)) queueMicrotask(() => document.activeElement !== control && control.focus());
+  });
+  backdrop.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !(e.target as HTMLElement).matches?.("textarea")) {
+      e.stopPropagation();
+      return close();
+    }
+    if (e.key !== "Tab") return;
+    const all = [...box.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => !el.closest("[hidden]") && !el.closest(".monaco-editor"));
+    if (!all.length) return;
+    const i = all.indexOf(document.activeElement as HTMLElement);
+    const next = e.shiftKey ? (i <= 0 ? all.length - 1 : i - 1) : i < 0 || i === all.length - 1 ? 0 : i + 1;
+    e.preventDefault();
+    all[next].focus();
+  });
+  const observer = new MutationObserver(() => {
+    if (backdrop.isConnected) return;
+    observer.disconnect();
+    // Back to where focus was: the outer dialog's field for a nested dialog, or the editor/panel for a top-level one.
+    if (previousFocus?.isConnected && (previousFocus.closest(".qp-backdrop") || !document.querySelector(".qp-backdrop"))) previousFocus.focus?.();
+  });
+  const root = document.getElementById("overlay-root")!;
+  root.append(backdrop);
+  observer.observe(root, { childList: true });
+  (opts.autofocus ?? box.querySelector<HTMLElement>("[autofocus]") ?? box.querySelector<HTMLElement>(FIELD) ?? box.querySelector<HTMLElement>(FOCUSABLE))?.focus();
+  return backdrop;
 }
 
 /// Status bar slots
@@ -327,10 +584,11 @@ export function contextMenu(e: MouseEvent, items: ({ label: string; run: () => v
 const statusbar = document.getElementById("statusbar")!;
 const slots = new Map<string, HTMLElement>();
 
-export function statusSlot(id: string, side: "left" | "right", onclick?: () => void): HTMLElement {
+export function statusSlot(id: string, side: "left" | "right", onclick?: () => void, title?: string, command?: string): HTMLElement {
   let el = slots.get(id);
   if (!el) {
     el = h("span", { class: `status-item ${side}${onclick ? " clickable" : ""}`, onclick });
+    if (title) withTip(el, title, command);
     slots.set(id, el);
     const spacer = statusbar.querySelector(".status-spacer");
     if (side === "left" && spacer) spacer.before(el);

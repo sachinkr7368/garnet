@@ -1,12 +1,12 @@
 import "./db.css";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { commands } from "./commands";
-import { monaco } from "./editor";
+import { activate as activateEditorTab, closeTab as closeEditorTab, findViewTab, monaco, openViewTab, retitleViewTab } from "./editor";
 import { api, invoke } from "./ipc";
 import { setting } from "./settings";
 import { classify, defaultReadOnly, envSegment, isLocalHost, csvLine, splitStatements, statementAt, toCsv, toJson, withAutoLimit, type Dialect, type Kind } from "./sqlsafety";
 import { state } from "./state";
-import { bottom, contextMenu, h, icon, iconButton, quickPick, toast } from "./ui";
+import { contextMenu, h, icon, iconButton, modal, quickPick, rightbar, toast, trackDrag, type MenuItem } from "./ui";
 
 export type Color = "none" | "red" | "orange" | "yellow" | "green" | "blue" | "purple";
 export const COLORS: Color[] = ["none", "red", "orange", "yellow", "green", "blue", "purple"];
@@ -79,7 +79,7 @@ interface Column {
   default: string | null;
   primaryKey: boolean;
 }
-interface TableInfo {
+export interface TableInfo {
   name: string;
   kind: "table" | "view";
   columns: Column[];
@@ -139,11 +139,59 @@ export function overrideFrom(d: Detected, e: ConnFields & { name: string; readOn
 }
 
 const isLocal = (c: ConnFields) => c.engine === "sqlite" || isLocalHost(c.host);
+
+/// Tooltip for the READ-ONLY badge: why the connection is read-only and how to change it.
+export function readOnlyReason(c: Conn): string {
+  const how = "To change it: right-click › Edit Data Source… and uncheck Read-only.";
+  let why: string;
+  if (c.source === "manual") why = "Marked read-only when the connection was added.";
+  else if (c.environment !== undefined && envSegment(c.environment) !== "development") why = `"${c.environment}" isn't a development environment, so it starts read-only.`;
+  else if (c.unresolved.includes("host")) why = "The host comes from ERB/ENV in config/database.yml and couldn't be resolved, so Garnet can't tell whether it's this machine.";
+  else if (c.engine !== "sqlite" && !isLocalHost(c.host)) why = `It points at ${c.host}, not this machine.`;
+  else why = "You marked it read-only.";
+  return `Read-only: Garnet blocks writes and the database session is read-only.\n${why}\n${how}`;
+}
+
+const q = (d: Dialect, name: string) => (d === "mysql" ? `\`${name.replace(/`/g, "``")}\`` : `"${name.replace(/"/g, '""')}"`);
+
+/// Approximate DDL rebuilt from the introspected schema (columns, primary key, indexes, foreign keys).
+export function tableDdl(d: Dialect, schema: string, t: TableInfo): string {
+  const name = d === "sqlite" ? q(d, t.name) : `${q(d, schema)}.${q(d, t.name)}`;
+  if (t.kind === "view") return `-- ${t.name} is a view; its definition isn't introspected.\n-- Columns: ${t.columns.map((c) => `${c.name} ${c.dataType}`).join(", ")}\n`;
+  const pk = t.columns.filter((c) => c.primaryKey).map((c) => q(d, c.name));
+  const lines = [
+    ...t.columns.map((c) => `  ${q(d, c.name)} ${c.dataType}${c.nullable ? "" : " NOT NULL"}${c.default !== null ? ` DEFAULT ${c.default}` : ""}`),
+    ...(pk.length ? [`  PRIMARY KEY (${pk.join(", ")})`] : []),
+    ...t.foreignKeys.map(
+      (f) =>
+        `  CONSTRAINT ${q(d, f.name)} FOREIGN KEY (${f.columns.map((c) => q(d, c)).join(", ")}) REFERENCES ${f.refSchema && d !== "sqlite" ? `${q(d, f.refSchema)}.` : ""}${q(d, f.refTable)} (${f.refColumns.map((c) => q(d, c)).join(", ")})`,
+    ),
+  ];
+  const indexes = t.indexes.map((i) => `CREATE ${i.unique ? "UNIQUE " : ""}INDEX ${q(d, i.name)} ON ${name} (${i.columns.map((c) => q(d, c)).join(", ")});`);
+  return [`CREATE TABLE ${name} (`, lines.join(",\n"), ");", ...(indexes.length ? ["", ...indexes] : [])].join("\n") + "\n";
+}
+
+/// Plain EXPLAIN (never ANALYZE, so nothing executes) for a single read statement; null when not cheap or not a read.
+export function explainSql(sql: string, d: Dialect): string | null {
+  const parts = splitStatements(sql, d);
+  if (parts.length !== 1) return null;
+  const text = parts[0].text;
+  if (classify(text, d).kind !== "read" || /^\s*explain\b/i.test(text)) return null;
+  return d === "sqlite" ? `EXPLAIN QUERY PLAN ${text}` : `EXPLAIN ${text}`;
+}
 const dialect = (c: Conn): Dialect => c.engine ?? "postgres";
 const KIND_LABEL: Record<Kind, string> = { read: "read", write: "data-modifying", ddl: "schema-changing (DDL)", tx: "transaction control", other: "non-read" };
 
 /// For the smoke script (src/smoke.ts): answers the dangerous-statement confirmation instead of the native dialog.
 export const dbSmokeHooks: { ask?: typeof ask } = {};
+
+/// For vitest only: drive the module's internals without the tree UI.
+export const dbTesting = {
+  ensureLoaded: () => ensureLoaded(),
+  openConsole: (id: string) => openConsole(id),
+  updateConn: (id: string, patch: { readOnly?: boolean; color?: Color }) => updateConn(connById(id)!, patch),
+  tabEls: () => tabs.map((t) => t.el),
+};
 
 export interface Outcome {
   sql: string;
@@ -157,6 +205,8 @@ export async function runBatch(
   sqls: string[],
   opts: { autoLimit?: number; onResult?: (o: Outcome) => void; cancelled?: () => boolean } = {},
 ): Promise<{ outcomes: Outcome[]; blocked?: string }> {
+  const multi = sqls.find((sql) => splitStatements(sql, dialect(conn)).length !== 1);
+  if (multi !== undefined) return { outcomes: [], blocked: `Run one statement at a time; nothing was run. This text holds ${splitStatements(multi, dialect(conn)).length || "no"} statements:\n\n${multi}` };
   const checks = sqls.map((sql) => ({ sql, c: classify(sql, dialect(conn)) }));
   if (conn.readOnly) {
     const bad = checks.find((x) => x.c.kind !== "read");
@@ -398,10 +448,7 @@ function dialog(title: string, iconName: string, body: HTMLElement[], actions: H
     h("div", { class: "rc-form" }, ...body),
     h("div", { class: "rc-actions" }, ...actions),
   );
-  const backdrop = h("div", { class: "qp-backdrop", onmousedown: (e: MouseEvent) => e.target === backdrop && onClose() }, box);
-  backdrop.addEventListener("keydown", (e) => e.key === "Escape" && onClose());
-  document.getElementById("overlay-root")!.append(backdrop);
-  return backdrop;
+  return modal(box, onClose);
 }
 
 const field = (label: string, input: HTMLElement, hint = "", unresolved = false) =>
@@ -550,49 +597,120 @@ function editConnection(existing?: Conn) {
 const treeEl = h("div", { class: "tree db-tree", tabIndex: 0 });
 
 const tag = (color: Color) => h("span", { class: `db-tag db-tag-${color}` });
-const roBadge = () => h("span", { class: "db-ro" }, "READ-ONLY");
+const roBadge = (c: Conn) => h("span", { class: "db-ro", title: readOnlyReason(c) }, "READ-ONLY");
 const describe = (c: Conn) =>
   c.engine === "sqlite" ? `sqlite ${c.database}` : `${c.engine ?? "?"} ${c.host || "localhost"}${c.port ? `:${c.port}` : ""}${c.database ? `/${c.database}` : ""}`;
 
-function row(depth: number, key: string | null, iconName: string, label: (Node | string | null)[], opts: { onOpen?: () => void; onMenu?: (e: MouseEvent) => void; connId?: string; title?: string } = {}) {
+interface RowOpts {
+  onOpen?: () => void;
+  /// F4 when it differs from double-click/Enter: on a data source it opens (or jumps to) its query console.
+  onF4?: () => void;
+  onDdl?: () => void;
+  menu?: () => (MenuItem | null)[];
+  connId?: string;
+  title?: string;
+}
+/// Rows of the last render, in order, for keyboard navigation; `cursor` is the focused row's id.
+let rowList: { id: string; el: HTMLElement; key: string | null; opts: RowOpts }[] = [];
+let cursor: string | null = null;
+
+function row(depth: number, id: string, key: string | null, iconName: string, label: (Node | string | null)[], opts: RowOpts = {}) {
   const open = key !== null && expanded.has(key);
   const el = h(
     "div",
     {
-      class: `tree-row${opts.connId && opts.connId === selectedId && depth === 0 ? " selected" : ""}`,
+      class: `tree-row${id === cursor ? " selected" : ""}`,
       style: `padding-left:${depth * 14 + 4}px`,
       title: opts.title,
       onclick: (e: MouseEvent) => {
-        if (e.detail === 2 && opts.onOpen) return opts.onOpen();
+        if (e.detail > 1) return;
+        cursor = id;
         if (opts.connId) selectedId = opts.connId;
-        if (key !== null) open ? expanded.delete(key) : expanded.add(key);
-        renderTree();
+        treeEl.focus();
+        if (key !== null && (e.target as HTMLElement).classList.contains("twisty")) {
+          open ? expanded.delete(key) : expanded.add(key);
+          return renderTree();
+        }
+        // Select in place: re-rendering here would swap the row out from under a double-click.
+        for (const r of rowList) r.el.classList.toggle("selected", r.id === id);
       },
-      oncontextmenu: opts.onMenu,
+      ondblclick: (e: MouseEvent) => {
+        e.preventDefault();
+        cursor = id;
+        if (opts.onOpen) opts.onOpen();
+        else if (key !== null) {
+          open ? expanded.delete(key) : expanded.add(key);
+          renderTree();
+        }
+      },
+      oncontextmenu: (e: MouseEvent) => {
+        cursor = id;
+        if (opts.connId) selectedId = opts.connId;
+        renderTree();
+        const items = opts.menu?.();
+        if (items) contextMenu(e, items);
+      },
     },
     h("span", { class: `twisty codicon ${key === null ? "" : open ? "codicon-chevron-down" : "codicon-chevron-right"}` }),
     icon(iconName, "file-icon"),
     ...label,
   );
+  rowList.push({ id, el, key, opts });
   return el;
 }
 
-function connMenu(e: MouseEvent, c: Conn) {
+treeEl.addEventListener("keydown", (e) => {
+  const i = rowList.findIndex((r) => r.id === cursor);
+  const cur = rowList[i];
+  const move = (j: number) => {
+    const next = rowList[Math.max(0, Math.min(rowList.length - 1, j))];
+    if (!next) return;
+    cursor = next.id;
+    if (next.opts.connId) selectedId = next.opts.connId;
+    renderTree();
+  };
+  const toggle = (on: boolean) => {
+    if (!cur?.key) return;
+    on ? expanded.add(cur.key) : expanded.delete(cur.key);
+    renderTree();
+  };
+  if (e.key === "ArrowDown" && e.metaKey) cur?.opts.onDdl?.();
+  else if (e.key === "ArrowDown") move(i + 1);
+  else if (e.key === "ArrowUp") move(i - 1);
+  else if (e.key === "ArrowRight") cur?.key && !expanded.has(cur.key) ? toggle(true) : move(i + 1);
+  else if (e.key === "ArrowLeft") cur?.key && expanded.has(cur.key) ? toggle(false) : undefined;
+  else if (e.key === "F4" && cur?.opts.onF4) cur.opts.onF4();
+  else if (e.key === "Enter" || e.key === "F4") cur?.opts.onOpen ? cur.opts.onOpen() : toggle(!expanded.has(cur?.key ?? ""));
+  else return;
+  e.preventDefault();
+  e.stopPropagation();
+});
+
+function connMenu(c: Conn): (MenuItem | null)[] {
   const on = live.has(c.id);
-  contextMenu(e, [
-    on ? { label: "Disconnect", run: () => disconnect(c.id) } : { label: "Connect", run: () => connect(c) },
-    { label: "Open SQL Console", run: () => openConsole(c.id) },
-    on ? { label: "Refresh Schema", run: () => loadSchema(c.id) } : null,
+  return [
+    on ? { label: "Disconnect", icon: "debug-disconnect", run: () => disconnect(c.id) } : { label: "Connect", icon: "plug", run: () => connect(c) },
+    { label: "Open Query Console", icon: "terminal", shortcut: "F4", run: () => openConsole(c.id) },
+    on ? { label: "Refresh", icon: "refresh", run: () => loadSchema(c.id) } : null,
+    { label: "Copy Name", icon: "copy", run: () => navigator.clipboard.writeText(c.name) },
     null,
-    { label: "Edit…", run: () => editConnection(c) },
-    { label: c.readOnly ? "Make Writable…" : "Make Read-only", run: () => toggleReadOnly(c) },
-    { label: "Colour…", run: () => pickColor(c) },
-    c.source === "manual" ? { label: "Remove", run: () => removeConn(c) } : null,
-  ]);
+    { label: "Edit Data Source…", icon: "edit", run: () => editConnection(c) },
+    { label: c.readOnly ? "Make Writable…" : "Make Read-only", icon: c.readOnly ? "unlock" : "lock", run: () => toggleReadOnly(c) },
+    { label: "Colour…", icon: "symbol-color", run: () => pickColor(c) },
+    c.source === "manual" ? { label: "Remove", icon: "trash", run: () => removeConn(c) } : null,
+  ];
+}
+
+function columnIcon(t: TableInfo, col: Column) {
+  if (col.primaryKey) return "key";
+  if (t.foreignKeys.some((f) => f.columns.includes(col.name))) return "references";
+  if (t.indexes.some((i) => i.columns.includes(col.name))) return "list-ordered";
+  return "symbol-field";
 }
 
 function renderTree() {
   const rows: HTMLElement[] = [];
+  rowList = [];
   if (detecting) rows.push(h("div", { class: "db-note" }, icon("loading", "codicon-modifier-spin"), " Reading config/database.yml…"));
   else if (detectError) rows.push(h("div", { class: "db-note db-warn", title: detectError }, icon("warning"), ` ${detectError}`));
   for (const c of conns) {
@@ -601,17 +719,18 @@ function renderTree() {
     rows.push(
       row(
         0,
+        c.id,
         l ? c.id : null,
         busy ? "loading codicon-modifier-spin" : "database",
         [
           tag(c.color),
           h("span", { class: "tree-label" }, c.name),
-          c.readOnly ? roBadge() : null,
+          c.readOnly ? roBadge(c) : null,
           c.unresolved.some((f) => f !== "password") || !c.engine ? h("span", { class: "db-warn", title: `Unresolved in config/database.yml: ${c.unresolved.join(", ")}` }, icon("warning")) : null,
           h("span", { class: "dim db-detail" }, describe(c)),
           l ? h("span", { class: "db-live", title: l.version }) : null,
         ],
-        { connId: c.id, onOpen: () => (l ? undefined : connect(c)), onMenu: (e) => ((selectedId = c.id), renderTree(), connMenu(e, c)), title: c.source === "detected" ? `config/database.yml › ${c.environment}` : "" },
+        { connId: c.id, onOpen: l ? undefined : () => connect(c), onF4: () => openConsole(c.id), menu: () => connMenu(c), title: c.source === "detected" ? `config/database.yml › ${c.environment}` : "" },
       ),
     );
     if (!l || !expanded.has(c.id)) continue;
@@ -620,55 +739,76 @@ function renderTree() {
     else
       for (const s of l.schema.schemas) {
         const sk = `${c.id}|${s.name}`;
-        rows.push(row(1, sk, "symbol-namespace", [h("span", { class: "tree-label" }, s.name), h("span", { class: "dim db-detail" }, String(s.tables.length))], { connId: c.id }));
+        rows.push(
+          row(1, sk, sk, "symbol-namespace", [h("span", { class: "tree-label" }, s.name), h("span", { class: "dim db-detail" }, String(s.tables.length))], {
+            connId: c.id,
+            menu: () => [
+              { label: "Open Query Console", icon: "terminal", run: () => openConsole(c.id) },
+              { label: "Refresh", icon: "refresh", run: () => loadSchema(c.id) },
+              { label: "Copy Name", icon: "copy", run: () => navigator.clipboard.writeText(s.name) },
+            ],
+          }),
+        );
         if (!expanded.has(sk)) continue;
         for (const t of s.tables) {
           const tk = `${sk}|${t.name}`;
           const openData = () => openTable(c.id, s.name, t.name);
+          const openDdl = () => showDdl(c.id, s.name, t);
           rows.push(
-            row(2, tk, t.kind === "view" ? "eye" : "table", [h("span", { class: "tree-label" }, t.name)], {
+            row(2, tk, tk, t.kind === "view" ? "eye" : "table", [h("span", { class: "tree-label" }, t.name), h("span", { class: "dim db-detail" }, `${t.columns.length} columns`)], {
               connId: c.id,
               onOpen: openData,
-              onMenu: (e) =>
-                contextMenu(e, [
-                  { label: "Open Data", run: openData },
-                  { label: "Open SQL Console", run: () => openConsole(c.id) },
-                  { label: "Copy Name", run: () => navigator.clipboard.writeText(t.name) },
-                ]),
+              onDdl: openDdl,
+              menu: () => [
+                { label: "Edit Data", icon: "table", shortcut: "F4", run: openData },
+                { label: "Jump to DDL", icon: "go-to-file", shortcut: "⌘↓", run: openDdl },
+                { label: "Open Query Console", icon: "terminal", run: () => openConsole(c.id) },
+                null,
+                { label: "Refresh", icon: "refresh", run: () => loadSchema(c.id) },
+                { label: "Copy Name", icon: "copy", run: () => navigator.clipboard.writeText(t.name) },
+                { label: "Edit Data Source…", icon: "edit", run: () => editConnection(c) },
+                { label: "Disconnect", icon: "debug-disconnect", run: () => disconnect(c.id) },
+              ],
             }),
           );
           if (!expanded.has(tk)) continue;
           for (const col of t.columns)
             rows.push(
-              row(3, null, col.primaryKey ? "key" : "symbol-field", [
+              row(3, `${tk}|c|${col.name}`, null, columnIcon(t, col), [
                 h("span", { class: "tree-label" }, col.name),
                 h("span", { class: "dim db-detail" }, `${col.dataType}${col.nullable ? "" : " not null"}${col.default !== null ? ` = ${col.default}` : ""}`),
-              ]),
+              ], { connId: c.id, menu: () => [{ label: "Copy Name", icon: "copy", run: () => navigator.clipboard.writeText(col.name) }] }),
             );
-          if (t.indexes.length) {
-            const ik = `${tk}|idx`;
-            rows.push(row(3, ik, "list-tree", [h("span", { class: "tree-label" }, "indexes"), h("span", { class: "dim db-detail" }, String(t.indexes.length))]));
-            if (expanded.has(ik))
-              for (const i of t.indexes)
-                rows.push(row(4, null, "symbol-key", [h("span", { class: "tree-label" }, i.name), h("span", { class: "dim db-detail" }, `(${i.columns.join(", ")})${i.unique ? " unique" : ""}`)]));
-          }
-          if (t.foreignKeys.length) {
-            const fk = `${tk}|fk`;
-            rows.push(row(3, fk, "references", [h("span", { class: "tree-label" }, "foreign keys"), h("span", { class: "dim db-detail" }, String(t.foreignKeys.length))]));
-            if (expanded.has(fk))
+          const pk = t.columns.filter((x) => x.primaryKey);
+          if (pk.length || t.foreignKeys.length) {
+            const kk = `${tk}|keys`;
+            rows.push(row(3, kk, kk, "key", [h("span", { class: "tree-label" }, "keys"), h("span", { class: "dim db-detail" }, String((pk.length ? 1 : 0) + t.foreignKeys.length))]));
+            if (expanded.has(kk)) {
+              if (pk.length) rows.push(row(4, `${kk}|pk`, null, "key", [h("span", { class: "tree-label" }, "primary key"), h("span", { class: "dim db-detail" }, `(${pk.map((x) => x.name).join(", ")})`)]));
               for (const f of t.foreignKeys)
                 rows.push(
-                  row(4, null, "arrow-right", [
+                  row(4, `${kk}|${f.name}`, null, "references", [
                     h("span", { class: "tree-label" }, f.name),
                     h("span", { class: "dim db-detail" }, `(${f.columns.join(", ")}) → ${f.refSchema && f.refSchema !== s.name ? `${f.refSchema}.` : ""}${f.refTable}(${f.refColumns.join(", ")})`),
                   ]),
                 );
+            }
+          }
+          if (t.indexes.length) {
+            const ik = `${tk}|idx`;
+            rows.push(row(3, ik, ik, "list-ordered", [h("span", { class: "tree-label" }, "indexes"), h("span", { class: "dim db-detail" }, String(t.indexes.length))]));
+            if (expanded.has(ik))
+              for (const i of t.indexes)
+                rows.push(row(4, `${ik}|${i.name}`, null, "list-ordered", [h("span", { class: "tree-label" }, i.name), h("span", { class: "dim db-detail" }, `(${i.columns.join(", ")})${i.unique ? " unique" : ""}`)]));
           }
         }
       }
   }
   if (!conns.length && !detecting) rows.push(h("div", { class: "empty" }, "No config/database.yml connections. Add one with +."));
+  const top = treeEl.scrollTop;
   treeEl.replaceChildren(...rows);
+  treeEl.scrollTop = top;
+  rowList.find((x) => x.id === cursor)?.el.scrollIntoView({ block: "nearest" });
 }
 
 const selected = () => (selectedId ? connById(selectedId) : undefined) ?? (conns.length === 1 ? conns[0] : undefined);
@@ -697,14 +837,53 @@ function grid(columns: string[], rows: (string | null)[][], sort?: { col?: strin
   const head = h(
     "tr",
     {},
-    ...columns.map((c) =>
-      h("th", { class: sort ? "db-sortable" : "", onclick: sort ? () => sort.onSort(c) : undefined }, c, sort?.col === c ? icon(sort.desc ? "arrow-down" : "arrow-up") : null),
-    ),
+    ...columns.map((c) => {
+      const th = h(
+        "th",
+        { class: sort ? "db-sortable" : "", title: sort ? `Sort by ${c}` : c, onclick: sort ? () => sort.onSort(c) : undefined },
+        c,
+        sort?.col === c ? icon(sort.desc ? "arrow-down" : "arrow-up") : null,
+      );
+      th.append(resizeHandle(th));
+      return th;
+    }),
   );
-  return h("div", { class: "db-grid-wrap" }, h("table", { class: "db-grid" }, h("thead", {}, head), body));
+  let cell: HTMLTableCellElement | null = null;
+  body.onclick = (e) => {
+    const td = (e.target as HTMLElement).closest("td");
+    if (!td) return;
+    cell?.classList.remove("db-cell-selected");
+    cell = td;
+    td.classList.add("db-cell-selected");
+  };
+  const wrap = h("div", { class: "db-grid-wrap", tabIndex: 0 }, h("table", { class: "db-grid" }, h("thead", {}, head), body));
+  wrap.addEventListener("keydown", (e) => {
+    if (!(e.metaKey && e.key.toLowerCase() === "c") || !cell || window.getSelection()?.toString()) return;
+    const tr = cell.parentElement as HTMLTableRowElement;
+    navigator.clipboard.writeText(rows[tr.sectionRowIndex]?.[cell.cellIndex] ?? "NULL");
+    e.preventDefault();
+  });
+  return wrap;
 }
 
-/// Tabs
+/// Drag handle on a header cell's right edge; the column keeps the width it's dragged to.
+export function resizeHandle(th: HTMLElement) {
+  const handle = h("span", { class: "db-col-resize", title: "Drag to resize" });
+  handle.addEventListener("click", (e) => e.stopPropagation());
+  handle.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const start = e.clientX;
+    const width = th.getBoundingClientRect().width;
+    trackDrag(handle, e, (ev) => {
+      const w = `${Math.max(40, width + ev.clientX - start)}px`;
+      th.style.width = th.style.minWidth = th.style.maxWidth = w;
+    });
+  });
+  return handle;
+}
+
+/// Editor tabs (consoles, table data, DDL), shown in the main editor area like RubyMine
 
 interface DbTab {
   key: string;
@@ -717,48 +896,45 @@ interface DbTab {
 }
 
 const tabs: DbTab[] = [];
-let activeKey: string | null = null;
-const tabStrip = h("div", { class: "db-tabs" });
-const tabBody = h("div", { class: "db-tab-body" });
-const emptyMain = h("div", { class: "empty" }, "Connect to a database, then double-click a table or open a SQL console.");
 
+/// Keeps open editor tabs in step with their data source (name, colour, description) after an edit.
 function renderTabs() {
-  tabStrip.hidden = !tabs.length;
-  emptyMain.hidden = !!tabs.length;
-  tabStrip.replaceChildren(
-    ...tabs.map((t) =>
-      h(
-        "div",
-        { class: `db-tab${t.key === activeKey ? " active" : ""}`, onclick: () => activate(t.key), onauxclick: (e: MouseEvent) => e.button === 1 && closeTab(t) },
-        tag(connById(t.connId)?.color ?? "none"),
-        icon(t.iconName),
-        h("span", {}, t.title()),
-        iconButton("close", "Close", (e) => (e.stopPropagation(), closeTab(t))),
-      ),
-    ),
-  );
-  for (const t of tabs) t.el.hidden = t.key !== activeKey;
+  for (const t of tabs) {
+    const c = connById(t.connId);
+    for (const cls of [...t.el.classList]) if (cls.startsWith("db-head-")) t.el.classList.remove(cls);
+    t.el.classList.add(`db-head-${c?.color ?? "none"}`);
+    retitleViewTab(t.key, t.title(), tabTooltip(t));
+  }
 }
 
+const tabTooltip = (t: DbTab) => {
+  const c = connById(t.connId);
+  return c ? `${t.title()} · ${c.name} (${describe(c)})` : t.title();
+};
+
 function activate(key: string) {
-  activeKey = key;
-  renderTabs();
+  const t = findViewTab(key);
+  if (t) activateEditorTab(t);
 }
 
 function addTab(t: DbTab) {
   tabs.push(t);
-  tabBody.append(t.el);
-  activate(t.key);
+  t.el.classList.add(`db-head-${connById(t.connId)?.color ?? "none"}`);
+  openViewTab(t.key, t.title(), {
+    el: t.el,
+    icon: t.iconName,
+    tooltip: tabTooltip(t),
+    onClose: () => {
+      const i = tabs.indexOf(t);
+      if (i >= 0) tabs.splice(i, 1);
+      t.dispose?.();
+    },
+  });
 }
 
 function closeTab(t: DbTab) {
-  const i = tabs.indexOf(t);
-  if (i < 0) return;
-  tabs.splice(i, 1);
-  t.el.remove();
-  t.dispose?.();
-  if (activeKey === t.key) activeKey = tabs[Math.min(i, tabs.length - 1)]?.key ?? null;
-  renderTabs();
+  const tab = findViewTab(t.key);
+  if (tab) closeEditorTab(tab, true);
 }
 
 function connHeader(id: string) {
@@ -773,7 +949,7 @@ function connHeader(id: string) {
       icon("database"),
       h("strong", {}, c.name),
       h("span", { class: "dim" }, describe(c)),
-      c.readOnly ? roBadge() : null,
+      c.readOnly ? roBadge(c) : null,
       h("span", { class: "spacer" }),
       l ? h("span", { class: "dim" }, l.version) : null,
       connecting.has(id)
@@ -865,6 +1041,31 @@ function openTable(id: string, schema: string, table: string) {
   load();
 }
 
+/// Jump to DDL (⌘↓): the table's definition in a read-only SQL editor tab.
+
+function showDdl(id: string, schema: string, t: TableInfo) {
+  const key = `ddl:${id}:${schema}.${t.name}`;
+  if (tabs.some((x) => x.key === key)) return activate(key);
+  const c = connById(id);
+  const editorEl = h("div", { class: "db-editor db-ddl" });
+  const el = h("div", { class: "db-pane" }, editorEl);
+  const model = monaco.editor.createModel(tableDdl(c ? dialect(c) : "postgres", schema, t), "sql", monaco.Uri.from({ scheme: SQL_SCHEME, path: `/ddl-${++modelSeq}.sql` }));
+  let ed: monaco.editor.IStandaloneCodeEditor | null = null;
+  addTab({
+    key,
+    connId: id,
+    iconName: "symbol-structure",
+    title: () => `${t.name} [DDL]`,
+    el,
+    refresh: () => {},
+    dispose: () => {
+      ed?.dispose();
+      model.dispose();
+    },
+  });
+  ed = monaco.editor.create(editorEl, { model, readOnly: true, automaticLayout: true, minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: setting<number>("editor.fontSize"), fontFamily: setting<string>("editor.fontFamily") });
+}
+
 /// SQL console
 
 let modelSeq = 0;
@@ -884,17 +1085,18 @@ function openConsole(id: string) {
   let message = "";
 
   const limitBox = h("input", { type: "checkbox", checked: setting<boolean>("database.autoLimit") });
-  const runBtn = iconButton("play", "Run statement at caret or selection (⌘↩)", () => run());
+  const runBtn = iconButton("play", "Run statement at caret or selection ⌘↩", () => run());
   const cancelBtn = iconButton("debug-stop", "Cancel", () => {
     cancelled = true;
     invoke("db_cancel", { id }).catch((e) => toast(String(e), "error"));
   });
+  const explainBtn = iconButton("graph", "Explain Plan (EXPLAIN, nothing is executed)", () => explain());
   const csvBtn = h("button", { class: "btn small", onclick: () => current()?.result && exportResult(current()!.result!, "csv") }, "Export CSV");
   const jsonBtn = h("button", { class: "btn small", onclick: () => current()?.result && exportResult(current()!.result!, "json") }, "Export JSON");
   const current = () => outcomes[shown];
 
   const sync = () => {
-    runBtn.disabled = running;
+    runBtn.disabled = explainBtn.disabled = running;
     cancelBtn.disabled = !running;
     const r = current()?.result;
     csvBtn.disabled = jsonBtn.disabled = running || !r?.columns.length;
@@ -971,6 +1173,28 @@ function openConsole(id: string) {
     }
   };
 
+  const explain = async () => {
+    if (running) return;
+    const c = needLive(id);
+    if (!c) return;
+    const sel = ed.getSelection();
+    const stmt = sel && !sel.isEmpty() ? model.getValueInRange(sel) : statementAt(model.getValue(), model.getOffsetAt(ed.getPosition()!), dialect(c))?.text;
+    const sql = stmt ? explainSql(stmt, dialect(c)) : null;
+    if (!sql) return toast("Select a single read statement (SELECT/WITH) for Explain Plan.");
+    running = true;
+    message = "";
+    outcomes = [];
+    shown = 0;
+    renderResults();
+    try {
+      const res = await runBatch(c, [sql], { onResult: (o) => (outcomes.push(o), renderResults()) });
+      message = res.blocked ?? "";
+    } finally {
+      running = false;
+      renderResults();
+    }
+  };
+
   const showHistory = async () => {
     const list = await historyFor(id);
     if (!list.length) return toast("No history for this connection yet.");
@@ -994,6 +1218,7 @@ function openConsole(id: string) {
       { class: "view-toolbar" },
       runBtn,
       cancelBtn,
+      explainBtn,
       h("label", { class: "db-limit", title: "Append LIMIT to SELECTs that have none" }, limitBox, ` Limit ${setting<number>("database.autoLimitRows")}`),
       iconButton("history", "History", showHistory),
       h("span", { class: "spacer" }),
@@ -1006,7 +1231,7 @@ function openConsole(id: string) {
     key,
     connId: id,
     iconName: "terminal",
-    title: () => connById(id)?.name ?? "console",
+    title: () => `console [${connById(id)?.name ?? id}]`,
     el,
     refresh: header.refresh,
     dispose: () => {
@@ -1063,47 +1288,49 @@ monaco.languages.registerCompletionItemProvider("sql", {
   },
 });
 
-/// View
+/// Tool window: docked on the right with a Database stripe button, holding the data-source tree.
 
 export const dbView = h(
   "div",
   { class: "db-view" },
   h(
     "div",
-    { class: "db-side" },
-    h(
-      "div",
-      { class: "view-toolbar" },
-      iconButton("refresh", "Re-read config/database.yml", () => detect()),
-      iconButton("add", "New Connection…", () => editConnection()),
-      iconButton("plug", "Connect", withSelected(connect)),
-      iconButton("debug-disconnect", "Disconnect", withSelected((c) => disconnect(c.id))),
-      iconButton("terminal", "Open SQL Console", withSelected((c) => openConsole(c.id))),
-      iconButton("edit", "Edit Connection…", withSelected(editConnection)),
-    ),
-    treeEl,
+    { class: "view-toolbar" },
+    iconButton("add", "New Data Source…", () => editConnection(), "dbNewConnection"),
+    iconButton("refresh", "Refresh (re-read config/database.yml)", () => detect(), "dbRedetect"),
+    iconButton("plug", "Connect", withSelected(connect)),
+    iconButton("debug-disconnect", "Disconnect", withSelected((c) => disconnect(c.id))),
+    iconButton("terminal", "Open SQL Console", withSelected((c) => openConsole(c.id)), "dbConsole"),
+    iconButton("edit", "Edit Data Source…", withSelected(editConnection)),
   ),
-  h("div", { class: "db-main" }, tabStrip, tabBody, emptyMain),
+  treeEl,
 );
-renderTabs();
 
-bottom.add({ id: "database", title: "Database", icon: "database", el: dbView, onShow: () => void ensureLoaded() });
+rightbar.add({ id: "database", title: "Database", icon: "database", command: "databaseView", el: dbView, onShow: () => void ensureLoaded() });
 
 const needProject = (fn: () => unknown) => () => (state.project ? fn() : toast("Open a folder first."));
 const showPanel = async () => {
-  bottom.show("database");
+  rightbar.show("database");
   await ensureLoaded();
+};
+const fromTree = (fn: (r: RowOpts) => unknown) => () => {
+  const r = rowList.find((x) => x.id === cursor);
+  if (r) fn(r.opts);
 };
 
 commands(
-  { id: "databaseView", title: "View: Database", run: needProject(() => bottom.toggle("database")) },
+  { id: "databaseView", title: "View: Database", run: needProject(() => rightbar.activate("database")) },
+  { id: "dbEditData", title: "Database: Edit Data (selected table)", run: fromTree((r) => r.onOpen?.()) },
+  { id: "dbJumpToDdl", title: "Database: Jump to DDL (selected table)", run: fromTree((r) => r.onDdl?.()) },
   { id: "dbNewConnection", title: "Database: New Connection…", run: needProject(async () => (await showPanel(), editConnection())) },
   { id: "dbRedetect", title: "Database: Re-read config/database.yml", run: needProject(async () => (await showPanel(), detect())) },
   {
     id: "dbConsole",
-    title: "Database: Open SQL Console…",
+    title: "Database: Open Query Console…",
     run: needProject(async () => {
       await showPanel();
+      const c = selected();
+      if (c && treeEl.contains(document.activeElement)) return openConsole(c.id);
       quickPick({
         placeholder: "Open a SQL console for",
         items: conns.map((c) => ({ label: c.name, description: describe(c), detail: live.has(c.id) ? "connected" : "", icon: "database", data: c.id })),

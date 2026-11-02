@@ -154,3 +154,122 @@ describe("export", () => {
     expect(seen[0].content).toContain('"a,b"');
   });
 });
+
+describe("read-only explanation, DDL and explain plan", async () => {
+  const { readOnlyReason, tableDdl, explainSql } = await import("../db");
+  const conn = (over: Partial<Conn>): Conn => ({ ...mergeConnections("/r", [det()], { manual: [], overrides: {} })[0], ...over });
+
+  it("development on this machine is writable; ERB/ENV hosts stay read-only with a reason and the way out", () => {
+    const [local, socket, erb] = mergeConnections("/r", [det({ host: "127.0.0.1" }), det({ environment: "development/primary", host: "/tmp/.s.PGSQL.5432" }), det({ environment: "development/cache", host: "", unresolved: ["host"] })], { manual: [], overrides: {} });
+    expect(local.readOnly).toBe(false);
+    expect(socket.readOnly).toBe(false);
+    expect(erb.readOnly).toBe(true);
+    expect(readOnlyReason(erb)).toMatch(/ERB\/ENV.*couldn't be resolved/);
+    expect(readOnlyReason(erb)).toMatch(/Edit Data Source… and uncheck Read-only/);
+    expect(readOnlyReason(conn({ environment: "test", readOnly: true }))).toMatch(/"test" isn't a development environment/);
+    expect(readOnlyReason(conn({ host: "db.internal", readOnly: true }))).toMatch(/points at db.internal/);
+  });
+
+  const posts = {
+    name: "posts",
+    kind: "table" as const,
+    columns: [
+      { name: "id", dataType: "bigint", nullable: false, default: null, primaryKey: true },
+      { name: "user_id", dataType: "bigint", nullable: true, default: null, primaryKey: false },
+      { name: "title", dataType: "character varying", nullable: false, default: "''::character varying", primaryKey: false },
+    ],
+    indexes: [{ name: "index_posts_on_user_id", columns: ["user_id"], unique: false }],
+    foreignKeys: [{ name: "fk_rails_1", columns: ["user_id"], refSchema: "public", refTable: "users", refColumns: ["id"] }],
+  };
+
+  it("rebuilds DDL from the introspected schema", () => {
+    expect(tableDdl("postgres", "public", posts)).toBe(
+      [
+        'CREATE TABLE "public"."posts" (',
+        '  "id" bigint NOT NULL,',
+        '  "user_id" bigint,',
+        `  "title" character varying NOT NULL DEFAULT ''::character varying,`,
+        '  PRIMARY KEY ("id"),',
+        '  CONSTRAINT "fk_rails_1" FOREIGN KEY ("user_id") REFERENCES "public"."users" ("id")',
+        ");",
+        "",
+        'CREATE INDEX "index_posts_on_user_id" ON "public"."posts" ("user_id");',
+        "",
+      ].join("\n"),
+    );
+    expect(tableDdl("mysql", "app", { ...posts, foreignKeys: [], indexes: [] })).toMatch(/^CREATE TABLE `app`.`posts` \(/);
+    expect(tableDdl("sqlite", "main", { ...posts, foreignKeys: [], indexes: [] })).toMatch(/^CREATE TABLE "posts" \(/);
+  });
+
+  it("explains only single read statements, never with ANALYZE", () => {
+    expect(explainSql("SELECT * FROM posts;", "postgres")).toBe("EXPLAIN SELECT * FROM posts");
+    expect(explainSql("select 1", "sqlite")).toBe("EXPLAIN QUERY PLAN select 1");
+    expect(explainSql("DELETE FROM posts", "postgres")).toBeNull();
+    expect(explainSql("EXPLAIN ANALYZE SELECT 1", "postgres")).toBeNull();
+    expect(explainSql("  ", "postgres")).toBeNull();
+  });
+});
+
+describe("database editor tabs", async () => {
+  const { dbTesting, resizeHandle } = await import("../db");
+  const { state } = await import("../state");
+  const { viewTabs } = await import("./fakeEditor");
+
+  it("recolour and retitle open tabs when the data source is edited", async () => {
+    fake.reset();
+    state.project = { root: "/r", name: "r" } as typeof state.project;
+    fake.handlers.set("db_detect", () => [det()]);
+    fake.handlers.set("db_password_exists", () => false);
+    await dbTesting.ensureLoaded();
+    dbTesting.openConsole("/r::env::development");
+    const [el] = dbTesting.tabEls();
+    expect(el.classList.contains("db-head-none")).toBe(true);
+    await dbTesting.updateConn("/r::env::development", { color: "green" });
+    expect(el.classList.contains("db-head-green")).toBe(true);
+    expect(el.classList.contains("db-head-none")).toBe(false);
+    expect(viewTabs.find((t) => t.key === "console:/r::env::development")?.title).toBe("console [development]");
+    state.project = null;
+  });
+
+  it.each(["pointerup", "pointercancel", "lostpointercapture"])("column resize ends cleanly on %s", (end) => {
+    const th = document.createElement("th");
+    const handle = resizeHandle(th);
+    th.append(handle);
+    handle.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 100 }));
+    expect(document.body.classList.contains("resizing")).toBe(true);
+    handle.dispatchEvent(new MouseEvent("pointermove", { clientX: 160 }));
+    const width = th.style.width;
+    handle.dispatchEvent(new MouseEvent(end));
+    expect(document.body.classList.contains("resizing")).toBe(false);
+    handle.dispatchEvent(new MouseEvent("pointermove", { clientX: 400 }));
+    expect(th.style.width).toBe(width);
+  });
+});
+
+describe("multi-statement strings never run as one read", async () => {
+  const { runBatch, explainSql } = await import("../db");
+  const { classify } = await import("../sqlsafety");
+  const conn = (readOnly: boolean): Conn => ({ ...mergeConnections("/r", [det()], { manual: [], overrides: {} })[0], readOnly });
+  const sneaky = ["SELECT 1; DROP TABLE x", "EXPLAIN SELECT 1; DELETE FROM users", "SELECT 1; SELECT 2"];
+
+  it("classify treats several statements in one string as dangerous, with the worst kind", () => {
+    expect(classify("EXPLAIN SELECT 1; DELETE FROM users")).toMatchObject({ kind: "write", dangerous: true });
+    expect(classify("SELECT 1; DROP TABLE x", "mysql")).toMatchObject({ kind: "ddl", dangerous: true });
+    expect(classify("SELECT 1;")).toEqual({ kind: "read", dangerous: false });
+  });
+
+  it("explain only accepts a single statement", () => {
+    expect(explainSql("SELECT 1; DELETE FROM users", "postgres")).toBeNull();
+    expect(explainSql("EXPLAIN SELECT 1; DELETE FROM users", "postgres")).toBeNull();
+    expect(explainSql("SELECT 1;", "postgres")).toBe("EXPLAIN SELECT 1");
+  });
+
+  it.each(sneaky.flatMap((sql) => [[sql, true], [sql, false]] as [string, boolean][]))("runBatch refuses %j (read-only: %s) before anything reaches db_query", async (sql, readOnly) => {
+    fake.reset();
+    vi.mocked(ask).mockClear();
+    const res = await runBatch(conn(readOnly), [sql], { autoLimit: 100 });
+    expect(res.blocked).toMatch(/one statement at a time/);
+    expect(fake.calls).not.toContain("db_query");
+    expect(ask).not.toHaveBeenCalled();
+  });
+});

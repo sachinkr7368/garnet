@@ -10,7 +10,7 @@ import { createPullRequest, currentLogin, ensureSignedIn, gh, gql, markdownEdito
 import { invoke } from "./ipc";
 import { isTrusted } from "./settings";
 import { root, state } from "./state";
-import { h, icon, iconButton, quickPick, toast } from "./ui";
+import { fileIcon, h, icon, iconButton, quickPick, toast } from "./ui";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -423,7 +423,7 @@ function filesPane(p: PrDetail) {
     return h(
       "div",
       { class: `change-row pr-file git-${f.status === "added" ? "added" : f.status === "removed" ? "deleted" : f.status === "renamed" ? "renamed" : "modified"}${currentFile === f.path ? " selected" : ""}`, style: `padding-left:${6 + depth * 14}px`, title: f.path, onclick: () => showFile(p, f, diffHost) },
-      icon("file"),
+      fileIcon(f.path),
       h("span", { class: "change-name" }, f.path.split("/").pop()!),
       c ? h("span", { class: "gh-badge" }, icon("comment"), ` ${c}`) : null,
       h("span", { class: "pr-stat" }, h("span", { class: "add" }, `+${f.additions}`), " ", h("span", { class: "del" }, `−${f.deletions}`)),

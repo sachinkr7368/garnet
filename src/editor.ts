@@ -14,7 +14,7 @@ import { styleFor } from "./codestyle";
 import { monacoTheme } from "./theme";
 import { globToRegExp, isDarkTheme, loadSettings, onSettingsChange, projectSettingsPath, setting, settingsPath, updateSetting } from "./settings";
 import { basename, rel } from "./state";
-import { h, icon, iconButton, statusSlot, toast } from "./ui";
+import { fileIcon, h, icon, iconButton, statusSlot, tip, toast } from "./ui";
 
 export { monaco };
 
@@ -115,7 +115,7 @@ export interface Target {
 
 export interface Tab {
   path: string;
-  kind: "file" | "diff";
+  kind: "file" | "diff" | "view";
   title: string;
   model: monaco.editor.ITextModel;
   original?: monaco.editor.ITextModel;
@@ -126,6 +126,8 @@ export interface Tab {
   readonly?: boolean;
   key?: string;
   label?: string;
+  /// Non-text editor tab (database console, table data): its element is shown in the editor area.
+  view?: { el: HTMLElement; icon: string; tooltip?: string; onClose?: () => void; onActivate?: () => void };
 }
 
 class Emitter<T> {
@@ -203,6 +205,49 @@ export const editor = monaco.editor.create(editorEl, {
   model: null,
 });
 
+/// Monaco's own defaults on keys Garnet's RubyMine keymap owns. Garnet's capture-phase handler wins anyway;
+/// unbinding them keeps Monaco from acting if focus is somewhere the handler lets through.
+export const MONACO_CONFLICTS: Record<string, string> = {
+  "alt+f12": "editor.action.peekDefinition",
+  f1: "editor.action.quickCommand",
+  f2: "editor.action.rename",
+  f7: "editor.action.accessibleDiffViewer.next",
+  "shift+f7": "editor.action.accessibleDiffViewer.prev",
+  f8: "editor.action.marker.nextInFiles",
+  "shift+f8": "editor.action.marker.prevInFiles",
+  f12: "editor.action.revealDefinition",
+  "cmd+f12": "editor.action.goToImplementation",
+  "cmd+shift+o": "editor.action.quickOutline",
+  "cmd+d": "editor.action.addSelectionToNextFindMatch",
+  "cmd+l": "expandLineSelection",
+  "cmd+e": "actions.findWithSelection",
+  "cmd+shift+k": "editor.action.deleteLines",
+  "ctrl+g": "editor.action.gotoLine",
+  "alt+up": "editor.action.moveLinesUpAction",
+  "alt+down": "editor.action.moveLinesDownAction",
+  "alt+shift+up": "editor.action.copyLinesUpAction",
+  "alt+shift+down": "editor.action.copyLinesDownAction",
+};
+
+/// Garnet keystroke ("cmd+shift+o") → Monaco keybinding number, or null for keys Monaco can't express.
+export function monacoKeybinding(key: string): number | null {
+  const parts = key.split("+");
+  const name = parts.pop()!;
+  const mods: Record<string, number> = { cmd: monaco.KeyMod.CtrlCmd, ctrl: monaco.KeyMod.WinCtrl, alt: monaco.KeyMod.Alt, shift: monaco.KeyMod.Shift };
+  const named: Record<string, string> = { up: "UpArrow", down: "DownArrow", left: "LeftArrow", right: "RightArrow", enter: "Enter", escape: "Escape", backspace: "Backspace", tab: "Tab", space: "Space", "[": "BracketLeft", "]": "BracketRight", "/": "Slash", ",": "Comma", ".": "Period" };
+  const codeName = /^f\d+$/.test(name) ? name.toUpperCase() : /^[a-z]$/.test(name) ? `Key${name.toUpperCase()}` : /^\d$/.test(name) ? `Digit${name}` : named[name];
+  const code = codeName ? (monaco.KeyCode as unknown as Record<string, number>)[codeName] : undefined;
+  if (code === undefined || parts.some((m) => !(m in mods))) return null;
+  return parts.reduce((acc, m) => acc | mods[m], code);
+}
+
+monaco.editor.addKeybindingRules(
+  Object.entries(MONACO_CONFLICTS).flatMap(([key, command]) => {
+    const keybinding = monacoKeybinding(key);
+    return keybinding === null ? [] : [{ keybinding, command: `-${command}` }];
+  }),
+);
+
 let diffEditor: monaco.editor.IStandaloneDiffEditor | null = null;
 const diffOptions = () => ({
   renderSideBySide: setting<boolean>("diff.sideBySide"),
@@ -226,8 +271,8 @@ const diffBar = h(
   { class: "diff-bar view-toolbar" },
   diffLabel,
   h("span", { class: "spacer" }),
-  iconButton("arrow-up", "Previous Difference (⇧F7)", () => goToDiff("previous")),
-  iconButton("arrow-down", "Next Difference (F7)", () => goToDiff("next")),
+  iconButton("arrow-up", "Previous Difference", () => goToDiff("previous"), "diffPrev"),
+  iconButton("arrow-down", "Next Difference", () => goToDiff("next"), "stepInto"),
   iconButton("split-horizontal", "Side-by-side / Unified", () => updateSetting("diff.sideBySide", !setting("diff.sideBySide"))),
   iconButton("fold", "Collapse Unchanged Regions", () => updateSetting("diff.collapseUnchanged", !setting("diff.collapseUnchanged"))),
 );
@@ -235,6 +280,36 @@ diffBar.hidden = true;
 diffEl.before(diffBar);
 
 export const diffActive = () => active?.kind === "diff";
+
+const editorArea = document.getElementById("editor-area")!;
+let placeholder: monaco.editor.ITextModel | null = null;
+
+/// Opens (or focuses) an editor tab that hosts `el` instead of a text model, keyed by `key`.
+export function openViewTab(key: string, title: string, view: NonNullable<Tab["view"]>): Tab {
+  let tab = tabs.find((t) => t.kind === "view" && t.key === key);
+  if (!tab) {
+    // ponytail: one shared empty model keeps Tab.model non-null; view tabs are never dirty or saved.
+    placeholder ??= monaco.editor.createModel("", "plaintext", monaco.Uri.from({ scheme: "garnet-view", path: "/placeholder" }));
+    view.el.classList.add("editor-view");
+    view.el.hidden = true;
+    editorArea.append(view.el);
+    tab = { path: `garnet-view:${key}`, kind: "view", title, model: placeholder, savedVersion: placeholder.getAlternativeVersionId(), viewState: null, el: h("div"), key, view };
+    tabs.push(tab);
+    events.tabsChanged.fire();
+  }
+  activate(tab);
+  return tab;
+}
+
+export function retitleViewTab(key: string, title: string, tooltip?: string) {
+  const tab = tabs.find((t) => t.kind === "view" && t.key === key);
+  if (!tab || (tab.title === title && (tooltip === undefined || tab.view!.tooltip === tooltip))) return;
+  tab.title = title;
+  if (tooltip !== undefined) tab.view!.tooltip = tooltip;
+  renderTabs();
+}
+
+export const findViewTab = (key: string) => tabs.find((t) => t.kind === "view" && t.key === key);
 export function goToDiff(target: "next" | "previous") {
   if (!diffEditor || !diffActive()) return;
   diffEditor.goToDiff(target);
@@ -261,8 +336,8 @@ monaco.editor.registerEditorOpener({
   },
 });
 
-const cursorSlot = statusSlot("cursor", "right");
-const langSlot = statusSlot("language", "right");
+const cursorSlot = statusSlot("cursor", "right", undefined, "Line:column", "goToLine");
+const langSlot = statusSlot("language", "right", undefined, "File type");
 editor.onDidChangeCursorPosition((e) => {
   cursorSlot.textContent = `${e.position.lineNumber}:${e.position.column}`;
 });
@@ -461,6 +536,7 @@ export function reveal(target: Target) {
 }
 
 function saveViewState(tab: Tab) {
+  if (tab.kind === "view") return;
   tab.viewState = tab.kind === "file" ? editor.saveViewState() : (diffEditor?.saveViewState() ?? null);
 }
 
@@ -480,7 +556,14 @@ export function activate(tab: Tab | null) {
   welcomeEl.hidden = !!tab;
   editorEl.hidden = tab?.kind !== "file";
   diffEl.hidden = diffBar.hidden = tab?.kind !== "diff";
-  if (tab?.kind === "file") {
+  for (const t of tabs) if (t.view) t.view.el.hidden = t !== tab;
+  if (tab?.kind === "view") {
+    // Detach the hidden main editor so editor commands and Save All can't touch the last file behind the view.
+    editor.setModel(null);
+    langSlot.textContent = "";
+    cursorSlot.textContent = "";
+    tab.view!.onActivate?.();
+  } else if (tab?.kind === "file") {
     editor.setModel(tab.model);
     if (tab.viewState) editor.restoreViewState(tab.viewState as monaco.editor.ICodeEditorViewState);
     editor.focus();
@@ -518,7 +601,10 @@ export async function closeTab(tab: Tab, force = false): Promise<boolean> {
   if (i < 0) return true;
   tabs.splice(i, 1);
   tab.original?.dispose();
-  if (modelUsers(tab.model) === 0) {
+  if (tab.view) {
+    tab.view.el.remove();
+    tab.view.onClose?.();
+  } else if (modelUsers(tab.model) === 0) {
     events.modelClosed.fire(tab.model);
     tab.model.dispose();
   }
@@ -554,6 +640,7 @@ function cleanupOnSave(tab: Tab) {
 }
 
 export async function save(tab: Tab): Promise<boolean> {
+  if (tab.kind === "view") return true;
   if (tab.kind === "file" && tab === active && setting("editor.formatOnSave") && tab.model.getLanguageId() === "ruby") {
     await editor.getAction("editor.action.formatDocument")?.run().catch(() => {});
   }
@@ -584,7 +671,28 @@ window.addEventListener("blur", () => {
 export const saveActive = () => active && save(active);
 export const saveAll = () => Promise.all(tabs.filter(isDirty).map(save));
 export const closeActive = () => active && closeTab(active);
-export const activeTab = () => active;
+/// The active file or diff tab; view tabs (database console, table data, DDL) have no file path, see activeViewTab().
+export const activeTab = () => (active?.kind === "view" ? null : active);
+export const activeViewTab = () => (active?.kind === "view" ? active : null);
+
+/// The Monaco editor that should receive editor commands: the one with keyboard focus (a SQL console, a diff side,
+/// the main editor), else the main editor when a file tab is showing; null when nothing editable is showing.
+export function targetEditor(): monaco.editor.ICodeEditor | null {
+  const focused = monaco.editor.getEditors().find((e) => e.hasTextFocus());
+  if (focused) return focused;
+  return active?.kind === "file" ? editor : null;
+}
+
+/// Puts focus back in what the active tab shows: the main editor, the diff, or a view tab's own editor/element.
+export function focusActiveTab() {
+  if (!active) return;
+  if (active.kind === "file") return editor.focus();
+  if (active.kind === "diff") return diffEditor?.getModifiedEditor().focus();
+  const el = active.view!.el;
+  const inner = monaco.editor.getEditors().find((e) => el.contains(e.getContainerDomNode()));
+  if (inner) return inner.focus();
+  el.querySelector<HTMLElement>("input, textarea, [tabindex]")?.focus();
+}
 export const allTabs = () => [...tabs];
 
 export function cycleTab(delta: number) {
@@ -651,7 +759,7 @@ function renderTabs() {
         "div",
         {
           class: `tab${t === active ? " active" : ""}${dirty ? " dirty" : ""}`,
-          title: rel(t.path),
+          title: t.view ? (t.view.tooltip ?? t.title) : rel(t.path),
           onmousedown: (e: MouseEvent) => {
             if (e.button === 1) {
               e.preventDefault();
@@ -659,14 +767,14 @@ function renderTabs() {
             } else if (e.button === 0) activate(t);
           },
         },
-        icon(t.kind === "diff" ? "diff" : "file", `lang-${t.model.getLanguageId()}`),
+        t.view ? icon(t.view.icon, "view-tab-icon") : t.kind === "diff" ? icon("diff", `lang-${t.model.getLanguageId()}`) : fileIcon(t.path, `lang-${t.model.getLanguageId()}`),
         h("span", { class: "tab-title" }, t.title),
         (names.get(t.title) ?? 0) > 1 && parent ? h("span", { class: "tab-desc" }, parent) : null,
         h(
           "button",
           {
             class: "tab-close",
-            title: "Close (⌘W)",
+            title: tip("Close", "closeTab"),
             onmousedown: (e: MouseEvent) => e.stopPropagation(),
             onclick: (e: MouseEvent) => (e.stopPropagation(), closeTab(t)),
           },

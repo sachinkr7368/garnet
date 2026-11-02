@@ -1,5 +1,5 @@
 import { setting } from "./settings";
-import { quickPick } from "./ui";
+import { quickPick, setShortcutResolver } from "./ui";
 
 export interface Command {
   id: string;
@@ -105,6 +105,11 @@ export const keyLabel = (c: Command) => {
   return k ? formatKey(k) : "";
 };
 
+setShortcutResolver((id) => {
+  const k = keysFor(id)[0];
+  return k ? formatKey(k) : "";
+});
+
 let capturing: ((key: string) => void) | null = null;
 export function captureNextKey(fn: (key: string) => void) {
   capturing = fn;
@@ -149,10 +154,19 @@ export function installKeyHandler() {
   );
 }
 
+const CATEGORY_ICONS: Record<string, string> = {
+  File: "file", Window: "window", Preferences: "settings-gear", Help: "question", Navigate: "arrow-right", Find: "search", Code: "code",
+  Refactor: "lightbulb", Edit: "edit", View: "layout", VCS: "source-control", Diff: "diff", Run: "play", Debug: "debug-alt", Test: "beaker",
+  Rails: "ruby", "Ruby LSP": "ruby", Database: "database", GitHub: "github", Terminal: "terminal",
+};
+
+/// Icon for a command in Find Action / Search Everywhere, from its "Category: Action" title.
+export const commandIcon = (c: Command) => CATEGORY_ICONS[c.title.split(":")[0]] ?? "zap";
+
 export function showPalette() {
   quickPick({
     placeholder: "Type a command",
-    items: allCommands().map((c) => ({ label: c.title, detail: keyLabel(c), data: c.id })),
+    items: allCommands().map((c) => ({ label: c.title, detail: keyLabel(c), icon: commandIcon(c), data: c.id })),
     onAccept: (item) => item && runCommand(item.data as string),
   });
 }

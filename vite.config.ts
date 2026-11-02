@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   clearScreen: false,
@@ -12,4 +12,10 @@ export default defineConfig({
     chunkSizeWarningLimit: 10000,
   },
   worker: { format: "es" },
+  test: {
+    environment: "jsdom",
+    include: ["src/**/*.test.ts"],
+    setupFiles: ["src/test/setup.ts"],
+    css: false,
+  },
 });

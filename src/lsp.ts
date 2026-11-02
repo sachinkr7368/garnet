@@ -164,13 +164,9 @@ function onEvent(ev: RpcEvent) {
 
 /// Failure notification with the real reason; never runs bundle install by itself.
 function reportFailure(d: LspDiagnosis, title: string) {
-  const actions = [
-    d.fix === "installRubyLsp"
-      ? { label: "Install ruby-lsp", run: installLsp }
-      : { label: "Run bundle install in terminal", run: bundleInstall },
-    { label: "Show Log", run: () => bottom.show("log") },
-    { label: "Restart", run: () => startLsp() },
-  ];
+  const fix =
+    d.fix === "installRubyLsp" ? { label: "Install ruby-lsp", run: installLsp } : d.fix === "installRuby" ? null : { label: "Run bundle install in terminal", run: bundleInstall };
+  const actions = [...(fix ? [fix] : []), { label: "Show Log", run: () => bottom.show("log") }, { label: "Restart", run: () => startLsp() }];
   toast(`${title}: ${d.reason}`, "error", actions);
 }
 

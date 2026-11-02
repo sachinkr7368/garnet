@@ -216,7 +216,7 @@ async function uiChecks(check: (n: string, ok: boolean | string) => void) {
   check("default run configurations", names.includes("Rails server") && names.includes("Rails console") || names.join(","));
   const stored = JSON.parse((await api.configRead("run-configs.json")) ?? "{}")[state.project!.root];
   const sharedNames = configList().filter((c) => c.shared).map((c) => c.name);
-  check("run configurations stored in Garnet's config dir", !!stored && stored.configurations.length + sharedNames.length === names.length);
+  check("run configurations stored in Garnet's config dir", (stored?.configurations.length ?? 0) + sharedNames.length === names.length || JSON.stringify({ stored, sharedNames, names }));
   editConfigurations();
   check("run configuration dialog lists configs", overlay.querySelectorAll(".rc-item").length === names.length);
   check("run configuration dialog offers Store as project file", [...overlay.querySelectorAll(".rc-check")].some((l) => l.textContent?.includes("Store as project file")));

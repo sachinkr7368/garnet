@@ -16,6 +16,11 @@ describe("ruby-lsp failure diagnosis", () => {
     expect(diagnose(["Could not find gem 'pg' in any of the gem sources listed in your Gemfile."], 1).reason).toBe("Missing gems (pg): run bundle install");
   });
 
+  it("reads ruby-lsp's launcher telemetry when it falls back to running without the bundle", () => {
+    const msg = "Your bundle is locked to garnet-missing-gem-xyz (9.9.9) from rubygems repository https://rubygems.org/ or installed locally, but that version can no longer be found in that source.";
+    expect(diagnose([msg], null)).toEqual({ reason: "Missing gems (garnet-missing-gem-xyz): run bundle install", fix: "bundleInstall" });
+  });
+
   it("reports a missing ruby-lsp for the selected Ruby", () => {
     for (const line of ["rbenv: ruby-lsp: command not found", "mise ERROR No such command: ruby-lsp", "unknown command: ruby-lsp. Perhaps you have to reshim?"])
       expect(diagnose([line], 127), line).toEqual({ reason: "ruby-lsp is not installed for this Ruby", fix: "installRubyLsp" });

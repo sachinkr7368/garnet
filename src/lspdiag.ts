@@ -18,8 +18,8 @@ export function pushLine(buf: string[], line: string) {
 const RULES: [RegExp, (m: RegExpMatchArray) => LspDiagnosis][] = [
   [/invalid option: --use-launcher|unrecognized option.*--use-launcher/, () => ({ reason: "this ruby-lsp is too old for launcher mode", fix: "noLauncher" })],
   [
-    /Could not find (?:gem )?'?([\w.-]+?)(?:-\d[\w.]*)?'? in (?:locally installed gems|any of the (?:gem )?sources)|Bundler::GemNotFound|following gems are missing|Install missing gems with `bundle install`/,
-    (m) => ({ reason: `Missing gems${m[1] ? ` (${m[1]})` : ""}: run bundle install`, fix: "bundleInstall" }),
+    /Could not find (?:gem )?'?([\w.-]+?)(?:-\d[\w.]*)?'? in (?:locally installed gems|any of the (?:gem )?sources)|Your bundle is locked to ([\w.-]+) \(|Bundler::GemNotFound|following gems are missing|Install missing gems with `bundle install`/,
+    (m) => ({ reason: `Missing gems${m[1] ?? m[2] ? ` (${m[1] ?? m[2]})` : ""}: run bundle install`, fix: "bundleInstall" }),
   ],
   [/Your Ruby version is ([\d.]+), but your Gemfile specified ([\d.~> ]+)/, (m) => ({ reason: `Ruby ${m[1]} does not match the Gemfile (${m[2].trim()})`, fix: "installRuby" })],
   [

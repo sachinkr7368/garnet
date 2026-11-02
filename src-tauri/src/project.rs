@@ -132,6 +132,20 @@ pub fn uptime_ms() -> u128 {
     STARTED.get().map(|t| t.elapsed().as_millis()).unwrap_or(0)
 }
 
+static SMOKE_LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Writes the report so far, so a smoke run that hangs or is killed still leaves what it checked.
+#[tauri::command]
+pub fn smoke_progress(report: String, step: String) -> Result<(), String> {
+    let path = std::env::var("GARNET_SMOKE").map_err(e2s)?;
+    if !step.is_empty() {
+        eprintln!("smoke: {:>7} ms  {step}", uptime_ms());
+    }
+    std::fs::write(path, &report).map_err(e2s)?;
+    *SMOKE_LAST.lock().unwrap() = report;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn smoke_finish(app: AppHandle, report: String) -> Result<(), String> {
     let path = std::env::var("GARNET_SMOKE").map_err(e2s)?;
@@ -140,9 +154,70 @@ pub fn smoke_finish(app: AppHandle, report: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Smoke mode only: `GARNET_SMOKE_TIMEOUT` seconds (default 900) after launch, writes the last progress report with a
+/// `timeout` check naming the step it stopped in, and quits.
+pub fn smoke_watchdog(app: AppHandle) {
+    let Ok(path) = std::env::var("GARNET_SMOKE") else { return };
+    let secs = std::env::var("GARNET_SMOKE_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(900u64);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(secs));
+        let report = timed_out_report(&SMOKE_LAST.lock().unwrap(), secs);
+        eprintln!("smoke: timed out after {secs}s");
+        let _ = std::fs::write(path, report);
+        app.exit(2);
+    });
+}
+
+fn timed_out_report(last: &str, secs: u64) -> String {
+    let mut v: serde_json::Value = serde_json::from_str(last).unwrap_or_else(|_| serde_json::json!({ "checks": {} }));
+    let step = v.get("step").and_then(|s| s.as_str()).unwrap_or("startup, before the frontend reported").to_string();
+    if !v.get("checks").is_some_and(|c| c.is_object()) {
+        v["checks"] = serde_json::json!({});
+    }
+    v["checks"]["timeout"] = format!("did not finish within {secs}s; stopped in: {step}").into();
+    serde_json::to_string_pretty(&v).unwrap_or_default()
+}
+
+/// The main window from tauri.conf.json. A smoke run keeps its webview running while the window is hidden or behind
+/// other windows; WebKit's default suspends timers there and the run stalls until someone looks at it.
+pub fn main_window(mut window: tauri::utils::config::WindowConfig, smoke: bool) -> tauri::utils::config::WindowConfig {
+    if smoke {
+        window.background_throttling = Some(tauri::utils::config::BackgroundThrottlingPolicy::Disabled);
+    }
+    window
+}
+
+/// Smoke mode only: CSV/JSON exports skip the save dialog and go next to the report. Inert without `GARNET_SMOKE`.
+pub fn smoke_export_path(ext: &str) -> Option<PathBuf> {
+    std::env::var_os("GARNET_SMOKE").map(|r| PathBuf::from(format!("{}.export.{ext}", r.to_string_lossy())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timed_out_report_keeps_checks_and_names_the_step() {
+        let r: serde_json::Value = serde_json::from_str(&timed_out_report(r#"{"step":"lsp","checks":{"a":true}}"#, 60)).unwrap();
+        assert_eq!(r["checks"]["a"], true);
+        assert_eq!(r["checks"]["timeout"], "did not finish within 60s; stopped in: lsp");
+        let r: serde_json::Value = serde_json::from_str(&timed_out_report("", 5)).unwrap();
+        assert!(r["checks"]["timeout"].as_str().unwrap().contains("before the frontend reported"));
+    }
+
+    #[test]
+    fn smoke_window_is_never_throttled_and_normal_window_keeps_the_default() {
+        use tauri::utils::config::{BackgroundThrottlingPolicy, WindowConfig};
+        assert!(matches!(main_window(WindowConfig::default(), true).background_throttling, Some(BackgroundThrottlingPolicy::Disabled)));
+        assert!(main_window(WindowConfig::default(), false).background_throttling.is_none());
+    }
+
+    #[test]
+    fn smoke_export_path_is_inert_without_smoke_env() {
+        if std::env::var_os("GARNET_SMOKE").is_none() {
+            assert!(smoke_export_path("csv").is_none());
+        }
+    }
 
     #[test]
     fn config_names_cannot_escape_the_config_dir() {

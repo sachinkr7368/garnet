@@ -65,6 +65,27 @@ GARNET_SMOKE=/tmp/report.json GARNET_SMOKE_DEBUG=1 \
 cat /tmp/report.json
 ```
 
+The harness ships in release builds, so the same command verifies a CI-built or
+installed app: unpack `Garnet_universal.app.tar.gz` from the release (or use
+`/Applications/Garnet.app`) and run its `Contents/MacOS/garnet` binary. Only
+the `GARNET_SMOKE*` variables switch it on; without them none of it runs.
+
+- In smoke mode the webview is never throttled, so the run keeps going when
+  its window is hidden or behind other windows (WebKit suspends a hidden page's
+  timers by default; v0.2.0 and older stall there unless the window stays visible).
+- The report is rewritten after every check, and each step is logged to stderr
+  with its time (`smoke: 14870 ms  database`), so a run that is killed still
+  leaves what it checked.
+- `GARNET_SMOKE_TIMEOUT=<seconds>` (default 900): when the run has not finished
+  by then, the app adds a `timeout` check naming the step it stopped in, writes
+  the report and quits. Keep it below any outer timeout you wrap the run in.
+- A check passes when its value is `true`; anything else is the failure detail,
+  or `skipped: …` when the machine can't run it (no Docker, not signed in).
+- Smoke-only hooks: CSV/JSON exports skip the save dialog and are written to
+  `<report>.export.csv` (Rust, only when `GARNET_SMOKE` is set), and the SQL
+  console's dangerous-statement confirmation is answered by `dbSmokeHooks.ask`
+  in `src/db.ts`, which only `src/smoke.ts` sets.
+
 `GARNET_SMOKE_DEBUG=1` also starts the Rails server under rdbg, sets a
 breakpoint in `PostsController#index`, requests `/posts` and checks that the
 request pauses there, evaluates an expression and completes after resuming.
@@ -72,6 +93,15 @@ Use a throwaway app (`rails new blog && bin/rails g scaffold Post title body:tex
 It also runs two copies of `lib/smoke_debug.rb` under the debugger at once and
 checks both pause at the breakpoint on line 5 (which it leaves set, so a second
 smoke run proves breakpoints survive a restart).
+
+The database checks use the app's `config/database.yml` (SQLite `development`
+and `test`, with a `posts` table): they connect, page through 150 temporary rows,
+run console queries, check that `test` blocks writes and that `DROP` asks first
+(answered with Cancel), export CSV, and delete what they added. The Rails tools
+checks list generators, preview `scaffold --pretend` (nothing is created), read
+`db:migrate:status`, open the Rails project view and Cmd+click a partial and an
+i18n key (temporary files, removed afterwards). GitHub checks are read-only: gh
+account detection and, if you are signed in to Garnet, the account name.
 
 The test tree checks expect `spec/calc_spec.rb` (one passing, one failing on
 line 7, one pending example; run with the global `rspec` gem) and

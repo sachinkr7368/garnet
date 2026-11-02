@@ -142,6 +142,9 @@ const isLocal = (c: ConnFields) => c.engine === "sqlite" || isLocalHost(c.host);
 const dialect = (c: Conn): Dialect => c.engine ?? "postgres";
 const KIND_LABEL: Record<Kind, string> = { read: "read", write: "data-modifying", ddl: "schema-changing (DDL)", tx: "transaction control", other: "non-read" };
 
+/// For the smoke script (src/smoke.ts): answers the dangerous-statement confirmation instead of the native dialog.
+export const dbSmokeHooks: { ask?: typeof ask } = {};
+
 export interface Outcome {
   sql: string;
   result?: QueryResult;
@@ -161,7 +164,7 @@ export async function runBatch(
   } else {
     const risky = checks.filter((x) => x.c.dangerous);
     if (risky.length) {
-      const ok = await ask(`Run on "${conn.name}"?\n\n${risky.map((x) => `${x.c.reason}:\n${x.sql}`).join("\n\n")}`, {
+      const ok = await (dbSmokeHooks.ask ?? ask)(`Run on "${conn.name}"?\n\n${risky.map((x) => `${x.c.reason}:\n${x.sql}`).join("\n\n")}`, {
         title: "Dangerous Statement",
         kind: "warning",
         okLabel: "Run",

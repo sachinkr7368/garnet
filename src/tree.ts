@@ -3,7 +3,7 @@ import { handlePathMoved, openFile } from "./editor";
 import { api, type DirEntry } from "./ipc";
 import { globToRegExp, setting } from "./settings";
 import { basename, dirname, rel, state } from "./state";
-import { contextMenu, h, icon, iconButton, inputBox, toast } from "./ui";
+import { contextMenu, fileIcon, h, icon, iconButton, inputBox, toast } from "./ui";
 import { railsTreeEl, refreshRailsTree } from "./railsview";
 
 interface Node {
@@ -69,14 +69,9 @@ function paintRow(node: Node) {
   node.row.className = `tree-row${selected === entry.path ? " selected" : ""}${status ? ` git-${status}` : ""}`;
   node.row.replaceChildren(
     entry.dir ? icon(node.expanded ? "chevron-down" : "chevron-right", "twisty") : h("span", { class: "twisty" }),
-    icon(entry.dir ? (node.expanded ? "folder-opened" : "folder") : "file", `file-icon ${entry.dir ? "dir" : extClass(entry.name)}`),
+    entry.dir ? icon(node.expanded ? "folder-opened" : "folder", "file-icon dir") : fileIcon(entry.name),
     h("span", { class: "tree-label" }, entry.name),
   );
-}
-
-function extClass(name: string) {
-  const m = name.match(/\.([a-z0-9]+)$/i);
-  return m ? `ext-${m[1].toLowerCase()}` : "";
 }
 
 async function loadChildren(node: Node) {

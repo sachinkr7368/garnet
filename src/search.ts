@@ -2,7 +2,7 @@ import { allTabs, editor, monaco, openFile, uriFor } from "./editor";
 import { Channel, invoke } from "./ipc";
 import { editsFor, matchKey, segments, type LineMatch, type ReplaceEdit } from "./replace";
 import { rel } from "./state";
-import { bottom, h, icon, toast } from "./ui";
+import { bottom, fileIcon, h, toast } from "./ui";
 
 type SearchEvent =
   | { type: "file"; path: string; matches: LineMatch[] }
@@ -90,7 +90,7 @@ function fileGroup(path: string, matches: LineMatch[]) {
   const head = h(
     "div",
     { class: "result-file", onclick: () => (list.hidden = !list.hidden) },
-    icon("file"),
+    fileIcon(path),
     h("span", { class: "result-name" }, rel(path).split("/").pop()!),
     h("span", { class: "result-dir" }, rel(path).split("/").slice(0, -1).join("/")),
     h("span", { class: "badge" }, String(matches.length)),
@@ -167,7 +167,7 @@ function replaceGroup(path: string, matches: LineMatch[]): FileResult {
     "div",
     { class: "result-file", onclick: () => (list.hidden = !list.hidden) },
     fileBox,
-    icon("file"),
+    fileIcon(path),
     h("span", { class: "result-name" }, rel(path).split("/").pop()!),
     h("span", { class: "result-dir" }, rel(path).split("/").slice(0, -1).join("/")),
     badge,

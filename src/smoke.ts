@@ -1,7 +1,7 @@
 // End-to-end smoke run: GARNET_SMOKE=<report.json> Garnet.app/Contents/MacOS/garnet <rails-project>
 // Exercises the real UI code paths, measures performance budgets, writes a JSON report and quits.
 import { listen } from "@tauri-apps/api/event";
-import { allCommands, keymap } from "./commands";
+import { allCommands, keymap, runCommand } from "./commands";
 import { importJetBrainsKeymap, jetbrainsKeystroke } from "./keymapref";
 import { breakpointsIn, debugSessions, debugState, evaluate, flushBreakpoints, loadBreakpoints, resume, resumeSession, selectDebugSession, smokeHooks, stopAllSessions, stopDebug, toggleBreakpoint } from "./debug";
 import { rerunFailed, testRunState, testStatusAt } from "./testresults";
@@ -29,7 +29,7 @@ import { loadMigrations } from "./migrations";
 import { railsTreeEl, refreshRailsTree } from "./railsview";
 import { toggleRailsView } from "./tree";
 import { gh, refreshAccount, signIn } from "./github";
-import { bottom } from "./ui";
+import { bottom, rightbar } from "./ui";
 
 type Report = Record<string, unknown> & { checks: Record<string, boolean | string> };
 
@@ -229,7 +229,7 @@ async function uiChecks(check: (n: string, ok: boolean | string) => void) {
   check("keymap page lists actions", overlay.querySelectorAll(".st-key-row").length > 40);
   overlay.replaceChildren();
   const km = keymap();
-  const expect: Record<string, string> = { "cmd+shift+r": "replaceInFiles", "cmd+alt+b": "goToImplementation", "ctrl+shift+b": "goToTypeDefinition", "cmd+e": "recentFiles", "cmd+o": "goToClass", "cmd+shift+o": "goToFile", "ctrl+r": "runSelected", "ctrl+d": "debugSelected", "cmd+shift+k": "push", "cmd+[": "back", "cmd+shift+f8": "viewBreakpoints", "alt+f8": "evaluate", "cmd+shift+a": "commandPalette" };
+  const expect: Record<string, string> = { "cmd+shift+r": "replaceInFiles", "cmd+alt+b": "goToImplementation", "cmd+shift+b": "goToTypeDefinition", "alt+f12": "terminalView", "cmd+s": "saveAll", "cmd+e": "recentFiles", "cmd+o": "goToClass", "cmd+shift+o": "goToFile", "ctrl+r": "runSelected", "ctrl+d": "debugSelected", "cmd+shift+k": "push", "cmd+[": "back", "cmd+shift+f8": "viewBreakpoints", "alt+f8": "evaluate", "cmd+shift+a": "commandPalette" };
   check("JetBrains default keymap", Object.entries(expect).every(([k, id]) => km.get(k) === id) || JSON.stringify(Object.entries(expect).filter(([k, id]) => km.get(k) !== id)));
   const shadowed = allCommands().flatMap((c) => (c.key ?? "").split(" ").filter(Boolean).filter((k) => km.get(k) !== c.id).map((k) => `${k}:${c.id}`));
   check("no conflicting default shortcuts", shadowed.length === 0 || shadowed.join(","));
@@ -600,7 +600,16 @@ type Check = (n: string, ok: boolean | string) => void;
 
 const click = (el: Element | null | undefined, detail = 1) => el?.dispatchEvent(new MouseEvent("click", { bubbles: true, detail }));
 const dbRow = (label: string) => [...document.querySelectorAll<HTMLElement>(".db-tree .tree-row")].find((r) => r.querySelector(".tree-label")?.textContent === label);
-const dbPane = () => [...document.querySelectorAll<HTMLElement>(".db-tab-body > *")].find((p) => !p.hidden && p.offsetParent !== null) ?? null;
+const dblclick = (el: Element | null | undefined) => {
+  click(el);
+  el?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+};
+const dbPane = () => [...document.querySelectorAll<HTMLElement>("#editor-area > .editor-view")].find((p) => !p.hidden && p.offsetParent !== null) ?? null;
+const inside = (el: Element | null, pane: Element | null) => {
+  const a = el?.getBoundingClientRect();
+  const b = pane?.getBoundingClientRect();
+  return !!a && !!b && a.top >= b.top - 1 && a.bottom <= b.bottom + 1;
+};
 
 /// Runs SQL in the visible SQL console the way a user does: text in the editor, selection, Run button.
 async function consoleRun(sql: string) {
@@ -625,12 +634,28 @@ async function databaseChecks(report: Report, check: Check) {
   const prevHistory = await api.configRead("db-history.json");
   const exportPath = `${(await invoke<[string, boolean] | null>("smoke_target"))![0]}.export.csv`;
   try {
-    bottom.show("database");
+    rightbar.show("database");
+    check("db: Database tool window is docked on the right with a stripe button", !!document.querySelector('#rightstrip .dock-tab[data-view="database"]') && !document.getElementById("rightbar")!.hidden && !!document.querySelector("#rightbar .db-view"));
+
+    runCommand("dbNewConnection");
+    const dlg = await until(() => document.querySelector<HTMLElement>(".db-dialog"), 5000);
+    const fields = [...(dlg?.querySelectorAll<HTMLInputElement>("input.search-input") ?? [])];
+    const hit = fields.every((f) => {
+      const r = f.getBoundingClientRect();
+      const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return at === f || f.closest("label")?.contains(at);
+    });
+    check("db: New Connection fields are clickable (hit-test) and the first one has focus", (fields.length >= 4 && hit && document.activeElement === fields[0]) || JSON.stringify({ n: fields.length, hit, active: document.activeElement?.outerHTML.slice(0, 80) }));
+    fields[2]?.focus();
+    check("db: New Connection fields take focus", document.activeElement === fields[2]);
+    dlg?.closest(".qp-backdrop")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    check("db: New Connection closes on Escape", !document.querySelector(".db-dialog"));
+
     const detected = await until(() => dbRow("development")?.textContent?.includes("sqlite storage/development.sqlite3") && dbRow("test"), 15000);
     report.dbConnections = [...document.querySelectorAll(".db-tree .tree-row")].map((r) => r.textContent);
     check("db: development connection detected from config/database.yml", !!detected || JSON.stringify(report.dbConnections));
     if (!detected) return;
-    click(dbRow("development"), 2);
+    dblclick(dbRow("development"));
     const live = await until(() => dbRow("development")?.querySelector(".db-live"), 15000);
     check("db: connect to development (sqlite)", !!live || String(document.querySelector(".toasts")?.textContent));
     if (!live) return;
@@ -639,7 +664,7 @@ async function databaseChecks(report: Report, check: Check) {
     const postsRow = await until(() => dbRow("posts"), 15000);
     check("db: schema lists the posts table", !!postsRow && !!dbRow("schema_migrations") || String(document.querySelector(".db-tree")?.textContent));
 
-    click(postsRow, 2);
+    dblclick(postsRow);
     const range = () => dbPane()?.querySelector(".db-range")?.textContent ?? "";
     const first = await until(() => /^rows 1–100 of 1\d\d$/.test(range()) && range(), 15000);
     check("db: table viewer shows the first page of 100", !!first || range());
@@ -647,10 +672,43 @@ async function databaseChecks(report: Report, check: Check) {
     click(dbPane()?.querySelector('[title="Next page"]'));
     const second = await until(() => range() === `rows 101–${total} of ${total}` && range(), 15000);
     check("db: table viewer pages forward", !!second || range());
+    check("db: table data opens as an editor tab", allTabs().some((t) => t.kind === "view" && t.title === "posts" && t === activeTab()));
 
-    click(dbRow("development"));
-    click(dbRow("development"));
-    click(document.querySelector('.db-view [title="Open SQL Console"]'));
+    const tree = document.querySelector<HTMLElement>(".db-tree")!;
+    for (const name of ["posts", "comments", "schema_migrations", "ar_internal_metadata"]) {
+      const tw = dbRow(name)?.querySelector(".twisty");
+      if (tw && !tw.classList.contains("codicon-chevron-down")) click(tw);
+    }
+    const oldHeight = document.getElementById("rightbar")!.style.height;
+    document.getElementById("rightbar")!.style.height = "220px";
+    const scrollable = await until(() => tree.scrollHeight > tree.clientHeight + 10, 3000);
+    tree.scrollTop = tree.scrollHeight;
+    check("db: tree scrolls and stays inside its tool window", (!!scrollable && tree.scrollTop > 0 && inside(tree, document.getElementById("rightbar"))) || JSON.stringify({ sh: tree.scrollHeight, ch: tree.clientHeight, top: tree.scrollTop }));
+    tree.scrollTop = 0;
+    document.getElementById("rightbar")!.style.height = oldHeight;
+
+    const bottomEl = document.getElementById("bottom")!;
+    const prevBottom = bottomEl.style.height;
+    bottom.show("find");
+    bottomEl.style.height = "5000px";
+    await new Promise((res) => setTimeout(res, 50));
+    const statusTop = document.getElementById("statusbar")!.getBoundingClientRect().top;
+    check(
+      "layout: a tall bottom panel stays above the status bar and the editor area clips its content",
+      (bottomEl.getBoundingClientRect().bottom <= statusTop + 1 && getComputedStyle(document.getElementById("editor-area")!).overflow === "hidden" && getComputedStyle(document.getElementById("welcome")!).overflow === "hidden") ||
+        JSON.stringify({ bottom: bottomEl.getBoundingClientRect().bottom, statusTop }),
+    );
+    bottomEl.style.height = prevBottom;
+    bottom.hide();
+
+    const devRow = dbRow("development")!;
+    devRow.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+    const consoleItem = await until(() => [...document.querySelectorAll<HTMLElement>(".ctx-item")].find((i) => i.textContent?.includes("Query Console")), 3000);
+    check("db: data source context menu has icons and New › Query Console", !!consoleItem && !!consoleItem.querySelector(".codicon:not(.codicon-blank)") || String(document.querySelector(".ctx-menu")?.textContent));
+    consoleItem?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    const fromMenu = await until(() => dbPane()?.classList.contains("db-console") && activeTab()?.title === "console [development]", 5000);
+    check("db: console opens from the context menu as an editor tab", !!fromMenu || String(activeTab()?.title));
+
     const limit = await until(() => dbPane()?.querySelector<HTMLInputElement>(".db-limit input"), 5000);
     if (limit) limit.checked = true;
     await updateSetting("database.autoLimitRows", 7);

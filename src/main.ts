@@ -2,7 +2,7 @@ import "./styles.css";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
-import { allCommands, commands, installKeyHandler, keyLabel, runCommand, showPalette } from "./commands";
+import { allCommands, commandIcon, commands, installKeyHandler, keyLabel, runCommand, showPalette } from "./commands";
 import { attachToProcess, debugView, evaluateSelection, gotoBreakpoint, loadBreakpoints, restartDebug, resume, step, stopAllSessions, stopDebug, toggleBreakpoint, toggleBreakpointEnabled, viewBreakpoints } from "./debug";
 import { rerunAll, rerunFailed, testResultsView } from "./testresults";
 import {
@@ -23,11 +23,11 @@ import { runRailsGenerator } from "./generators";
 import { loadMigrations, migrationsView } from "./migrations";
 import { sendToRailsConsole } from "./railsconsole";
 import { initUpdateCheck } from "./update";
-import { importJetBrainsKeymap, showKeymapReference } from "./keymapref";
+import { importJetBrainsKeymap, showKeymapReference, welcomeHints } from "./keymapref";
 import { editConfigurations, launch, loadRunConfigs, newConfig, pickConfiguration, rakeTask, rerun, runs, runTests, selected } from "./run";
 import { findInFiles, replaceInFiles, searchView } from "./search";
 import { loadCodeStyle } from "./codestyle";
-import { addRecentProject, askTrust, checkTrust, isTrusted, loadSession, trustProject, loadSettings, recentProjects, saveSession, setting, settingsPath, toggleTheme, updateSetting } from "./settings";
+import { addRecentProject, askTrust, checkTrust, isTrusted, loadSession, onSettingsChange, trustProject, loadSettings, recentProjects, saveSession, setting, settingsPath, toggleTheme, updateSetting } from "./settings";
 import { openSettingsWindow } from "./settingsui";
 import { cloneDialog, createGist, createPullRequest, githubSignIn, openOnGitHub, refreshAccount } from "./github";
 import { openPullRequestByNumber, pullRequestsView, showPullRequests } from "./prs";
@@ -35,28 +35,28 @@ import { initToolbar, pullCurrent, pushCurrent, refreshToolbar, showBranches, sh
 import { abs, debounce, rel, state } from "./state";
 import { newTerminal, showTerminalPanel, terminals } from "./terminal";
 import { expandedPaths, initTree, refreshTree, revealInTree, toggleRailsView, treeView } from "./tree";
-import { bottom, fuzzyScore, h, type PickItem, quickPick, setupResizers, sidebar, statusSlot, toast } from "./ui";
+import { bottom, Dock, fileIconName, fuzzyScore, h, type PickItem, quickPick, rightbar, setupResizers, sidebar, statusSlot, toast } from "./ui";
 
 type Json = any;
 const PENDING_ROOT = "open";
 
 /// Tool windows
 
-sidebar.add({ id: "project", title: "Project", icon: "files", el: treeView });
-sidebar.add({ id: "commit", title: "Commit", icon: "source-control", el: commitView, onShow: () => refreshGit() });
-sidebar.add({ id: "structure", title: "Structure", icon: "symbol-structure", el: outlineView });
-sidebar.add({ id: "pullRequests", title: "Pull Requests", icon: "git-pull-request", el: pullRequestsView, onShow: () => showPullRequests() });
+sidebar.add({ id: "project", title: "Project", icon: "files", command: "projectView", el: treeView });
+sidebar.add({ id: "commit", title: "Commit", icon: "source-control", command: "commitView", el: commitView, onShow: () => refreshGit() });
+sidebar.add({ id: "structure", title: "Structure", icon: "symbol-structure", command: "structureView", el: outlineView });
+sidebar.add({ id: "pullRequests", title: "Pull Requests", icon: "git-pull-request", command: "githubPullRequests", el: pullRequestsView, onShow: () => showPullRequests() });
 
-bottom.add({ id: "terminal", title: "Terminal", icon: "terminal", el: terminals.el, onShow: showTerminalPanel });
-bottom.add({ id: "run", title: "Run", icon: "play", el: runs.el, onShow: () => runs.fitActive() });
-bottom.add({ id: "tests", title: "Test Results", icon: "beaker", el: testResultsView });
-bottom.add({ id: "find", title: "Find", icon: "search", el: searchView });
-bottom.add({ id: "problems", title: "Problems", icon: "warning", el: problemsView });
-bottom.add({ id: "debug", title: "Debug", icon: "debug-alt", el: debugView });
-bottom.add({ id: "gitlog", title: "Git", icon: "git-commit", el: gitLogView, onShow: () => reloadGitLog() });
-bottom.add({ id: "routes", title: "Routes", icon: "globe", el: routesView });
-bottom.add({ id: "migrations", title: "Migrations", icon: "versions", el: migrationsView, onShow: () => loadMigrations() });
-bottom.add({ id: "log", title: "LSP Log", icon: "output", el: lspLogView });
+bottom.add({ id: "terminal", title: "Terminal", icon: "terminal", command: "terminalView", el: terminals.el, onShow: showTerminalPanel });
+bottom.add({ id: "run", title: "Run", icon: "play", command: "runView", el: runs.el, onShow: () => runs.fitActive() });
+bottom.add({ id: "tests", title: "Test Results", icon: "beaker", command: "testResultsView", el: testResultsView });
+bottom.add({ id: "find", title: "Find", icon: "search", command: "findView", el: searchView });
+bottom.add({ id: "problems", title: "Problems", icon: "warning", command: "problemsView", el: problemsView });
+bottom.add({ id: "debug", title: "Debug", icon: "debug-alt", command: "debugView", el: debugView });
+bottom.add({ id: "gitlog", title: "Git", icon: "git-commit", command: "gitLogView", el: gitLogView, onShow: () => reloadGitLog() });
+bottom.add({ id: "routes", title: "Routes", icon: "globe", command: "routesView", el: routesView });
+bottom.add({ id: "migrations", title: "Migrations", icon: "versions", command: "migrationsView", el: migrationsView, onShow: () => loadMigrations() });
+bottom.add({ id: "log", title: "LSP Log", icon: "output", command: "lspLog", el: lspLogView });
 bottom.hide();
 setupResizers();
 
@@ -69,7 +69,7 @@ function goToFile() {
   quickPick({
     placeholder: "Go to file (fuzzy, e.g. usrctl for users_controller.rb)",
     items: async (q) =>
-      (await api.findFiles(q, 80)).map((p) => ({ label: p.split("/").pop()!, description: p.split("/").slice(0, -1).join("/"), icon: "file", data: p })),
+      (await api.findFiles(q, 80)).map((p) => ({ label: p.split("/").pop()!, description: p.split("/").slice(0, -1).join("/"), icon: fileIconName(p), data: p })),
     onAccept: (item, q) => {
       if (!item) return;
       const line = q.match(/:(\d+)$/)?.[1];
@@ -109,7 +109,7 @@ function pickPaths(placeholder: string, paths: string[], selectedIndex = 0) {
   quickPick({
     placeholder,
     selected: selectedIndex,
-    items: paths.map((p) => ({ label: p.split("/").pop()!, description: rel(p), icon: "file", data: p })),
+    items: paths.map((p) => ({ label: p.split("/").pop()!, description: rel(p), icon: fileIconName(p), data: p })),
     onAccept: (item) => item && openFile(item.data as string),
   });
 }
@@ -130,7 +130,7 @@ function searchEverywhere() {
   quickPick({
     placeholder: "Search everywhere: files, actions, symbols",
     items: async (q): Promise<PickItem[]> => {
-      if (!q.trim()) return recentFileList().slice(0, 20).map((p) => ({ label: p.split("/").pop()!, description: rel(p), icon: "file", data: { file: p } }));
+      if (!q.trim()) return recentFileList().slice(0, 20).map((p) => ({ label: p.split("/").pop()!, description: rel(p), icon: fileIconName(p), data: { file: p } }));
       const [files, symbols] = await Promise.all([
         api.findFiles(q, 30),
         lspReady() ? request<Json[] | null>("workspace/symbol", { query: q }).catch(() => null) : Promise.resolve(null),
@@ -141,9 +141,9 @@ function searchEverywhere() {
         .sort((a, b) => b.s! - a.s!)
         .slice(0, 8);
       return [
-        ...files.map((p) => ({ label: p.split("/").pop()!, description: p, icon: "file", data: { file: abs(p) } })),
+        ...files.map((p) => ({ label: p.split("/").pop()!, description: p, icon: fileIconName(p), data: { file: abs(p) } })),
         ...(symbols ?? []).slice(0, 30).map((s) => ({ label: s.name, description: s.containerName ?? "", detail: rel(monaco.Uri.parse(s.location.uri).fsPath), icon: "symbol-class", data: { loc: s.location } })),
-        ...actions.map(({ c }) => ({ label: c.title, detail: keyLabel(c), icon: "zap", data: { cmd: c.id } })),
+        ...actions.map(({ c }) => ({ label: c.title, detail: keyLabel(c), icon: commandIcon(c), data: { cmd: c.id } })),
       ];
     },
     onAccept: (item, q) => {
@@ -166,18 +166,41 @@ function vcsPopup() {
   });
 }
 
-let hidden: { side: string | null; bottom: string | null } | null = null;
+let hidden: { side: string | null; right: string | null; bottom: string | null } | null = null;
 function hideAll() {
-  if (hidden && !sidebar.active && !bottom.active) {
+  if (hidden && !sidebar.active && !rightbar.active && !bottom.active) {
     if (hidden.side) sidebar.show(hidden.side);
+    if (hidden.right) rightbar.show(hidden.right);
     if (hidden.bottom) bottom.show(hidden.bottom);
     hidden = null;
     return;
   }
-  hidden = { side: sidebar.active, bottom: bottom.active };
+  hidden = { side: sidebar.active, right: rightbar.active, bottom: bottom.active };
   sidebar.hide();
+  rightbar.hide();
   bottom.hide();
 }
+
+const docks = [sidebar, rightbar, bottom];
+let lastTool: { dock: Dock; id: string } | null = null;
+document.addEventListener("focusin", (e) => {
+  for (const dock of docks) {
+    const id = dock.active;
+    if (id && dock.views.get(id)?.el.contains(e.target as Node)) lastTool = { dock, id };
+  }
+});
+
+function jumpToLastToolWindow() {
+  const t = lastTool ?? (bottom.active ? { dock: bottom, id: bottom.active } : sidebar.active ? { dock: sidebar, id: sidebar.active } : null);
+  if (t) t.dock.activate(t.id);
+}
+
+function hideActiveToolWindow() {
+  const focused = docks.find((d) => d.active && d.views.get(d.active)?.el.contains(document.activeElement));
+  (focused ?? (bottom.active ? bottom : rightbar.active ? rightbar : sidebar)).hide();
+  editor.focus();
+}
+Dock.afterHide = () => editor.focus();
 
 async function importKeymap() {
   const file = await open({ title: "Import JetBrains Keymap", filters: [{ name: "Keymap XML", extensions: ["xml"] }] });
@@ -193,8 +216,8 @@ commands(
   { id: "openFolder", title: "File: Open Folder…", run: openFolder },
   { id: "openRecent", title: "File: Open Recent Project…", run: openRecent },
   { id: "projects", title: "File: Switch Project…", run: showProjects },
-  { id: "save", title: "File: Save", key: "cmd+s", run: saveActive },
-  { id: "saveAll", title: "File: Save All", key: "cmd+alt+s", run: saveAll },
+  { id: "save", title: "File: Save", run: saveActive },
+  { id: "saveAll", title: "File: Save All", key: "cmd+s", run: saveAll },
   { id: "closeTab", title: "File: Close Tab", key: "cmd+w", run: closeActive },
   { id: "nextTab", title: "Window: Select Next Tab", key: "cmd+shift+]", run: () => cycleTab(1) },
   { id: "prevTab", title: "Window: Select Previous Tab", key: "cmd+shift+[", run: () => cycleTab(-1) },
@@ -219,7 +242,7 @@ commands(
   { id: "fileStructure", title: "Navigate: File Structure…", key: "cmd+f12", run: fileStructurePopup },
   E("goToDefinition", "Navigate: Go to Declaration", "cmd+b", "editor.action.revealDefinition"),
   { id: "goToImplementation", title: "Navigate: Go to Implementation(s)", key: "cmd+alt+b", run: goToImplementation },
-  { id: "goToTypeDefinition", title: "Navigate: Go to Type Declaration", key: "ctrl+shift+b", run: goToTypeDefinition },
+  { id: "goToTypeDefinition", title: "Navigate: Go to Type Declaration", key: "cmd+shift+b", run: goToTypeDefinition },
   E("peekDefinition", "Navigate: Quick Definition", "alt+space", "editor.action.peekDefinition"),
   { id: "findUsages", title: "Navigate: Find Usages", key: "alt+f7", run: findUsages },
   E("peekReferences", "Navigate: Show Usages", "cmd+alt+f7", "editor.action.referenceSearch.trigger"),
@@ -242,23 +265,37 @@ commands(
   E("expandSelection", "Edit: Extend Selection", "alt+up", "editor.action.smartSelect.expand"),
   E("shrinkSelection", "Edit: Shrink Selection", "alt+down", "editor.action.smartSelect.shrink"),
   E("nextOccurrence", "Edit: Add Selection for Next Occurrence", "ctrl+g", "editor.action.addSelectionToNextFindMatch"),
-  E("moveLineUp", "Code: Move Line Up", "cmd+shift+up", "editor.action.moveLinesUpAction"),
-  E("moveLineDown", "Code: Move Line Down", "cmd+shift+down", "editor.action.moveLinesDownAction"),
-  { id: "projectView", title: "View: Project", key: "cmd+1", run: () => sidebar.toggle("project") },
-  { id: "findView", title: "View: Find", key: "cmd+3", run: () => bottom.toggle("find") },
-  { id: "runView", title: "View: Run", key: "cmd+4", run: () => bottom.toggle("run") },
-  { id: "debugView", title: "View: Debug", key: "cmd+5", run: () => bottom.toggle("debug") },
-  { id: "problemsView", title: "View: Problems", key: "cmd+6", run: () => bottom.toggle("problems") },
-  { id: "structureView", title: "View: Structure", key: "cmd+7", run: () => sidebar.toggle("structure") },
-  { id: "commitView", title: "VCS: Commit…", key: "cmd+k cmd+0", run: needProject(() => sidebar.show("commit")) },
-  { id: "terminalView", title: "View: Terminal", key: "alt+f12", run: needProject(() => bottom.toggle("terminal")) },
+  E("moveLineUp", "Code: Move Line Up", "cmd+shift+up alt+shift+up", "editor.action.moveLinesUpAction"),
+  E("moveLineDown", "Code: Move Line Down", "cmd+shift+down alt+shift+down", "editor.action.moveLinesDownAction"),
+  E("selectAllOccurrences", "Edit: Select All Occurrences", "cmd+ctrl+g", "editor.action.selectHighlights"),
+  E("caretsOnLines", "Edit: Add Caret to Each Line in Selection", "alt+shift+g", "editor.action.insertCursorAtEndOfEachLineSelected"),
+  E("joinLines", "Edit: Join Lines", "ctrl+shift+j", "editor.action.joinLines"),
+  E("newLineBefore", "Edit: Start New Line Before Current", "cmd+alt+enter", "editor.action.insertLineBefore"),
+  E("matchingBrace", "Navigate: Move Caret to Matching Brace", "ctrl+m", "editor.action.jumpToBracket"),
+  E("quickDoc", "Code: Quick Documentation", "f1", "editor.action.showHover"),
+  E("parameterInfo", "Code: Parameter Info", "cmd+p", "editor.action.triggerParameterHints"),
+  E("nextError", "Navigate: Next Highlighted Error", "f2", "editor.action.marker.nextInFiles"),
+  E("prevError", "Navigate: Previous Highlighted Error", "shift+f2", "editor.action.marker.prevInFiles"),
+  E("refactorThis", "Refactor: Refactor This…", "ctrl+t", "editor.action.refactor"),
+  E("highlightUsages", "Navigate: Highlight Usages in File", "cmd+shift+f7", "editor.action.wordHighlight.trigger"),
+  { id: "increaseFont", title: "View: Increase Font Size in All Editors", key: "ctrl+shift+.", run: () => updateSetting("editor.fontSize", Math.min(32, setting<number>("editor.fontSize") + 1)) },
+  { id: "decreaseFont", title: "View: Decrease Font Size in All Editors", key: "ctrl+shift+,", run: () => updateSetting("editor.fontSize", Math.max(8, setting<number>("editor.fontSize") - 1)) },
+  { id: "projectView", title: "View: Project", key: "cmd+1", run: () => sidebar.activate("project") },
+  { id: "findView", title: "View: Find", key: "cmd+3", run: () => bottom.activate("find") },
+  { id: "runView", title: "View: Run", key: "cmd+4", run: () => bottom.activate("run") },
+  { id: "debugView", title: "View: Debug", key: "cmd+5", run: () => bottom.activate("debug") },
+  { id: "problemsView", title: "View: Problems", key: "cmd+6", run: () => bottom.activate("problems") },
+  { id: "structureView", title: "View: Structure", key: "cmd+7", run: () => sidebar.activate("structure") },
+  { id: "commitView", title: "VCS: Commit…", key: "cmd+k cmd+0", run: needProject(() => sidebar.activate("commit")) },
+  { id: "terminalView", title: "View: Terminal", key: "alt+f12", run: needProject(() => bottom.activate("terminal")) },
+  { id: "lastToolWindow", title: "Window: Jump to Last Tool Window", key: "f12", run: jumpToLastToolWindow },
   { id: "newTerminal", title: "Terminal: New Terminal Tab", run: needProject(() => (bottom.show("terminal"), newTerminal())) },
   { id: "routesView", title: "Rails: Routes", run: needProject(() => (bottom.show("routes"), loadRoutes())) },
   { id: "railsGenerator", title: "Rails: Run Rails Generator…", key: "cmd+alt+g", run: needProject(runRailsGenerator) },
   { id: "migrationsView", title: "Rails: Migrations", run: needProject(() => bottom.show("migrations")) },
   { id: "railsConsoleSend", title: "Rails: Send Selection to Rails Console", key: "cmd+shift+enter", editor: true, run: needProject(sendToRailsConsole) },
   { id: "railsProjectView", title: "Rails: Toggle Rails Project View", run: needProject(() => (sidebar.show("project"), toggleRailsView())) },
-  { id: "hidePanels", title: "View: Hide Active Tool Window", key: "shift+escape", run: () => bottom.hide() },
+  { id: "hidePanels", title: "View: Hide Active Tool Window", key: "shift+escape", run: hideActiveToolWindow },
   { id: "runSelected", title: "Run: Run", key: "ctrl+r", run: needProject(() => (selected() ? launch(selected()!, "run") : editConfigurations())) },
   { id: "debugSelected", title: "Run: Debug", key: "ctrl+d", run: needProject(() => (selected() ? launch(selected()!, "debug") : editConfigurations())) },
   { id: "chooseRun", title: "Run: Run…", key: "ctrl+alt+r", run: needProject(() => pickConfiguration("run")) },
@@ -272,7 +309,7 @@ commands(
   { id: "rakeTask", title: "Run: Rake / Rails Task…", run: needProject(rakeTask) },
   { id: "runRubyFile", title: "Run: Current Ruby File", run: needProject(() => { const t = activeTab(); if (t) launch(newConfig("ruby", t.title, t.path), "run"); }) },
   { id: "debugRubyFile", title: "Run: Debug Current Ruby File", run: needProject(() => { const t = activeTab(); if (t) launch(newConfig("ruby", t.title, t.path), "debug"); }) },
-  { id: "attach", title: "Run: Attach to Process (rdbg port/socket)…", run: needProject(attachToProcess) },
+  { id: "attach", title: "Run: Attach to Process (rdbg port/socket)…", key: "alt+shift+f5", run: needProject(attachToProcess) },
   { id: "toggleBreakpoint", title: "Debug: Toggle Line Breakpoint", key: "cmd+f8", run: () => toggleBreakpoint() },
   { id: "viewBreakpoints", title: "Debug: View Breakpoints…", key: "cmd+shift+f8", run: needProject(() => viewBreakpoints()) },
   { id: "gotoBreakpoint", title: "Debug: Go to Breakpoint…", run: needProject(gotoBreakpoint) },
@@ -295,7 +332,7 @@ commands(
   { id: "gitDiff", title: "VCS: Show Diff for Current File", key: "cmd+alt+d", run: needProject(diffActiveFile) },
   { id: "gitBlame", title: "VCS: Annotate Current Line (Blame)", run: needProject(blameCurrentLine) },
   { id: "branches", title: "VCS: Branches…", run: needProject(showBranches) },
-  { id: "gitLogView", title: "View: Git (Log)", key: "cmd+9", run: needProject(() => bottom.toggle("gitlog")) },
+  { id: "gitLogView", title: "View: Git (Log)", key: "cmd+9", run: needProject(() => bottom.activate("gitlog")) },
   { id: "fileHistory", title: "VCS: Show History for Current File", run: needProject(() => { const t = activeTab(); if (t) showGitLog(t.path); else showGitLog(""); }) },
   { id: "stash", title: "VCS: Stash Changes…", run: needProject(stashChanges) },
   { id: "unstash", title: "VCS: Unstash Changes…", run: needProject(unstashChanges) },
@@ -330,18 +367,14 @@ commands(
 
 async function renderWelcome() {
   const welcome = document.getElementById("welcome")!;
-  const keys: [string, string][] = [
-    ["Go to File", "⇧⇧  or  ⌘⇧O"],
-    ["Find in Files", "⌘⇧F"],
-    ["All Commands", "⌘⇧P"],
-    ["Related Files", "⌃⌘↑"],
-    ["Run / Debug configuration", "⌃R / ⌃D"],
-    ["Run Test at Cursor", "⌃⇧R"],
-    ["Terminal", "⌥F12"],
-  ];
   if (state.project) {
     welcome.replaceChildren(
-      h("div", { class: "welcome-inner" }, h("div", { class: "welcome-title" }, state.project.name), ...keys.map(([a, k]) => h("div", { class: "welcome-key" }, h("span", {}, a), h("kbd", {}, k)))),
+      h(
+        "div",
+        { class: "welcome-inner hints" },
+        h("div", { class: "welcome-title" }, state.project.name),
+        ...welcomeHints().map(([a, k]) => h("div", { class: "welcome-key" }, h("span", {}, a), h("kbd", {}, k))),
+      ),
     );
     return;
   }
@@ -360,6 +393,8 @@ async function renderWelcome() {
     ),
   );
 }
+
+onSettingsChange(() => void renderWelcome());
 
 /// Project lifecycle
 
@@ -414,7 +449,7 @@ listen("git-changed", () => {
   refreshToolbarSoon();
 });
 const refreshToolbarSoon = debounce(() => refreshToolbar(), 500);
-const indexSlot = statusSlot("index", "left");
+const indexSlot = statusSlot("index", "left", undefined, "Project index");
 listen<{ count: number; ms: number }>("index-ready", (e) => {
   indexSlot.textContent = `${e.payload.count.toLocaleString()} files indexed`;
   indexSlot.title = `Indexed in ${e.payload.ms} ms`;

@@ -7,7 +7,7 @@ import { mergeConfigs, projectFile, readLocal, splitConfigs, writeLocal } from "
 import { abs, rel, root, shellQuote, state } from "./state";
 import { onTestStatuses, prepareTestRun, startTestRun, statusIcon, testStatusAt } from "./testresults";
 import { PtyTabs, PtyView } from "./terminal";
-import { bottom, h, icon, iconButton, quickPick, toast } from "./ui";
+import { bottom, h, icon, iconButton, modal, quickPick, tip, toast } from "./ui";
 
 export type RunType = "rails-server" | "rails-console" | "rspec" | "minitest" | "rake" | "ruby" | "sidekiq" | "custom";
 export type RubyManager = "auto" | "rbenv" | "asdf" | "chruby" | "rvm" | "mise" | "none";
@@ -36,6 +36,18 @@ export const TYPE_LABELS: Record<RunType, string> = {
   ruby: "Ruby script",
   sidekiq: "Sidekiq",
   custom: "Custom command",
+};
+
+/// Per-type icons, like RubyMine's run configuration icons.
+export const TYPE_ICONS: Record<RunType, string> = {
+  "rails-server": "server-process",
+  "rails-console": "debug-console",
+  rspec: "beaker",
+  minitest: "beaker",
+  rake: "tools",
+  ruby: "ruby",
+  sidekiq: "server-environment",
+  custom: "terminal",
 };
 
 const MANAGER_PREFIX: Record<RubyManager, string> = {
@@ -459,12 +471,17 @@ editor.onMouseDown((e) => {
 
 /// Toolbar widget: configuration selector + Run / Debug / Stop
 
-const select = h("select", { class: "run-select", title: "Run configuration" });
+const select = h("select", { class: "run-select", title: "Run/Debug Configurations" });
+/// "Run 'Rails server' ⌃R": the selected configuration's name plus the live shortcut, refreshed on hover.
+function namedTip(btn: HTMLButtonElement, verb: string, command: string) {
+  btn.addEventListener("mouseenter", () => (btn.title = tip(selected() ? `${verb} '${selected()!.name}'` : verb, command)));
+  return btn;
+}
 const widget = document.getElementById("run-widget")!;
 widget.append(
   select,
-  iconButton("play", "Run selected configuration (⌃R)", () => selected() && launch(selected()!, "run")),
-  iconButton("debug-alt", "Debug selected configuration (⌃D)", () => selected() && launch(selected()!, "debug")),
+  namedTip(iconButton("play", "Run", () => selected() && launch(selected()!, "run"), "runSelected"), "Run", "runSelected"),
+  namedTip(iconButton("debug-alt", "Debug", () => selected() && launch(selected()!, "debug"), "debugSelected"), "Debug", "debugSelected"),
   iconButton("debug-stop", "Stop selected configuration", () => {
     for (const [item, e] of running) if (e.cfg.name === selected()?.name) stopItem(item);
   }),
@@ -518,7 +535,7 @@ export function pickConfiguration(mode: "run" | "debug") {
   quickPick({
     placeholder: mode === "run" ? "Run configuration" : "Debug configuration",
     items: [
-      ...configs.map((c) => ({ label: c.name, description: buildCommand(c), icon: mode === "run" ? "play" : "debug-alt", data: c })),
+      ...configs.map((c) => ({ label: c.name, description: buildCommand(c), icon: TYPE_ICONS[c.type] ?? (mode === "run" ? "play" : "debug-alt"), data: c })),
       { label: "Edit configurations…", icon: "settings-gear", data: null },
     ],
     onAccept: (item) => {
@@ -559,7 +576,7 @@ export function editConfigurations() {
   const renderList = () =>
     list.replaceChildren(
       ...draft.map((c, i) =>
-        h("div", { class: `rc-item${i === current ? " selected" : ""}`, onclick: () => ((current = i), render()) }, h("span", {}, c.name), h("small", { class: "dim" }, TYPE_LABELS[c.type])),
+        h("div", { class: `rc-item${i === current ? " selected" : ""}`, onclick: () => ((current = i), render()) }, h("span", {}, icon(TYPE_ICONS[c.type] ?? "play"), " ", c.name), h("small", { class: "dim" }, TYPE_LABELS[c.type])),
       ),
     );
 
@@ -661,7 +678,7 @@ export function editConfigurations() {
   const add = () => {
     quickPick({
       placeholder: "Configuration type",
-      items: Object.entries(TYPE_LABELS).map(([v, l]) => ({ label: l, data: v })),
+      items: Object.entries(TYPE_LABELS).map(([v, l]) => ({ label: l, icon: TYPE_ICONS[v as RunType], data: v })),
       onAccept: (item) => {
         if (!item) return;
         const t = item.data as RunType;
@@ -723,8 +740,6 @@ export function editConfigurations() {
       h("button", { class: "btn primary", onclick: save }, "Save"),
     ),
   );
-  const backdrop = h("div", { class: "qp-backdrop", onmousedown: (e: MouseEvent) => e.target === backdrop && close() }, dialog);
-  backdrop.addEventListener("keydown", (e) => e.key === "Escape" && close());
-  document.getElementById("overlay-root")!.append(backdrop);
+  const backdrop = modal(dialog, () => close());
   render();
 }

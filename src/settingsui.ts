@@ -5,7 +5,7 @@ import { api } from "./ipc";
 import { managersDetected } from "./run";
 import { globalOnly, onSettingsChange, projectSettingsPath, SCHEMA, scopeValue, setting, settingsPath, updateSetting, type SettingDef } from "./settings";
 import { root, state } from "./state";
-import { fuzzyScore, h, icon, iconButton, toast } from "./ui";
+import { fuzzyScore, h, icon, iconButton, modal, toast } from "./ui";
 
 type Scope = "global" | "project";
 
@@ -37,6 +37,12 @@ export function openSettingsWindow(initialPage = "Appearance") {
     (a, b) => PAGE_ORDER.indexOf(a.split("/")[0]) - PAGE_ORDER.indexOf(b.split("/")[0]) || a.localeCompare(b),
   );
 
+  const PAGE_ICONS: Record<string, string> = {
+    Appearance: "symbol-color", Keymap: "keyboard", Editor: "edit", "Editor/General": "settings", "Editor/Font": "text-size", "Editor/Color Scheme": "color-mode",
+    "Editor/Code Style": "symbol-ruler", "Editor/Inspections": "checklist", "File Types": "file", "Version Control": "source-control", "Version Control/Git": "git-branch",
+    "Version Control/GitHub": "github", "Version Control/Diff": "diff", Languages: "code", "Languages/Ruby": "ruby", Rails: "ruby", Database: "database",
+    Testing: "beaker", "Run and Debug": "debug-alt", Terminal: "terminal", Updates: "cloud-download",
+  };
   const renderTree = () => {
     const seen = new Set<string>();
     const rows: HTMLElement[] = [];
@@ -55,6 +61,7 @@ export function openSettingsWindow(initialPage = "Appearance") {
               style: `padding-left:${10 + i * 14}px`,
               onclick: () => selectable && ((page = pages.includes(path) ? path : pages.find((x) => x.startsWith(path + "/"))!), (query = ""), (search.value = ""), render()),
             },
+            icon(PAGE_ICONS[path] ?? "symbol-property", "st-icon"),
             parts[i],
           ),
         );
@@ -115,11 +122,7 @@ export function openSettingsWindow(initialPage = "Appearance") {
       h("button", { class: "btn primary", onclick: close }, "Done"),
     ),
   );
-  backdrop = h("div", { class: "qp-backdrop", onmousedown: (e: MouseEvent) => e.target === backdrop && close() }, dialog);
-  backdrop.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && (e.target as HTMLElement).tagName !== "TEXTAREA") close();
-  });
-  document.getElementById("overlay-root")!.append(backdrop);
+  backdrop = modal(dialog, close, { autofocus: search });
   render();
   search.focus();
 }

@@ -34,7 +34,7 @@ partial row is meant to become a GitHub issue.
 | Search Everywhere (files, symbols, actions), Go to Class, Go to Test, recent files (⌘E), recent locations (⌘⇧E), back/forward, switcher | done | history is per window session |
 | Breadcrumbs | done | above the editor, from document symbols; click to jump; toggle in Settings |
 | Go to Implementation (⌘⌥B) | partial | `textDocument/implementation` or type-hierarchy subtypes when the server has them; ruby-lsp has neither, so classes and modules use a project search for subclasses and include/extend/prepend sites; method overrides are not found |
-| Go to Type Declaration (⌃⇧B) | partial | needs a server with `typeDefinition` (e.g. Sorbet via `ruby.lspCommand`); ruby-lsp has none |
+| Go to Type Declaration (⌘⇧B) | partial | needs a server with `typeDefinition` (e.g. Sorbet via `ruby.lspCommand`); ruby-lsp has none |
 | Type / call hierarchy views | planned | ruby-lsp support is limited |
 | Replace in Files (⌘⇧R) | done | preview with per-file/line/match include, Replace All / Selected, `$1`/`${name}` groups in regex mode, open buffers edited with undo, .gitignore respected; line-based (no multi-line matches); only listed matches when results are truncated at 5000 |
 

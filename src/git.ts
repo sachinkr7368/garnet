@@ -8,10 +8,10 @@ import { abs, basename, debounce, rel, root, state } from "./state";
 import { setGitDecorations } from "./tree";
 import { askTrust, isTrusted, onSettingsChange, setting, updateSetting } from "./settings";
 import { branches, listWorktrees, newWorktree, openWorktree, removeWorktree, type Worktree } from "./toolbar";
-import { contextMenu, h, icon, iconButton, quickPick, statusSlot, toast } from "./ui";
+import { contextMenu, fileIcon, h, icon, iconButton, quickPick, statusSlot, tip, toast } from "./ui";
 
-const branchEl = statusSlot("branch", "left");
-const blameEl = statusSlot("blame", "left");
+const branchEl = statusSlot("branch", "left", undefined, "Current Git branch");
+const blameEl = statusSlot("blame", "left", undefined, "Annotation for the current line");
 
 /// Diff worker: line diffs off the UI thread
 
@@ -235,6 +235,7 @@ function changeRow(r: Row, depth: number, groupKey: string) {
         })
       : h("span", { class: "twisty-space" }),
     badge(r.code),
+    fileIcon(r.path),
     h("span", { class: "change-name" }, basename(r.path)),
     h("span", { class: "spacer" }),
     counts(r.counts),
@@ -667,9 +668,9 @@ async function showHunkPopup(hk: LineHunk) {
     h(
       "div",
       { class: "view-toolbar" },
-      iconButton("arrow-up", "Previous Change (⌃⌥⇧↑)", () => go(-1)),
-      iconButton("arrow-down", "Next Change (⌃⌥⇧↓)", () => go(1)),
-      h("button", { class: "btn small", title: "Rollback Lines (⌘⌥Z)", onclick: () => (closeHunkPopup(), rollbackHunk(hk)) }, "Rollback"),
+      iconButton("arrow-up", "Previous Change", () => go(-1), "prevChange"),
+      iconButton("arrow-down", "Next Change", () => go(1), "nextChange"),
+      h("button", { class: "btn small", title: tip("Rollback Lines", "rollbackLines"), onclick: () => (closeHunkPopup(), rollbackHunk(hk)) }, "Rollback"),
       h("button", { class: "btn small", onclick: () => (closeHunkPopup(), stageHunk(hk)) }, "Stage This Hunk"),
       h("button", { class: "btn small", onclick: () => (closeHunkPopup(), showDiff(t.path)) }, "Show Diff"),
       h("span", { class: "spacer" }),

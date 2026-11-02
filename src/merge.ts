@@ -4,7 +4,7 @@ import { hasConflictMarkers, parseConflicts, type Segment } from "./difflogic";
 import { api, type OpState } from "./ipc";
 import { abs, basename, root } from "./state";
 import { setting } from "./settings";
-import { h, icon, iconButton, toast } from "./ui";
+import { h, icon, iconButton, modal, toast } from "./ui";
 
 const refresh = () => window.dispatchEvent(new Event("garnet:git-refresh"));
 const git = (...args: string[]) => api.git(root(), ...args);
@@ -105,8 +105,7 @@ export async function showConflicts() {
       h("button", { class: "btn", onclick: closeList }, "Close"),
     ),
   );
-  listEl = h("div", { class: "qp-backdrop", onmousedown: (e: MouseEvent) => e.target === listEl && closeList() }, box);
-  document.getElementById("overlay-root")!.append(listEl);
+  listEl = modal(box, closeList);
 }
 
 /// Three-pane resolver: yours | result | theirs

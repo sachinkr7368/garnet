@@ -174,7 +174,7 @@ export class PtyTabs {
           },
           item.status ? icon(item.status === "running" ? "loading" : item.status === "ok" ? "pass" : "error", item.status === "running" ? "codicon-modifier-spin" : "") : null,
           h("span", {}, item.title),
-          h("button", { class: "tab-close", onmousedown: (e: MouseEvent) => e.stopPropagation(), onclick: () => this.close(item) }, icon("close")),
+          h("button", { class: "tab-close", title: "Close", "aria-label": "Close", onmousedown: (e: MouseEvent) => e.stopPropagation(), onclick: () => this.close(item) }, icon("close")),
         ),
       ),
     );

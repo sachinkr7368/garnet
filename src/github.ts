@@ -5,7 +5,7 @@ import { cloneProgress, cloneUrl, deviceNext, sanitizeHtml } from "./ghmodel";
 import { Channel, invoke } from "./ipc";
 import { setting } from "./settings";
 import { basename, dirname, rel, root, state } from "./state";
-import { fuzzyFilter, h, icon, quickPick, statusSlot, toast } from "./ui";
+import { fuzzyFilter, h, icon, modal as modalBackdrop, quickPick, statusSlot, toast } from "./ui";
 
 /// API access. Errors from Rust carry an `AUTH:`, `RATE:` or `OFFLINE:` prefix.
 
@@ -127,14 +127,12 @@ export function modal(title: string, iconName: string, body: HTMLElement, action
     h("div", { class: "gh-dialog-body" }, body),
     h("div", { class: "rc-actions" }, ...actions),
   );
-  const backdrop = h("div", { class: "qp-backdrop", onmousedown: (e: MouseEvent) => e.target === backdrop && !locked && close() }, dialog);
   let locked = false;
+  const backdrop = modalBackdrop(dialog, () => close(), { locked: () => locked });
   const close = () => {
     backdrop.remove();
     onClose();
   };
-  backdrop.addEventListener("keydown", (e) => e.key === "Escape" && !locked && close());
-  document.getElementById("overlay-root")!.append(backdrop);
   return {
     close,
     dialog,

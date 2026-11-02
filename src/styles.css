@@ -107,7 +107,8 @@ body.resizing * {
 
 /* tool strip + sidebar */
 
-#toolstrip {
+#toolstrip,
+#rightstrip {
   width: 40px;
   flex: none;
   background: var(--panel);
@@ -120,6 +121,9 @@ body.resizing * {
 }
 
 body:not(.has-project) #toolstrip,
+body:not(.has-project) #rightstrip,
+body:not(.has-project) #rightbar,
+body:not(.has-project) #rightbar-resizer,
 body:not(.has-project) #sidebar,
 body:not(.has-project) #sidebar-resizer,
 body:not(.has-project) #topbar,
@@ -138,12 +142,18 @@ body:not(.has-project) #run-widget {
   gap: 5px;
 }
 
-#toolstrip .dock-tab {
+#rightstrip {
+  border-right: 0;
+  border-left: 1px solid var(--border);
+}
+#toolstrip .dock-tab,
+#rightstrip .dock-tab {
   width: 30px;
   height: 30px;
   justify-content: center;
 }
-#toolstrip .dock-tab .codicon {
+#toolstrip .dock-tab .codicon,
+#rightstrip .dock-tab .codicon {
   font-size: 17px;
 }
 
@@ -156,16 +166,23 @@ body:not(.has-project) #run-widget {
   color: var(--text);
 }
 
-#sidebar {
+#sidebar,
+#rightbar {
   width: 280px;
   flex: none;
   display: flex;
   flex-direction: column;
   background: var(--panel);
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+#rightbar {
+  width: 340px;
 }
 
-#sidebar-head {
+#sidebar-head,
+#rightbar-head {
   padding: 8px 12px 4px;
   font-weight: 600;
   font-size: 12px;
@@ -175,18 +192,25 @@ body:not(.has-project) #run-widget {
 }
 
 #sidebar-body,
+#rightbar-body,
 #bottom-body {
   flex: 1;
   min-height: 0;
   position: relative;
+  overflow: hidden;
 }
 
+/* Every tool window body is clipped to its pane; its children shrink so the list inside scrolls. */
 .view {
   position: absolute;
   inset: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0;
+}
+.view > * {
+  min-height: 0;
 }
 
 .resizer.vertical {
@@ -209,7 +233,8 @@ body:not(.has-project) #run-widget {
 .resizer.horizontal:has(+ #bottom[hidden]) {
   display: none;
 }
-#sidebar[hidden] + .resizer {
+#sidebar[hidden] + .resizer,
+.resizer:has(+ #rightbar[hidden]) {
   display: none;
 }
 
@@ -325,6 +350,8 @@ body:not(.has-project) #run-widget {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 #topbar {
@@ -488,6 +515,7 @@ body:not(.has-project) #run-widget {
   flex: 1;
   position: relative;
   min-height: 0;
+  overflow: hidden;
 }
 #editor,
 #diff-editor,
@@ -515,6 +543,24 @@ body:not(.has-project) #run-widget {
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
+  container-type: size;
+}
+/* Empty-editor hints drop progressively as the editor gets short, like RubyMine's. */
+@container (max-height: 300px) {
+  .welcome-key:nth-of-type(n + 5) {
+    display: none;
+  }
+}
+@container (max-height: 200px) {
+  .welcome-key:nth-of-type(n + 3) {
+    display: none;
+  }
+}
+@container (max-height: 120px) {
+  .welcome-inner.hints {
+    display: none;
+  }
 }
 .welcome-inner {
   display: flex;
@@ -599,7 +645,9 @@ kbd {
 
 #bottom {
   height: 300px;
-  flex: none;
+  flex: 0 1 auto;
+  min-height: 80px;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   background: var(--panel);
@@ -1116,6 +1164,9 @@ mark {
 .qp-item.selected {
   background: var(--accent-soft);
 }
+.qp-item:hover:not(.selected) {
+  background: var(--hover);
+}
 .qp-item .codicon {
   color: var(--dim);
 }
@@ -1141,13 +1192,39 @@ mark {
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
   padding: 4px;
 }
+.ctx-menu {
+  outline: none;
+  max-height: calc(100vh - 8px);
+  overflow: auto;
+}
 .ctx-item {
-  padding: 4px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 8px;
   border-radius: 5px;
   cursor: default;
+  white-space: nowrap;
 }
-.ctx-item:hover {
+.ctx-item.selected {
   background: var(--accent-soft);
+}
+.ctx-item.disabled {
+  color: var(--dim);
+}
+.ctx-icon {
+  width: 16px;
+  color: var(--dim);
+  flex: none;
+}
+.ctx-item.selected .ctx-icon {
+  color: var(--text);
+}
+.ctx-key {
+  margin-left: auto;
+  padding-left: 18px;
+  color: var(--dim);
+  font-size: 12px;
 }
 .ctx-sep {
   height: 1px;
@@ -1332,6 +1409,10 @@ body.sidebar-right #toolstrip {
   border-right: 0;
   border-left: 1px solid var(--border);
 }
+body.sidebar-right #rightstrip {
+  border-left: 0;
+  border-right: 1px solid var(--border);
+}
 
 /* settings window */
 
@@ -1364,6 +1445,17 @@ body.sidebar-right #toolstrip {
   padding: 4px 10px;
   cursor: default;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.st-icon,
+.toast-icon {
+  color: var(--dim);
+  flex: none;
+}
+.toast.error .toast-icon {
+  color: var(--deleted);
 }
 .st-node:hover {
   background: var(--hover);

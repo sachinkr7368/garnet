@@ -31,3 +31,20 @@ export const uriFor = (p: string) => ({ toString: () => `file://${p}` });
 export const saveAll = async () => {};
 export const languageFor = () => "plaintext";
 export const diffEditorOptions = () => ({});
+export const viewTabs: { key: string; title: string; view: { el: HTMLElement; onClose?: () => void } }[] = [];
+export const findViewTab = (key: string) => viewTabs.find((t) => t.key === key);
+export const openViewTab = (key: string, title: string, view: { el: HTMLElement; onClose?: () => void }) => {
+  let t = findViewTab(key);
+  if (!t) viewTabs.push((t = { key, title, view }));
+  return t;
+};
+export const retitleViewTab = (key: string, title: string) => {
+  const t = findViewTab(key);
+  if (t) t.title = title;
+};
+export const activate = () => {};
+export const closeTab = async (t: (typeof viewTabs)[number]) => {
+  const i = viewTabs.indexOf(t);
+  if (i >= 0) viewTabs.splice(i, 1), t.view.onClose?.();
+  return true;
+};

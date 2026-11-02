@@ -154,3 +154,58 @@ describe("export", () => {
     expect(seen[0].content).toContain('"a,b"');
   });
 });
+
+describe("read-only explanation, DDL and explain plan", async () => {
+  const { readOnlyReason, tableDdl, explainSql } = await import("../db");
+  const conn = (over: Partial<Conn>): Conn => ({ ...mergeConnections("/r", [det()], { manual: [], overrides: {} })[0], ...over });
+
+  it("development on this machine is writable; ERB/ENV hosts stay read-only with a reason and the way out", () => {
+    const [local, socket, erb] = mergeConnections("/r", [det({ host: "127.0.0.1" }), det({ environment: "development/primary", host: "/tmp/.s.PGSQL.5432" }), det({ environment: "development/cache", host: "", unresolved: ["host"] })], { manual: [], overrides: {} });
+    expect(local.readOnly).toBe(false);
+    expect(socket.readOnly).toBe(false);
+    expect(erb.readOnly).toBe(true);
+    expect(readOnlyReason(erb)).toMatch(/ERB\/ENV.*couldn't be resolved/);
+    expect(readOnlyReason(erb)).toMatch(/Edit Data Source… and uncheck Read-only/);
+    expect(readOnlyReason(conn({ environment: "test", readOnly: true }))).toMatch(/"test" isn't a development environment/);
+    expect(readOnlyReason(conn({ host: "db.internal", readOnly: true }))).toMatch(/points at db.internal/);
+  });
+
+  const posts = {
+    name: "posts",
+    kind: "table" as const,
+    columns: [
+      { name: "id", dataType: "bigint", nullable: false, default: null, primaryKey: true },
+      { name: "user_id", dataType: "bigint", nullable: true, default: null, primaryKey: false },
+      { name: "title", dataType: "character varying", nullable: false, default: "''::character varying", primaryKey: false },
+    ],
+    indexes: [{ name: "index_posts_on_user_id", columns: ["user_id"], unique: false }],
+    foreignKeys: [{ name: "fk_rails_1", columns: ["user_id"], refSchema: "public", refTable: "users", refColumns: ["id"] }],
+  };
+
+  it("rebuilds DDL from the introspected schema", () => {
+    expect(tableDdl("postgres", "public", posts)).toBe(
+      [
+        'CREATE TABLE "public"."posts" (',
+        '  "id" bigint NOT NULL,',
+        '  "user_id" bigint,',
+        `  "title" character varying NOT NULL DEFAULT ''::character varying,`,
+        '  PRIMARY KEY ("id"),',
+        '  CONSTRAINT "fk_rails_1" FOREIGN KEY ("user_id") REFERENCES "public"."users" ("id")',
+        ");",
+        "",
+        'CREATE INDEX "index_posts_on_user_id" ON "public"."posts" ("user_id");',
+        "",
+      ].join("\n"),
+    );
+    expect(tableDdl("mysql", "app", { ...posts, foreignKeys: [], indexes: [] })).toMatch(/^CREATE TABLE `app`.`posts` \(/);
+    expect(tableDdl("sqlite", "main", { ...posts, foreignKeys: [], indexes: [] })).toMatch(/^CREATE TABLE "posts" \(/);
+  });
+
+  it("explains only single read statements, never with ANALYZE", () => {
+    expect(explainSql("SELECT * FROM posts;", "postgres")).toBe("EXPLAIN SELECT * FROM posts");
+    expect(explainSql("select 1", "sqlite")).toBe("EXPLAIN QUERY PLAN select 1");
+    expect(explainSql("DELETE FROM posts", "postgres")).toBeNull();
+    expect(explainSql("EXPLAIN ANALYZE SELECT 1", "postgres")).toBeNull();
+    expect(explainSql("  ", "postgres")).toBeNull();
+  });
+});

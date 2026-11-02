@@ -5,7 +5,7 @@ import { api, type ChangedFile, type CommitDetails, type LogCommit } from "./ipc
 import { runGitOp } from "./merge";
 import { abs, basename, debounce, rel, root, state } from "./state";
 import { isTrusted, setting, updateSetting } from "./settings";
-import { bottom, contextMenu, h, icon, iconButton, inputBox, quickPick, toast } from "./ui";
+import { bottom, contextMenu, h, icon, iconButton, inputBox, quickPick, modal, toast } from "./ui";
 
 const ROW = 24;
 const LANE = 12;
@@ -391,12 +391,11 @@ export async function stashChanges() {
     h("label", { class: "dialog-check" }, untracked, " Include untracked files"),
     h("div", { class: "dialog-actions" }, h("span", { class: "spacer" }), h("button", { class: "btn", onclick: () => done(false) }, "Cancel"), h("button", { class: "btn primary", onclick: () => done(true) }, "Create Stash")),
   );
-  const backdrop = h("div", { class: "qp-backdrop", onmousedown: (e: MouseEvent) => e.target === backdrop && done(false) }, box);
+  const backdrop = modal(box, () => done(false), { autofocus: input });
   box.addEventListener("keydown", (e) => {
     if (e.key === "Enter") done(true);
     if (e.key === "Escape") done(false);
   });
-  document.getElementById("overlay-root")!.append(backdrop);
   input.focus();
 }
 

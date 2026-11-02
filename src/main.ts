@@ -18,6 +18,7 @@ import { api, invoke } from "./ipc";
 import { fileStructurePopup, findUsages, goToImplementation, goToTypeDefinition, lspLogView, lspReady, request, outlineView, problemsView, startLsp, stopLsp, workspaceSymbolsPopup } from "./lsp";
 import { goToTest, loadRoutes, routesView, showRelated } from "./rails";
 import "./db";
+import "./railsprovider";
 import { importJetBrainsKeymap, showKeymapReference } from "./keymapref";
 import { editConfigurations, launch, loadRunConfigs, newConfig, pickConfiguration, rakeTask, rerun, runs, runTests, selected } from "./run";
 import { findInFiles, replaceInFiles, searchView } from "./search";

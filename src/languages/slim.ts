@@ -22,11 +22,11 @@ export const slimLanguage: languages.IMonarchLanguage = {
   includeLF: true,
   tokenizer: {
     root: [
-      [/^\s*doctype\b.*/, "metatag"],
+      [/^\s*doctype\b.*/, "metatag.doctype"],
       [/^(\s*)(\/!.*)/, ["", "comment"]],
       [/^(\s*)(\/.*)/, ["", "comment"]],
       [/^(\s*)([\w-]+:)(?=\s*\n)/, ["", "keyword"]],
-      [/^(\s*)(-|==?[<>']*|=[<>']*)/, ["", { token: "metatag.slim", next: "@ruby", nextEmbedded: "ruby" }]],
+      [/^(\s*)(-|==?[<>']*|=[<>']*)/, ["", { token: "metatag", next: "@ruby", nextEmbedded: "ruby" }]],
       [/^(\s*)([|'])/, ["", { token: "delimiter", next: "@text" }]],
       [/^(\s*)(<.*)/, ["", "tag"]],
       [/^(\s*)([a-zA-Z][\w:-]*)/, ["", { token: "tag", next: "@tag" }]],
@@ -40,7 +40,7 @@ export const slimLanguage: languages.IMonarchLanguage = {
       [/[.#][\w-]+/, "attribute.name"],
       [/[<>]+(?=[\s=])/, "delimiter"],
       [/[([{]/, { token: "delimiter", next: "@wrapped" }],
-      [/(==?[<>']*)/, { token: "metatag.slim", switchTo: "@ruby", nextEmbedded: "ruby" }],
+      [/(==?[<>']*)/, { token: "metatag", switchTo: "@ruby", nextEmbedded: "ruby" }],
       [/:(?=\s)/, "delimiter"],
       [/\/(?=\s*\n)/, "delimiter"],
       [/\n/, { token: "", next: "@pop" }],
@@ -69,7 +69,7 @@ export const slimLanguage: languages.IMonarchLanguage = {
       [/[^#\n]+/, ""],
       [/#/, ""],
     ],
-    ruby: [[/\n/, { token: "", next: "@pop", nextEmbedded: "@pop" }]],
+    ruby: [[/$|\n/, { token: "", next: "@pop", nextEmbedded: "@pop" }]],
     ...rubyExprStates("ruby"),
   },
 };

@@ -11,7 +11,7 @@ export function rubyExprStates(prefix: string): Record<string, languages.IMonarc
       [/'[^']*'/, "string"],
       [/[a-zA-Z_]\w*:(?!:)/, "key"],
       [/:[a-zA-Z_]\w*[?!]?/, "string.symbol"],
-      [/@@?[a-zA-Z_]\w*/, "variable.instance"],
+      [/[@]{1,2}[a-zA-Z_]\w*/, "variable.instance"],
       [/\$[a-zA-Z_]\w*/, "variable.global"],
       [/\b(?:true|false|nil|self|if|unless|else|elsif|end|do|and|or|not|then|yield|return|new)\b/, "keyword"],
       [/[A-Z]\w*/, "constant"],

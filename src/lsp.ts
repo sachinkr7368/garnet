@@ -786,8 +786,15 @@ export async function goToTypeDefinition() {
 /// Semantic highlighting and inlay hints
 
 let featureSubs: monaco.IDisposable[] = [];
-const semanticChanged = new monaco.Emitter<void>();
-const inlayChanged = new monaco.Emitter<void>();
+function changeEvent() {
+  const fns = new Set<() => void>();
+  return {
+    event: (fn: () => void) => (fns.add(fn), { dispose: () => void fns.delete(fn) }),
+    fire: () => fns.forEach((fn) => fn()),
+  };
+}
+const semanticChanged = changeEvent();
+const inlayChanged = changeEvent();
 const tokenCache = new Map<string, { resultId?: string; data: number[] }>();
 
 function registerFeatureProviders() {

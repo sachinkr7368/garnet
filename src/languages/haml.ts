@@ -22,13 +22,13 @@ export const hamlLanguage: languages.IMonarchLanguage = {
   includeLF: true,
   tokenizer: {
     root: [
-      [/^\s*!!!.*/, "metatag"],
+      [/^\s*!!!.*/, "metatag.doctype"],
       [/^(\s*)(-#.*)/, ["", "comment"]],
       [/^(\s*)(\/.*)/, ["", "comment"]],
       [/^(\s*)(:[\w-]+)/, ["", "keyword"]],
       [/^(\s*)(%[\w:-]+)/, ["", { token: "tag", next: "@tag" }]],
       [/^(\s*)([.#][\w-]+)/, ["", { token: "attribute.name", next: "@tag" }]],
-      [/^(\s*)(!=|&=|==|=|~|-)/, ["", { token: "metatag.haml", next: "@ruby", nextEmbedded: "ruby" }]],
+      [/^(\s*)(!=|&=|==|=|~|-)/, ["", { token: "metatag", next: "@ruby", nextEmbedded: "ruby" }]],
       [/^(\s*)(\\)/, ["", { token: "", next: "@text" }]],
       [/#\{/, { token: "delimiter.interpolation", next: "@rubyExpr" }],
       [/[^#\n]+/, ""],
@@ -42,7 +42,7 @@ export const hamlLanguage: languages.IMonarchLanguage = {
       [/\[/, { token: "delimiter.square", next: "@objectRef" }],
       [/[<>]+/, "delimiter"],
       [/\/(?=\s*\n)/, "delimiter"],
-      [/(!=|&=|=|~)/, { token: "metatag.haml", switchTo: "@ruby", nextEmbedded: "ruby" }],
+      [/(!=|&=|=|~)/, { token: "metatag", switchTo: "@ruby", nextEmbedded: "ruby" }],
       [/\n/, { token: "", next: "@pop" }],
       [/[ \t]+/, { token: "", switchTo: "@text" }],
     ],
@@ -68,7 +68,7 @@ export const hamlLanguage: languages.IMonarchLanguage = {
       [/:\w+/, "string.symbol"],
       [/[^\]@:]+/, ""],
     ],
-    ruby: [[/\n/, { token: "", next: "@pop", nextEmbedded: "@pop" }]],
+    ruby: [[/$|\n/, { token: "", next: "@pop", nextEmbedded: "@pop" }]],
     ...rubyExprStates("ruby"),
   },
 };

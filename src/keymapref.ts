@@ -61,6 +61,9 @@ const JETBRAINS_ACTIONS: Record<string, string> = {
   Replace: "replace", FindNext: "findNext", FindPrevious: "findPrevious", CloseContent: "closeTab", NextTab: "nextTab",
   PreviousTab: "prevTab", Switcher: "switcher", HideAllWindows: "hideAll", GotoLine: "goToLine", SaveAll: "saveAll",
   SearchEverywhere: "searchEverywhere", "Annotate": "gitBlame", "Compare.SameVersion": "gitDiff",
+  ActivateVersionControlToolWindow: "gitLogView", "Vcs.ShowTabbedFileHistory": "fileHistory", "Vcs.RollbackChangedLines": "rollbackLines",
+  VcsShowNextChangeMarker: "nextChange", VcsShowPrevChangeMarker: "prevChange", "Git.Stash": "stash", "Git.Unstash": "unstash",
+  "Git.ResolveConflicts": "resolveConflicts", NextDiff: "diffNext", PreviousDiff: "diffPrev",
 };
 
 const KEY_NAMES: Record<string, string> = {

@@ -42,12 +42,50 @@ pub async fn list_dir(path: String) -> Result<Vec<Entry>, String> {
 }
 
 #[tauri::command]
-pub async fn read_file(path: String) -> Result<String, String> {
-    let bytes = fs::read(&path).map_err(e2s)?;
+pub async fn read_file(app: AppHandle, index: State<'_, Index>, path: String) -> Result<String, String> {
+    let mut roots = write_roots(&app, &index);
+    roots.extend(app.path().app_data_dir().ok().and_then(|d| fs::canonicalize(d).ok()));
+    read_text(&check_read(&path, &roots)?)
+}
+
+fn read_text(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(e2s)?;
     if bytes.iter().take(8000).any(|&b| b == 0) {
         return Err("binary file".into());
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Ruby's standard library and installed gems: public code that go to declaration, the debugger and backtrace links
+/// open, so it stays readable outside the project.
+fn ruby_library(p: &Path) -> bool {
+    let parts: Vec<&str> = p.components().filter_map(|c| if let Component::Normal(s) = c { s.to_str() } else { None }).collect();
+    parts.contains(&"gems") || parts.windows(2).any(|w| w == ["lib", "ruby"])
+}
+
+/// Reads are limited to `roots` (the project and Garnet's own dirs) and Ruby library code, after resolving
+/// symlinks; returns the resolved path to read, so a link swapped in afterwards cannot redirect it.
+pub fn check_read(path: &str, roots: &[PathBuf]) -> Result<PathBuf, String> {
+    let canonical = fs::canonicalize(path).map_err(e2s)?;
+    if roots.iter().any(|r| canonical.starts_with(r)) || ruby_library(&canonical) {
+        Ok(canonical)
+    } else {
+        Err(format!("refusing to read {path}: outside the project"))
+    }
+}
+
+/// Asks for a file in a native open dialog (never a path from the webview) and returns its text, or None.
+#[tauri::command]
+pub async fn import_file(app: AppHandle, title: String, extension: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let ext = extension.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().set_title(&title).add_filter(ext.to_uppercase(), &[ext.as_str()]).blocking_pick_file())
+        .await
+        .map_err(e2s)?;
+    let Some(picked) = picked else { return Ok(None) };
+    let path = picked.into_path().map_err(e2s)?;
+    check_export_path(&path, &extension)?;
+    read_text(&path).map(Some)
 }
 
 /// Where Garnet may write: the open project and its own config directory.
@@ -224,6 +262,30 @@ mod tests {
         assert!(check_write("relative.rb", &roots, false).is_err());
         assert!(write_new(&proj.join("link.rb"), "pwned", false).is_err());
         assert_eq!(fs::read_to_string(outside.join("secret")).unwrap(), "keep");
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn reads_stay_inside_the_project_or_ruby_libraries() {
+        let base = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("garnet-read-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (proj, home) = (base.join("proj"), base.join("home"));
+        fs::create_dir_all(proj.join("app")).unwrap();
+        fs::create_dir_all(home.join(".ssh")).unwrap();
+        fs::create_dir_all(home.join(".rbenv/versions/3.3.0/lib/ruby/3.3.0")).unwrap();
+        fs::create_dir_all(home.join(".gem/ruby/3.3.0/gems/rack-3.0/lib")).unwrap();
+        for f in ["proj/app/a.rb", "home/.ssh/id_rsa", "home/.rbenv/versions/3.3.0/lib/ruby/3.3.0/set.rb", "home/.gem/ruby/3.3.0/gems/rack-3.0/lib/rack.rb"] {
+            fs::write(base.join(f), "x").unwrap();
+        }
+        std::os::unix::fs::symlink(home.join(".ssh/id_rsa"), proj.join("key.rb")).unwrap();
+        let roots = vec![proj.clone()];
+        let at = |p: PathBuf| p.to_string_lossy().into_owned();
+        assert!(check_read(&at(proj.join("app/a.rb")), &roots).is_ok());
+        assert!(check_read(&at(home.join(".rbenv/versions/3.3.0/lib/ruby/3.3.0/set.rb")), &roots).is_ok());
+        assert!(check_read(&at(home.join(".gem/ruby/3.3.0/gems/rack-3.0/lib/rack.rb")), &roots).is_ok());
+        assert!(check_read(&at(home.join(".ssh/id_rsa")), &roots).unwrap_err().contains("outside"));
+        assert!(check_read(&at(proj.join("key.rb")), &roots).unwrap_err().contains("outside"));
+        assert!(check_read(&format!("{}/app/../../home/.ssh/id_rsa", proj.display()), &roots).is_err());
         fs::remove_dir_all(&base).unwrap();
     }
 

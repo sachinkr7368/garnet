@@ -76,6 +76,12 @@ describe("relatedFiles", () => {
   });
 
   it("returns nothing for files outside the Rails layout", () => expect(relatedFiles("lib/tasks/a.rake", files)).toEqual([]));
+
+  it("treats regex characters in paths literally", () => {
+    const odd = ["app/models/c++.rb", "app/models/cxx.rb", "spec/models/c++_spec.rb", "app/models/a(b.rb", "spec/models/a(b_spec.rb"];
+    expect(relatedFiles("app/models/c++.rb", odd).map((r) => r.path)).toEqual(["spec/models/c++_spec.rb"]);
+    expect(relatedFiles("app/models/a(b.rb", odd).map((r) => r.path)).toEqual(["spec/models/a(b_spec.rb"]);
+  });
 });
 
 describe("routes", () => {

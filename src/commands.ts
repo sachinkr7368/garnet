@@ -37,6 +37,14 @@ const VSCODE_PRESET: Record<string, string> = {
   "ctrl+shift+g": "commitView",
 };
 
+/// Runs a Monaco editor action. Actions with a quick input (Go to Line) need the editor focused, which it is not
+/// when the command comes from the tree, a tool window or Find Action.
+export function runEditorAction(ed: { focus(): void; getAction(id: string): { run(): Promise<void> } | null } | null, id: string) {
+  if (!ed) return;
+  ed.focus();
+  return ed.getAction(id)?.run();
+}
+
 export function command(c: Command) {
   registry.set(c.id, c);
 }
@@ -110,9 +118,18 @@ setShortcutResolver((id) => {
   return k ? formatKey(k) : "";
 });
 
-let capturing: ((key: string) => void) | null = null;
-export function captureNextKey(fn: (key: string) => void) {
-  capturing = fn;
+/// Keystrokes the key handler can dispatch: a ⌘/⌃/⌥ combination or an F-key. Plain letters, ⇧+letter and Enter
+/// stay with the focused editor or field, so they cannot be shortcuts.
+export function bindable(key: string): boolean {
+  const parts = key.split("+");
+  return parts.some((p) => p === "cmd" || p === "ctrl" || p === "alt") || /^f\d+$/.test(parts[parts.length - 1]) || key === "shift+f6" || key === "shift+escape";
+}
+
+let capturing: { fn: (key: string) => void; invalid?: (key: string) => void } | null = null;
+/// Next keystroke for the Keymap page: "" for a bare Escape (cancel); a key that can never fire goes to `invalid`
+/// and capture continues.
+export function captureNextKey(fn: (key: string) => void, invalid?: (key: string) => void) {
+  capturing = { fn, invalid };
 }
 
 export function installKeyHandler() {
@@ -123,9 +140,11 @@ export function installKeyHandler() {
         if (["Meta", "Control", "Alt", "Shift"].includes(e.key)) return;
         e.preventDefault();
         e.stopPropagation();
-        const fn = capturing;
+        const key = e.key === "Escape" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey ? "" : eventKey(e);
+        if (key && !bindable(key)) return capturing.invalid?.(key);
+        const { fn } = capturing;
         capturing = null;
-        fn(e.key === "Escape" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey ? "" : eventKey(e));
+        fn(key);
         return;
       }
       if (e.key === "Shift" && !e.repeat) {
@@ -138,10 +157,11 @@ export function installKeyHandler() {
       }
       lastShift = 0;
       const key = eventKey(e);
-      const plain = !e.metaKey && !e.ctrlKey && !e.altKey && !/^f\d+$/.test(keyName(e.code)) && key !== "shift+f6" && key !== "shift+escape";
-      if (plain) return;
+      if (!bindable(key)) return;
       const inTerminal = (e.target as HTMLElement)?.closest?.(".xterm");
       if (inTerminal && e.ctrlKey && !e.metaKey) return;
+      // A dialog is open: shortcuts would act on the editor behind it.
+      if (document.querySelector("#overlay-root > [data-modal]")) return;
       const id = keymap().get(key);
       if (!id) return;
       const t = e.target as HTMLElement;

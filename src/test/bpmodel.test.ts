@@ -19,12 +19,19 @@ describe("persistence", () => {
     });
     const back = deserialize(JSON.parse(JSON.stringify(stored)), abs);
     expect([...back.keys()]).toEqual([`${ROOT}/app/a.rb`, `${ROOT}/app/b.rb`]);
-    expect(back.get(`${ROOT}/app/b.rb`)![1]).toEqual({ line: 9, enabled: false, condition: "x > 1" });
+    expect(back.get(`${ROOT}/app/b.rb`)![1]).toEqual({ id: expect.any(Number), line: 9, enabled: false, condition: "x > 1" });
+  });
+
+  it("keeps each breakpoint's identity when lines shift, so pass counts survive edits", () => {
+    const [a, b] = deserialize({ "a.rb": [{ line: 3, enabled: true, hitCount: 3 }, { line: 7, enabled: true }] }, abs).get(`${ROOT}/a.rb`)!;
+    expect(a.id).not.toBe(b.id);
+    const moved = trackLines([a, b], [5, 9]).bps;
+    expect(moved.map((x) => [x.id, x.line])).toEqual([[a.id, 5], [b.id, 9]]);
   });
 
   it("skips malformed entries", () => {
     const back = deserialize({ "a.rb": [{ line: 0 }, { line: 2.5 }, { line: "3" }, null, { line: 4, hitCount: -1, condition: 5 }, { line: 4 }], "b.rb": "x" }, abs);
-    expect([...back]).toEqual([[`${ROOT}/a.rb`, [{ line: 4, enabled: true }]]]);
+    expect([...back]).toEqual([[`${ROOT}/a.rb`, [{ id: expect.any(Number), line: 4, enabled: true }]]]);
     expect(deserialize(null, abs).size).toBe(0);
     expect(deserialize([], abs).size).toBe(0);
   });
@@ -67,5 +74,9 @@ describe("DAP and runtime behaviour", () => {
     const values: Record<string, string> = { "user.id": "7", name: '"bob"' };
     const text = await interpolate("user {user.id} {name} {boom}", async (e) => (e in values ? values[e] : Promise.reject(new Error("x"))));
     expect(text).toBe('user 7 "bob" ?');
+  });
+
+  it("inserts values literally, even when they contain $& or $'", async () => {
+    expect(await interpolate("got {a} and {b}", async (e) => (e === "a" ? '"$&"' : "$'tail"))).toBe(`got "$&" and $'tail`);
   });
 });

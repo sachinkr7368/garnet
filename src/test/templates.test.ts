@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 import * as monaco from "monaco-editor";
-import { conf as rubyConf, language as rubyLanguage } from "monaco-editor/languages/definitions/ruby/ruby";
+import { conf as rubyConf } from "monaco-editor/languages/definitions/ruby/ruby";
+import { conf as htmlConf, language as htmlLanguage } from "monaco-editor/languages/definitions/html/html";
+import { erbLanguage, rubyLanguage } from "../languages/ruby";
 import { hamlConf, hamlLanguage } from "../languages/haml";
 import { slimConf, slimLanguage } from "../languages/slim";
 import { snippetsFor } from "../languages/snippets";
 
 monaco.languages.setMonarchTokensProvider("ruby", rubyLanguage);
 monaco.languages.setLanguageConfiguration("ruby", rubyConf);
+monaco.languages.register({ id: "erb" });
+monaco.languages.setMonarchTokensProvider("erb", erbLanguage(htmlLanguage));
+monaco.languages.setLanguageConfiguration("erb", htmlConf);
 for (const [id, lang, conf] of [["haml", hamlLanguage, hamlConf], ["slim", slimLanguage, slimConf]] as const) {
   monaco.languages.register({ id });
   monaco.languages.setMonarchTokensProvider(id, lang);
@@ -21,6 +26,29 @@ function tokens(text: string, lang: string) {
   );
 }
 const typeOf = (line: readonly (readonly [string, string, string])[], text: string) => line.find(([t]) => t === text)?.[1];
+
+describe("Ruby and ERB grammar", () => {
+  it("highlights `<% end %>` and stray `end`s instead of throwing on an empty state stack", () => {
+    const errors: unknown[] = [];
+    const onError = (e: ErrorEvent) => errors.push(e.error);
+    window.addEventListener("error", onError);
+    const erb = tokens('<% @posts.each do |post| %>\n  <p><%= post.title %></p>\n<% end %>\n<%= end %>', "erb");
+    expect(typeOf(erb[2], "end")).toBe("keyword.ruby");
+    expect(typeOf(erb[3], "end")).toBe("keyword.ruby");
+    const rb = tokens("class A\nend\nend\nend\nx = 1", "ruby");
+    for (const line of [1, 2, 3]) expect(typeOf(rb[line], "end")).toMatch(/^keyword/);
+    expect(typeOf(rb[4], "x")).toBe("identifier.ruby");
+    window.removeEventListener("error", onError);
+    expect(errors).toEqual([]);
+  });
+
+  it("still closes declarations with `end`", () => {
+    const rb = tokens("class A\n  def b\n  end\nend\nfoo", "ruby");
+    expect(typeOf(rb[2], "end")).toBe("keyword.def.ruby");
+    expect(typeOf(rb[3], "end")).toBe("keyword.class.ruby");
+    expect(typeOf(rb[4], "foo")).toBe("identifier.ruby");
+  });
+});
 
 describe("HAML grammar", () => {
   it("tokenizes tags, class/id shortcuts and Ruby output", () => {

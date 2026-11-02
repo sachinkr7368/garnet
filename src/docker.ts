@@ -76,7 +76,8 @@ export function composeCommand(t: DockerTarget, inner: string, opts: ComposeOpti
   for (const name of opts.envNames) parts.push("-e", name);
   const cwd = opts.cwd.replace(/^\.\/?/, "").replace(/\/$/, "");
   parts.push("-w", quote(cwd ? `${t.containerRoot.replace(/\/$/, "")}/${cwd}` : t.containerRoot));
-  parts.push(t.service, inner);
+  // The whole command runs in the container's shell: unquoted, `a && b` would run b on the host.
+  parts.push(t.service, "sh", "-c", quote(inner));
   return parts.join(" ");
 }
 
@@ -85,7 +86,8 @@ export const debugPortFor = (t: DockerTarget, freePort: number) => (t.mode === "
 
 /// rdbg listen arguments inside the container: the shared-volume socket when configured, else TCP.
 /// TCP binds 0.0.0.0 inside the container only; the host side is published on 127.0.0.1 (run) or verified to be (exec).
-export const rdbgListen = (t: DockerTarget, port: number) => (t.socketPath ? `--sock-path=${t.containerRoot.replace(/\/$/, "")}/${t.socketPath}` : `--port=${port} --host=0.0.0.0`);
+export const rdbgListen = (t: DockerTarget, port: number, quote: (s: string) => string) =>
+  t.socketPath ? `--sock-path=${quote(`${t.containerRoot.replace(/\/$/, "")}/${t.socketPath}`)}` : `--port=${port} --host=0.0.0.0`;
 
 /// Host-side rdbg socket for a socket-path target.
 export const hostSocket = (t: DockerTarget, root: string) => `${root}/${t.socketPath}`;

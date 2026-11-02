@@ -61,8 +61,8 @@ describe("buildTree", () => {
     expect(file.status).toBe("failed");
     const calc = file.children[0];
     expect(calc.label).toBe("Calc");
-    expect(calc.children.map((c) => c.label)).toEqual(["is pending", "addition"]);
-    const addition = calc.children[1];
+    expect(calc.children.map((c) => c.label)).toEqual(["addition", "is pending"]);
+    const addition = calc.children[0];
     expect(addition.line).toBe(2);
     expect(addition.status).toBe("failed");
     expect(addition.duration).toBeCloseTo(0.003806);

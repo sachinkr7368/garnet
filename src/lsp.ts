@@ -1,5 +1,5 @@
 import { allTabs, editor, ensureModel, events, handlePathMoved, monaco, openFile, uriFor, activeTab } from "./editor";
-import { api, Channel, invoke, type RpcEvent } from "./ipc";
+import { api, Channel, invoke, onSearchSuperseded, type RpcEvent } from "./ipc";
 import { runInPanel } from "./run";
 import { symbolPath } from "./breadcrumbs";
 import { constantName, implementationPattern } from "./implementations";
@@ -18,7 +18,11 @@ type TextEdit = { range: LspRange; newText: string };
 
 const LANGS = ["ruby", "erb"];
 let capabilities: Json = {};
+/// `running`: the process is up and may be initialized; `ready`: initialize finished, so documents may be synced.
+let running = false;
 let ready = false;
+/// Bumped by every start: events from an earlier server (its late Exit after a restart) are ignored.
+let generation = 0;
 let stopping = false;
 let nextId = 1;
 const pending = new Map<number, { resolve: (v: Json) => void; reject: (e: Error) => void }>();
@@ -62,7 +66,7 @@ function send(msg: Json) {
 }
 
 export function request<T = Json>(method: string, params: Json, token?: monaco.CancellationToken): Promise<T> {
-  if (!ready && method !== "initialize") return Promise.reject(new Error("Ruby LSP is not ready"));
+  if (!ready && !(running && (method === "initialize" || method === "shutdown"))) return Promise.reject(new Error("Ruby LSP is not ready"));
   const id = nextId++;
   send({ id, method, params });
   token?.onCancellationRequested(() => send({ method: "$/cancelRequest", params: { id } }));
@@ -139,6 +143,7 @@ function onEvent(ev: RpcEvent) {
   }
   if (ev.type === "exit") {
     ready = false;
+    running = false;
     for (const p of pending.values()) p.reject(new Error("Ruby LSP exited"));
     pending.clear();
     setStatus("Ruby LSP stopped", "off");
@@ -181,12 +186,14 @@ function bundleInstall() {
 
 export async function startLsp(opts: { launcher?: boolean } = {}) {
   if (!state.project || !(await askTrust())) return;
+  const gen = ++generation;
   await stopLsp();
+  if (gen !== generation) return;
   stopping = false;
   stderr.length = 0;
   setStatus("Ruby LSP: starting", "busy");
   const channel = new Channel<RpcEvent>();
-  channel.onmessage = onEvent;
+  channel.onmessage = (ev) => gen === generation && onEvent(ev);
   const launcher = opts.launcher ?? true;
   launch = { prefix: [], launcher };
   try {
@@ -197,10 +204,12 @@ export async function startLsp(opts: { launcher?: boolean } = {}) {
       launcher,
       onEvent: channel,
     });
+    if (gen !== generation) return;
     launch.prefix = res.prefix;
     log(`Ruby version manager: ${res.manager} (${res.reason})`);
     log(`$ ${res.command}`);
   } catch (e) {
+    if (gen !== generation) return;
     if (String(e).includes("ruby-lsp-missing")) {
       setStatus("Ruby LSP: not installed", "off");
       toast("ruby-lsp is not installed. Install it to get completion, navigation and diagnostics.", "info", [
@@ -213,17 +222,20 @@ export async function startLsp(opts: { launcher?: boolean } = {}) {
     }
     return;
   }
-  ready = true;
+  running = true;
   try {
     const init = await request("initialize", initializeParams());
+    if (gen !== generation) return;
     capabilities = init.capabilities ?? {};
     notify("initialized", {});
+    ready = true;
     setStatus("Ruby LSP", "ok");
     registerFeatureProviders();
     for (const { model } of tracked.values()) didOpen(model);
     refreshOutline();
     refreshBreadcrumbs();
   } catch (e) {
+    if (gen !== generation) return;
     ready = false;
     setStatus("Ruby LSP: failed", "off");
     log(`initialize failed: ${e}`);
@@ -231,11 +243,16 @@ export async function startLsp(opts: { launcher?: boolean } = {}) {
 }
 
 export async function stopLsp() {
-  if (!ready) return invoke("lsp_stop");
+  for (const t of tracked.values()) {
+    t.sub.dispose();
+    t.sub = { dispose() {} };
+  }
+  if (!running) return invoke("lsp_stop");
   stopping = true;
   await Promise.race([request("shutdown", null).catch(() => {}), new Promise((r) => setTimeout(r, 1500))]);
   notify("exit", null);
   ready = false;
+  running = false;
   await invoke("lsp_stop");
 }
 
@@ -393,8 +410,19 @@ function setDiagnostics(model: monaco.editor.ITextModel, all: Json[]) {
   );
 }
 
-async function pullDiagnostics(model: monaco.editor.ITextModel) {
-  if (!ready || !capabilities.diagnosticProvider) return;
+let shownSeverity = "";
+onSettingsChange(() => {
+  const min = setting<string>("inspections.minSeverity");
+  if (min === shownSeverity) return;
+  shownSeverity = min;
+  for (const [uri, all] of lspDiagnostics) {
+    const model = monaco.editor.getModel(monaco.Uri.parse(uri));
+    if (model && !model.isDisposed()) setDiagnostics(model, all);
+  }
+});
+
+export async function pullDiagnostics(model: monaco.editor.ITextModel) {
+  if (model.isDisposed() || !ready || !capabilities.diagnosticProvider) return;
   const version = model.getVersionId();
   const res = await request("textDocument/diagnostic", { textDocument: docId(model) }).catch(() => null);
   if (!res || model.isDisposed() || model.getVersionId() !== version) return;
@@ -635,6 +663,7 @@ const symbolCache = new WeakMap<monaco.editor.ITextModel, { version: number; sym
 
 /// Document symbols for the model's current version, shared by the Structure panel and breadcrumbs.
 export function cachedSymbols(model: monaco.editor.ITextModel): Promise<monaco.languages.DocumentSymbol[]> {
+  if (model.isDisposed()) return Promise.resolve([]);
   const version = model.getVersionId();
   const hit = symbolCache.get(model);
   if (hit?.version === version) return hit.symbols;
@@ -832,14 +861,17 @@ function searchProject(query: string, include: string): Promise<monaco.languages
   return new Promise((resolve) => {
     const found: monaco.languages.Location[] = [];
     const channel = new Channel<{ type: string; path?: string; matches?: { line: number; ranges: [number, number][] }[] }>();
+    let stop = () => {};
     channel.onmessage = (ev) => {
-      if (ev.type === "done") return resolve(found);
+      if (ev.type === "done") return stop(), resolve(found);
       for (const m of ev.matches ?? []) {
         const [s, e] = m.ranges[0] ?? [0, 0];
         found.push({ uri: monaco.Uri.file(ev.path!), range: new monaco.Range(m.line, s + 1, m.line, e + 1) });
       }
     };
     invoke("search_text", { opts: { query, regex: true, caseSensitive: true, wholeWord: false, include }, onEvent: channel }).catch(() => resolve(found));
+    // A newer search (this or the Find panel) cancels this one in the backend without a Done event.
+    stop = onSearchSuperseded(() => resolve(found));
   });
 }
 

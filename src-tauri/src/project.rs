@@ -107,9 +107,57 @@ pub fn config_read(app: AppHandle, name: String) -> Result<Option<String>, Strin
     Ok(std::fs::read_to_string(config_file(&app, &name)?).ok())
 }
 
+/// Replaces a config file. `expected` makes it a compare-and-swap: the write is refused when the file no longer
+/// holds what the caller read, so two windows (separate processes) cannot drop each other's changes.
 #[tauri::command]
-pub fn config_write(app: AppHandle, name: String, content: String) -> Result<(), String> {
-    std::fs::write(config_file(&app, &name)?, content).map_err(e2s)
+pub fn config_write(app: AppHandle, name: String, content: String, expected: Option<String>) -> Result<(), String> {
+    write_config_file(&config_file(&app, &name)?, &content, expected.as_deref())
+}
+
+pub const CONFIG_CHANGED: &str = "config file changed on disk";
+
+pub fn write_config_file(path: &Path, content: &str, expected: Option<&str>) -> Result<(), String> {
+    let dir = path.parent().ok_or("invalid config path")?;
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(".config.lock")).map_err(e2s)?;
+    // ponytail: one lock for the whole config dir; the files are tiny and writes rare.
+    if unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let current = std::fs::read_to_string(path).ok();
+    if path.extension().is_some_and(|e| e == "json") {
+        if let Some(text) = current.as_deref().filter(|t| !t.trim().is_empty()) {
+            if let Err(e) = serde_json::from_str::<serde_json::Value>(text) {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                let saved = backup_broken(path, text).map(|b| format!(" A copy is saved as {b}.")).unwrap_or_default();
+                return Err(format!("{name} is not valid JSON ({e}), so Garnet did not overwrite it.{saved} Fix the file to save changes again."));
+            }
+        }
+    }
+    if expected.is_some_and(|x| x != current.as_deref().unwrap_or("")) {
+        return Err(CONFIG_CHANGED.into());
+    }
+    let tmp = dir.join(format!(".{}.{}.tmp", path.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));
+    std::fs::write(&tmp, content).map_err(e2s)?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e2s(e)
+    })
+}
+
+/// `name.bak-<unix seconds>` next to a config file that no longer parses; one copy per distinct broken content.
+fn backup_broken(path: &Path, text: &str) -> Option<String> {
+    let dir = path.parent()?;
+    let prefix = format!("{}.bak-", path.file_name()?.to_str()?);
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let n = entry.file_name().to_string_lossy().into_owned();
+        if n.starts_with(&prefix) && std::fs::read_to_string(entry.path()).ok().as_deref() == Some(text) {
+            return Some(n);
+        }
+    }
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    let name = format!("{prefix}{secs}");
+    std::fs::write(dir.join(&name), text).ok()?;
+    Some(name)
 }
 
 #[tauri::command]
@@ -217,6 +265,40 @@ mod tests {
         if std::env::var_os("GARNET_SMOKE").is_none() {
             assert!(smoke_export_path("csv").is_none());
         }
+    }
+
+    #[test]
+    fn config_writes_never_replace_a_broken_json_file_and_back_it_up_once() {
+        let dir = std::env::temp_dir().join(format!("garnet-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        let broken = "{\"editor.fontSize\":16,}";
+        std::fs::write(&file, broken).unwrap();
+        let err = write_config_file(&file, "{}", None).unwrap_err();
+        assert!(err.contains("not valid JSON") && err.contains("settings.json.bak-"), "{err}");
+        assert!(write_config_file(&file, "{}", None).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), broken);
+        let backups: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("settings.json.bak-")).collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(std::fs::read_to_string(backups[0].path()).unwrap(), broken);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn config_writes_are_atomic_compare_and_swap() {
+        let dir = std::env::temp_dir().join(format!("garnet-config-cas-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sessions.json");
+        write_config_file(&file, "{\"a\":1}", Some("")).unwrap();
+        assert_eq!(write_config_file(&file, "{\"b\":1}", Some("")).unwrap_err(), CONFIG_CHANGED);
+        write_config_file(&file, "{\"a\":2}", Some("{\"a\":1}")).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{\"a\":2}");
+        write_config_file(&file, "not json is fine to write", None).unwrap();
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains(".tmp")).collect();
+        assert!(left.is_empty(), "{left:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

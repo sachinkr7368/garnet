@@ -1,8 +1,10 @@
 /// Where run configurations live. By default they are kept in Garnet's own config dir (keyed by project path),
-/// so Garnet never writes into the repository. A configuration marked `shared` ("Store as project file") is
-/// written to `<project>/.garnet/run.json` for the team; that file is read only for trusted projects.
+/// together with the selected configuration, so Garnet never writes into the repository. A configuration marked
+/// `shared` ("Store as project file") is written to `<project>/.garnet/run.json` for the team, and only when such a
+/// configuration is edited; that file is read only for trusted projects and never deleted.
 
 import { api } from "./ipc";
+import { modifyConfig } from "./settings";
 
 export const STATE_FILE = "run-configs.json";
 export const projectFile = (root: string) => `${root}/.garnet/run.json`;
@@ -43,7 +45,25 @@ export async function readLocal(root: string): Promise<Stored<unknown> | null> {
 }
 
 export async function writeLocal(root: string, value: Stored<unknown>) {
-  const all = await readAll();
-  all[root] = value;
-  await api.configWrite(STATE_FILE, JSON.stringify(all, null, 2) + "\n");
+  await modifyConfig<Record<string, unknown>>(STATE_FILE, {}, (all) => ({ ...all, [root]: value }));
+}
+
+/// New .garnet/run.json text for the edited shared configurations, or null when they are unchanged (nothing to
+/// write). Unchanged entries keep their original JSON; unknown keys and entries Garnet could not read are kept.
+export function projectFileText<T extends { name: string }>(raw: Record<string, unknown> | null, original: T[], shared: T[]): string | null {
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  if (same(original, shared)) return null;
+  const entries = Array.isArray(raw?.configurations) ? (raw.configurations as unknown[]) : [];
+  const named = (e: unknown) => (e && typeof e === "object" && typeof (e as { name?: unknown }).name === "string" ? (e as { name: string }).name : null);
+  const known = new Set(original.map((c) => c.name));
+  const configurations = [
+    ...shared.map((c) => {
+      const entry = entries.find((e) => named(e) === c.name);
+      const before = original.find((o) => o.name === c.name);
+      if (entry && before && same(before, c)) return entry;
+      return { ...(entry && typeof entry === "object" ? entry : {}), ...c };
+    }),
+    ...entries.filter((e) => !known.has(named(e) ?? "")),
+  ];
+  return JSON.stringify({ ...(raw ?? {}), configurations }, null, 2) + "\n";
 }

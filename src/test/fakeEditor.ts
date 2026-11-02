@@ -6,6 +6,9 @@ class Range {
     public endLineNumber: number,
     public endColumn: number,
   ) {}
+  toJSON() {
+    return { ...this };
+  }
 }
 
 function deep(path: string): any {

@@ -6,7 +6,7 @@ import { Channel, invoke, type PtyEvent } from "./ipc";
 import { isDarkTheme, onSettingsChange, setting } from "./settings";
 import { abs, root } from "./state";
 import { TERMINAL } from "./theme";
-import { bottom, h, icon, iconButton } from "./ui";
+import { bottom, h, icon, iconButton, toast } from "./ui";
 
 
 const views = new Set<PtyView>();
@@ -39,6 +39,7 @@ export class PtyView {
   el = h("div", { class: "pty" });
   id: number | null = null;
   exited = false;
+  private disposed = false;
   private observer: ResizeObserver;
 
   constructor(private opts: PtyOptions = {}) {
@@ -82,22 +83,37 @@ export class PtyView {
     this.fit.fit();
     const channel = new Channel<PtyEvent>();
     channel.onmessage = (ev) => {
-      if (ev.type === "data") this.term.write(ev.data);
-      else {
-        this.exited = true;
-        this.term.write(`\r\n\x1b[2m[process exited${ev.code !== null ? ` with code ${ev.code}` : ""}]\x1b[0m\r\n`);
-        this.opts.onExit?.(ev.code);
+      if (ev.type === "data") {
+        if (!this.disposed) this.term.write(ev.data);
+        return;
       }
+      this.exited = true;
+      // The tab may already be closed (xterm disposed); the exit callback (test tree, run status) still has to run.
+      this.opts.onExit?.(ev.code);
+      if (!this.disposed) this.term.write(`\r\n\x1b[2m[process exited${ev.code !== null ? ` with code ${ev.code}` : ""}]\x1b[0m\r\n`);
     };
-    this.id = await invoke<number>("pty_spawn", {
-      cwd: this.opts.cwd ?? root(),
-      command: this.opts.command ?? null,
-      env: { ...setting<Record<string, string>>("terminal.env"), ...this.opts.env },
-      shell: setting<string>("terminal.shell") || null,
-      cols: this.term.cols,
-      rows: this.term.rows,
-      onEvent: channel,
-    });
+    const shell = setting<string>("terminal.shell") || null;
+    let id: number;
+    try {
+      id = await invoke<number>("pty_spawn", {
+        cwd: this.opts.cwd ?? root(),
+        command: this.opts.command ?? null,
+        env: { ...setting<Record<string, string>>("terminal.env"), ...this.opts.env },
+        shell,
+        cols: this.term.cols,
+        rows: this.term.rows,
+        onEvent: channel,
+      });
+    } catch (e) {
+      this.exited = true;
+      if (!this.disposed) this.term.write(`\x1b[31m${String(e)}\x1b[0m\r\n`);
+      toast(`Could not start ${shell ?? "the shell"}: ${e}`, "error", shell ? [{ label: "Fix in Settings", run: () => import("./settingsui").then((m) => m.openSettingsWindow("Terminal")) }] : []);
+      this.opts.onExit?.(null);
+      return;
+    }
+    // Closed while the process was starting: nobody will kill it otherwise.
+    if (this.disposed) return void invoke("pty_kill", { id }).catch(() => {});
+    this.id = id;
     this.term.onData((data) => {
       if (this.id !== null && !this.exited) invoke("pty_write", { id: this.id, data }).catch(() => {});
     });
@@ -112,6 +128,7 @@ export class PtyView {
   }
 
   dispose() {
+    this.disposed = true;
     this.kill();
     this.observer.disconnect();
     views.delete(this);
@@ -190,7 +207,8 @@ let termCount = 0;
 terminals.toolbar.append(iconButton("add", "New Terminal", () => newTerminal()));
 
 export function newTerminal() {
-  terminals.add(`Local${++termCount > 1 ? ` (${termCount})` : ""}`, new PtyView());
+  // Like RubyMine, a shell that exits (exit, ⌃D) closes its tab; one Garnet killed or could not start stays.
+  const item = terminals.add(`Local${++termCount > 1 ? ` (${termCount})` : ""}`, new PtyView({ onExit: (code) => code !== null && terminals.close(item) }));
 }
 
 /// Runs a command the user asked for in a new Terminal tab, so its output stays visible.

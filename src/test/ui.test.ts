@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 vi.mock("../editor", async () => await import("./fakeEditor"));
 
-import { contextMenu, dragWidth, fileIconName, iconButton, menuIconFor, modal, quickPick, setShortcutResolver, tip, h } from "../ui";
+import { bottom, clampPanels, contextMenu, dragWidth, fileIconName, iconButton, menuIconFor, modal, quickPick, setShortcutResolver, tip, h } from "../ui";
 
 Element.prototype.scrollIntoView ??= () => {};
 (globalThis as any).Worker ??= class {
@@ -57,6 +57,55 @@ describe("quick pick hover", () => {
     move(overlay().querySelectorAll(".qp-item")[1]);
     key(overlay().querySelector(".qp-input")!, "Enter");
     expect(accept).toHaveBeenCalledWith("two");
+  });
+});
+
+describe("quick pick limits and failures", () => {
+  it("never selects past the 200 rows it renders", async () => {
+    const accept = vi.fn();
+    quickPick({ placeholder: "x", items: Array.from({ length: 300 }, (_, i) => ({ label: `item ${i}` })), onAccept: (i) => accept(i?.label) });
+    await tick();
+    for (let i = 0; i < 30; i++) key(overlay().querySelector(".qp-input")!, "PageDown");
+    key(overlay().querySelector(".qp-input")!, "Enter");
+    expect(accept).toHaveBeenCalledWith("item 199");
+  });
+
+  it("shows a failing item provider as an error row instead of an unhandled rejection", async () => {
+    const accept = vi.fn();
+    quickPick({ placeholder: "x", items: async () => { throw new Error("index not ready"); }, onAccept: (i) => accept(i) });
+    await tick();
+    expect(overlay().querySelector(".qp-error")?.textContent).toContain("index not ready");
+    key(overlay().querySelector(".qp-input")!, "Enter");
+    expect(accept).toHaveBeenCalledWith(undefined);
+  });
+});
+
+describe("panels on a small window", () => {
+  const rect = (id: string, r: Partial<DOMRect>) => (document.getElementById(id)!.getBoundingClientRect = () => ({ width: 0, height: 0, ...r }) as DOMRect);
+
+  it("caps the bottom panel and side panels to what the window has room for", () => {
+    rect("main", { width: 900 });
+    rect("center", { height: 508 });
+    document.getElementById("sidebar")!.style.width = "700px";
+    document.getElementById("rightbar")!.hidden = true;
+    clampPanels();
+    expect(document.getElementById("bottom")!.style.maxHeight).toBe("388px");
+    expect(document.getElementById("sidebar")!.style.maxWidth).toBe("580px");
+    rect("center", { height: 1000 });
+    clampPanels();
+    expect(document.getElementById("bottom")!.style.maxHeight).toBe("880px");
+  });
+
+  it("scrolls the active bottom tab into view when the strip overflows", () => {
+    const seen: string[] = [];
+    const spy = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (this: Element) {
+      seen.push((this as HTMLElement).dataset.view ?? "");
+    });
+    bottom.add({ id: "far", title: "LSP Log", icon: "output", el: h("div") });
+    bottom.show("far");
+    expect(seen).toContain("far");
+    spy.mockRestore();
+    bottom.hide();
   });
 });
 
@@ -148,6 +197,39 @@ describe("modal dialogs", () => {
     await tick();
     expect(document.activeElement).toBe(outer.b);
     outerBackdrop.remove();
+  });
+
+  it("takes focus from the editor even when filled after opening, makes the window inert and closes on Escape", async () => {
+    const editorInput = h("textarea", { class: "inputarea" });
+    document.getElementById("app")!.append(editorInput);
+    editorInput.focus();
+    const box = h("div", { class: "rc-dialog" });
+    const close = vi.fn(() => backdrop.remove());
+    const backdrop = modal(box, close);
+    const field = h("input", { class: "search-input" });
+    box.append(field);
+    await Promise.resolve();
+    expect(document.activeElement).toBe(field);
+    expect(document.getElementById("app")!.hasAttribute("inert")).toBe(true);
+    field.blur();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(close).toHaveBeenCalledOnce();
+    await tick();
+    expect(document.getElementById("app")!.hasAttribute("inert")).toBe(false);
+    expect(document.activeElement).toBe(editorInput);
+    editorInput.remove();
+  });
+
+  it("focuses an empty dialog itself so Escape reaches it", async () => {
+    const box = h("div", { class: "rc-dialog" }, "Nothing to resolve");
+    const close = vi.fn();
+    const backdrop = modal(box, close);
+    await Promise.resolve();
+    expect(document.activeElement).toBe(box);
+    key(box, "Escape");
+    expect(close).toHaveBeenCalledOnce();
+    backdrop.remove();
+    await tick();
   });
 
   it("honours locked (the GitHub clone dialog locks itself while cloning)", () => {

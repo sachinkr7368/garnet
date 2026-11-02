@@ -5,13 +5,13 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 
 struct Session {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn Child + Send + Sync>,
 }
 
@@ -23,13 +23,22 @@ pub struct Ptys {
 
 impl Ptys {
     fn kill(&self, id: u32) {
-        if let Some(mut s) = self.sessions.lock().unwrap().remove(&id) {
+        let session = self.sessions.lock().unwrap().remove(&id);
+        if let Some(mut s) = session {
             if let Some(pid) = s.child.process_id() {
                 // The shell is a session leader, so its pid is the process group id.
                 unsafe { libc::killpg(pid as i32, libc::SIGHUP) };
             }
             let _ = s.child.kill();
+            let _ = s.child.wait();
         }
+    }
+
+    /// Writes without holding the sessions map, so a terminal whose input is backed up cannot stall the others.
+    fn write(&self, id: u32, data: &[u8]) -> Result<(), String> {
+        let writer = self.sessions.lock().unwrap().get(&id).map(|s| s.writer.clone()).ok_or("terminal closed")?;
+        let mut w = writer.lock().unwrap();
+        w.write_all(data).map_err(e2s)
     }
 
     pub fn kill_all(&self) {
@@ -94,7 +103,7 @@ pub fn pty_spawn(
         .sessions
         .lock()
         .unwrap()
-        .insert(id, Session { master: pair.master, writer, child });
+        .insert(id, Session { master: pair.master, writer: Arc::new(Mutex::new(writer)), child });
 
     std::thread::spawn(move || {
         let mut buf = [0u8; 32 * 1024];
@@ -122,9 +131,7 @@ pub fn pty_spawn(
 
 #[tauri::command]
 pub fn pty_write(state: State<'_, Ptys>, id: u32, data: String) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().unwrap();
-    let s = sessions.get_mut(&id).ok_or("terminal closed")?;
-    s.writer.write_all(data.as_bytes()).map_err(e2s)
+    state.write(id, data.as_bytes())
 }
 
 #[tauri::command]
@@ -143,7 +150,56 @@ pub fn pty_kill(state: State<'_, Ptys>, id: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::complete_utf8_len;
+    use super::*;
+
+    fn session(ptys: &Ptys, program: &str, writer: Box<dyn Write + Send>) -> (u32, u32) {
+        let pair = native_pty_system().openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }).unwrap();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", program]);
+        let child = pair.slave.spawn_command(cmd).unwrap();
+        let pid = child.process_id().unwrap();
+        let id = ptys.next.fetch_add(1, Ordering::SeqCst) + 1;
+        ptys.sessions.lock().unwrap().insert(id, Session { master: pair.master, writer: Arc::new(Mutex::new(writer)), child });
+        (id, pid)
+    }
+
+    #[test]
+    fn killed_terminals_are_reaped() {
+        let ptys = Ptys::default();
+        // A shell that ignores SIGHUP survives the grace period and is SIGKILLed, which portable-pty does not wait for.
+        let (id, pid) = session(&ptys, "trap '' HUP; sleep 5", Box::new(std::io::sink()));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        ptys.kill(id);
+        // Already waited for: no zombie is left for anyone else to collect.
+        let r = unsafe { libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(r, -1);
+    }
+
+    struct Stuck(std::sync::mpsc::Receiver<()>);
+    impl Write for Stuck {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            let _ = self.0.recv();
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_blocked_write_does_not_hold_the_sessions_lock() {
+        let ptys = Arc::new(Ptys::default());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (id, _) = session(&ptys, "sleep 5", Box::new(Stuck(rx)));
+        let p = ptys.clone();
+        let writer = std::thread::spawn(move || p.write(id, b"x"));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let free = ptys.sessions.try_lock().is_ok();
+        tx.send(()).unwrap();
+        writer.join().unwrap().unwrap();
+        ptys.kill_all();
+        assert!(free, "pty_write held the sessions lock while blocked");
+    }
 
     #[test]
     fn holds_back_split_multibyte_sequences() {

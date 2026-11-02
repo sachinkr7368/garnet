@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../editor", async () => await import("./fakeEditor"));
 vi.mock("../debug", () => ({ debugSession: vi.fn(), sessionFor: () => null, stopSession: vi.fn() }));
 
-import { buildCommand, configList, loadRunConfigs, newConfig, parseDotenv, safeEnv, saveRunConfigs, validateConfig, type RunConfig } from "../run";
+import { buildCommand, configList, loadRunConfigs, newConfig, parseDotenv, rakeTask, safeEnv, saveRunConfigs, validateConfig, type RunConfig } from "../run";
 import { mergeConfigs, splitConfigs } from "../runstore";
 import { checkTrust, loadSettings, trustProject } from "../settings";
 import { state } from "../state";
@@ -68,7 +68,32 @@ describe("buildCommand", () => {
   });
 
   it("wraps in rdbg for debugging", () => {
-    expect(buildCommand(newConfig("rspec", "s", "spec/a_spec.rb"), { debug: { port: 1234 } })).toBe("rdbg --open --port=1234 --host=127.0.0.1 --command -- bundle exec rspec spec/a_spec.rb");
+    expect(buildCommand(newConfig("rspec", "s", "spec/a_spec.rb"), { debug: { port: 1234 } })).toBe("rdbg --open --port=1234 --host=127.0.0.1 --command -- rspec spec/a_spec.rb");
+  });
+
+  it("picks the RSpec runner like RubyMine: binstub, else the bundle's rspec when locked, else a global rspec", async () => {
+    const spec = () => buildCommand(newConfig("rspec", "s", "spec"));
+    expect(spec()).toBe("rspec spec");
+    fake.files.set(`${ROOT}/Gemfile.lock`, "GEM\n  specs:\n    rspec-core (3.13.0)\n");
+    await loadRunConfigs();
+    expect(spec()).toBe("bundle exec rspec spec");
+    state.project = project({ binRspec: true });
+    expect(spec()).toBe("bin/rspec spec");
+    state.project = project();
+  });
+
+  it("keeps the rake/rails -T error output so a failure says why", async () => {
+    await trustProject(ROOT, true);
+    const commands: string[] = [];
+    fake.capture = (c) => (commands.push(c), "rails db:migrate  # Migrate the database\n");
+    await rakeTask();
+    expect(commands.find((c) => c.includes("-T"))).toBe("bin/rails -T 2>&1");
+    document.getElementById("overlay-root")!.replaceChildren();
+  });
+
+  it("reads .ruby-version from the project root for chruby and rvm, whatever the working directory", () => {
+    expect(buildCommand({ ...newConfig("ruby", "r", "x.rb"), cwd: "engines/core", bundler: false, rubyManager: "chruby" })).toBe(`chruby-exec "$(cat ${ROOT}/.ruby-version)" -- ruby x.rb`);
+    expect(buildCommand({ ...newConfig("ruby", "r", "x.rb"), cwd: "engines/core", bundler: false, rubyManager: "rvm" })).toBe(`rvm in ${ROOT} do ruby x.rb`);
   });
 
   it("keeps custom commands verbatim", () => {
@@ -120,8 +145,40 @@ describe("run configuration storage", () => {
     await loadRunConfigs();
     expect(configList().map((c) => [c.name, c.shared])).toEqual([["Rails server", true], ["Rails console", false], ["All tests", false]]);
     await saveRunConfigs(configList().map((c) => ({ ...c, shared: false })));
-    expect(fake.files.has(`${ROOT}/.garnet/run.json`)).toBe(false);
+    expect(JSON.parse(fake.files.get(`${ROOT}/.garnet/run.json`)!).configurations).toEqual([]);
     expect(stateEntry().configurations).toHaveLength(3);
+  });
+
+  it("keeps the selection out of an existing .garnet/run.json and never rewrites or deletes it on select", async () => {
+    const raw = JSON.stringify({ selected: "Team server", configurations: [{ name: "Team server", type: "rails-server" }, { name: "Team specs", type: "rspec", env: { PATH: "/x" } }] });
+    fake.files.set(`${ROOT}/.garnet/run.json`, raw);
+    await trustProject(ROOT, true);
+    await loadRunConfigs();
+    fake.calls.length = 0;
+    const select = document.querySelector<HTMLSelectElement>("#run-widget .run-select")!;
+    select.value = "Team specs";
+    select.dispatchEvent(new Event("change"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fake.files.get(`${ROOT}/.garnet/run.json`)).toBe(raw);
+    expect(projectWrites()).toEqual([]);
+    expect(fake.calls).not.toContain("api.deletePath");
+    expect(stateEntry().selected).toBe("Team specs");
+    await saveRunConfigs(configList().map((c) => ({ ...c, args: c.shared ? c.args : "x" })));
+    expect(fake.files.get(`${ROOT}/.garnet/run.json`)).toBe(raw);
+  });
+
+  it("rewrites only the edited shared entry, keeping unknown keys and entries it could not read", async () => {
+    const raw = { version: 2, configurations: [{ name: "Team server", type: "rails-server", note: "keep me" }, { name: "Legacy", type: "capistrano" }, { name: "Team specs", type: "rspec" }] };
+    fake.files.set(`${ROOT}/.garnet/run.json`, JSON.stringify(raw));
+    await trustProject(ROOT, true);
+    await loadRunConfigs();
+    await saveRunConfigs(configList().map((c) => (c.name === "Team server" ? { ...c, args: "-p 4000" } : c)));
+    const file = JSON.parse(fake.files.get(`${ROOT}/.garnet/run.json`)!);
+    expect(file.version).toBe(2);
+    expect(file.selected).toBeUndefined();
+    expect(file.configurations.map((c: { name: string }) => c.name)).toEqual(["Team server", "Team specs", "Legacy"]);
+    expect(file.configurations[0]).toMatchObject({ note: "keep me", args: "-p 4000" });
+    expect(file.configurations[1]).toEqual({ name: "Team specs", type: "rspec" });
   });
 
   it("keeps reading an existing .garnet/run.json, but only once trusted", async () => {
@@ -155,32 +212,38 @@ describe("docker compose targets", () => {
     expect(validateConfig({ name: "x", type: "ruby", docker, env: { RUBYOPT: "-r/evil", A: "1" } })?.env).toEqual({ A: "1" });
   });
 
-  it("runs inside the service with env names only and the mapped working directory", () => {
+  it("runs inside the service with env names only and the mapped working directory", async () => {
+    fake.files.set(`${ROOT}/Gemfile.lock`, "GEM\n  specs:\n    rspec-core (3.13.0)\n");
+    await loadRunConfigs();
     const cfg: RunConfig = { ...newConfig("rspec", "s", "spec/a_spec.rb"), cwd: "engines/core", env: { SECRET: "hunter2" }, rubyManager: "mise", docker };
     const cmd = buildCommand(cfg);
-    expect(cmd).toBe("docker compose -f docker-compose.yml run --rm -e SECRET -w /app/engines/core web bundle exec rspec spec/a_spec.rb");
+    expect(cmd).toBe("docker compose -f docker-compose.yml run --rm -e SECRET -w /app/engines/core web sh -c 'bundle exec rspec spec/a_spec.rb'");
     expect(cmd).not.toContain("hunter2");
   });
 
   it("debugs via rdbg with the port published on loopback only and keeps the configured Rails binding", () => {
     expect(buildCommand({ ...newConfig("rails-server", "s"), docker }, { debug: { port: 4567 } })).toBe(
-      "docker compose -f docker-compose.yml run --rm -p 127.0.0.1:4567:4567 -w /app web rdbg --open --port=4567 --host=0.0.0.0 --command -- bin/rails server -b 127.0.0.1 -p 3000",
+      "docker compose -f docker-compose.yml run --rm -p 127.0.0.1:4567:4567 -w /app web sh -c 'rdbg --open --port=4567 --host=0.0.0.0 --command -- bin/rails server -b 127.0.0.1 -p 3000'",
     );
   });
 
   it("publishes service ports only when ticked", () => {
-    expect(buildCommand({ ...newConfig("rails-server", "s", "-b 0.0.0.0"), docker: { ...docker, servicePorts: true } })).toBe("docker compose -f docker-compose.yml run --rm --service-ports -w /app web bin/rails server -p 3000 -b 0.0.0.0");
+    expect(buildCommand({ ...newConfig("rails-server", "s", "-b 0.0.0.0"), docker: { ...docker, servicePorts: true } })).toBe("docker compose -f docker-compose.yml run --rm --service-ports -w /app web sh -c 'bin/rails server -p 3000 -b 0.0.0.0'");
   });
 
   it("prefers a shared-volume socket over TCP and publishes nothing", () => {
     expect(buildCommand({ ...newConfig("ruby", "r", "x.rb"), bundler: false, docker: { ...docker, socketPath: "tmp/rdbg.sock" } }, { debug: { port: 4567 } })).toBe(
-      "docker compose -f docker-compose.yml run --rm -w /app web rdbg --open --sock-path=/app/tmp/rdbg.sock --command -- ruby x.rb",
+      "docker compose -f docker-compose.yml run --rm -w /app web sh -c 'rdbg --open --sock-path=/app/tmp/rdbg.sock --command -- ruby x.rb'",
     );
+  });
+
+  it("runs a compound custom command entirely inside the container", () => {
+    expect(buildCommand({ ...newConfig("custom", "c", "bin/setup && rails db:seed"), docker })).toBe("docker compose -f docker-compose.yml run --rm -w /app web sh -c 'bin/setup && rails db:seed'");
   });
 
   it("uses exec without publishing ports", () => {
     expect(buildCommand({ ...newConfig("ruby", "r", "x.rb"), bundler: false, docker: { ...docker, mode: "exec", composeFile: "" } }, { debug: { port: 12345 } })).toBe(
-      "docker compose exec -w /app web rdbg --open --port=12345 --host=0.0.0.0 --command -- ruby x.rb",
+      "docker compose exec -w /app web sh -c 'rdbg --open --port=12345 --host=0.0.0.0 --command -- ruby x.rb'",
     );
   });
 });

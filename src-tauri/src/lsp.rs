@@ -28,6 +28,15 @@ impl Lsp {
             let _ = s.child.wait();
         }
     }
+
+    /// Installs a freshly started server. One that an overlapping start installed in between is killed, not leaked.
+    fn install(&self, server: Server) {
+        let previous = self.0.lock().unwrap().replace(server);
+        if let Some(mut s) = previous {
+            let _ = s.child.kill();
+            let _ = s.child.wait();
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -102,7 +111,7 @@ pub async fn lsp_start(
         }
     });
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-    *state.0.lock().unwrap() = Some(Server { id, child, stdin });
+    state.install(Server { id, child, stdin });
     let slot = state.0.clone();
     std::thread::spawn(move || {
         read_messages(BufReader::new(stdout), |body| {
@@ -133,6 +142,23 @@ pub fn lsp_stop(state: State<'_, Lsp>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_overlapping_start_kills_the_server_it_replaces() {
+        let lsp = Lsp::default();
+        let spawn = || {
+            let mut child = std::process::Command::new("sleep").arg("30").stdin(Stdio::piped()).spawn().unwrap();
+            let stdin = child.stdin.take().unwrap();
+            (child.id(), Server { id: NEXT_ID.fetch_add(1, Ordering::SeqCst), child, stdin })
+        };
+        let (first, a) = spawn();
+        let (_, b) = spawn();
+        lsp.install(a);
+        lsp.install(b);
+        let r = unsafe { libc::waitpid(first as i32, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(r, -1, "the replaced server is still running or unreaped");
+        lsp.stop();
+    }
 
     #[test]
     fn launches_global_ruby_lsp_with_the_launcher_never_bundle_exec() {

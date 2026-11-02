@@ -33,11 +33,13 @@ function singularPath(p: string) {
 }
 
 export function relatedFiles(path: string, files: string[]): { kind: string; path: string }[] {
-  const resource = resourceOf(path);
-  if (!resource) return [];
-  const name = resource.split("/").pop()!;
-  const plural = resource.replace(/[^/]+$/, pluralize(name));
-  const pluralName = pluralize(name);
+  const found = resourceOf(path);
+  if (!found) return [];
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const resource = esc(found);
+  const name = esc(found.split("/").pop()!);
+  const plural = esc(found.replace(/[^/]+$/, pluralize(found.split("/").pop()!)));
+  const pluralName = esc(pluralize(found.split("/").pop()!));
   const rules: [string, RegExp][] = [
     ["Model", new RegExp(`^app/models/${resource}\\.rb$`)],
     ["Controller", new RegExp(`^app/controllers/(?:\\w+/)?${plural}_controller\\.rb$`)],

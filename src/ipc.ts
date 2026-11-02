@@ -1,6 +1,23 @@
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 
-export { Channel, invoke };
+export { Channel };
+
+const searchWatchers = new Set<() => void>();
+/// The backend keeps one search at a time: starting a search cancels the running one without a Done event, so a
+/// caller waiting for Done is told here instead. Returns an unsubscribe function.
+export function onSearchSuperseded(fn: () => void) {
+  searchWatchers.add(fn);
+  return () => void searchWatchers.delete(fn);
+}
+
+export function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
+  if (cmd === "search_text") {
+    const waiting = [...searchWatchers];
+    searchWatchers.clear();
+    waiting.forEach((fn) => fn());
+  }
+  return tauriInvoke<T>(cmd, args);
+}
 
 export type PtyEvent = { type: "data"; data: string } | { type: "exit"; code: number | null };
 export type RpcEvent =
@@ -104,7 +121,7 @@ export const api = {
   gitSetTrusted: (trusted: boolean) => invoke<void>("git_set_trusted", { trusted }),
   canonicalPath: (path: string) => invoke<string>("canonical_path", { path }),
   configRead: (name: string) => invoke<string | null>("config_read", { name }),
-  configWrite: (name: string, content: string) => invoke<void>("config_write", { name, content }),
+  configWrite: (name: string, content: string, expected?: string) => invoke<void>("config_write", { name, content, expected }),
   gitStatus: (root: string) => invoke<GitStatusEntry[]>("git_status", { root }),
   gitBranch: (root: string) => invoke<string>("git_branch", { root }),
   gitShow: (root: string, path: string, rev: string) => invoke<string>("git_show", { root, path, rev }),

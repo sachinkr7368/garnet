@@ -14,7 +14,8 @@ mod search;
 mod watch;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{Emitter, Manager, RunEvent};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 
 fn menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
     let item = |id: &str, label: &str, accel: Option<&str>| MenuItem::with_id(app, id, label, true, accel);
@@ -28,12 +29,12 @@ fn menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> 
                 &[
                     &PredefinedMenuItem::about(app, None, None)?,
                     &PredefinedMenuItem::separator(app)?,
-                    &item("settings", "Settings…", Some("CmdOrCtrl+,"))?,
+                    &item("settings", "Settings…", None)?,
                     &PredefinedMenuItem::separator(app)?,
                     &PredefinedMenuItem::hide(app, None)?,
                     &PredefinedMenuItem::hide_others(app, None)?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::quit(app, None)?,
+                    &item("quit", "Quit Garnet", Some("CmdOrCtrl+Q"))?,
                 ],
             )?,
             &Submenu::with_items(
@@ -51,6 +52,9 @@ fn menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> 
                 "Edit",
                 true,
                 &[
+                    &PredefinedMenuItem::undo(app, None)?,
+                    &PredefinedMenuItem::redo(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
                     &PredefinedMenuItem::cut(app, None)?,
                     &PredefinedMenuItem::copy(app, None)?,
                     &PredefinedMenuItem::paste(app, None)?,
@@ -79,6 +83,44 @@ fn menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> 
     )
 }
 
+/// When the unanswered close request was made (ms since start, 0 = none), and whether the frontend agreed to quit.
+static CLOSE_ASKED: AtomicU64 = AtomicU64::new(0);
+static QUITTING: AtomicBool = AtomicBool::new(false);
+
+/// Whether a close/quit request may go ahead now. Otherwise the frontend is asked (unsaved changes prompt) and
+/// answers with `quit_now`; a frontend that has not answered a request for 5s cannot keep the app open.
+fn close_allowed(asked: &AtomicU64, quitting: bool, now_ms: u64) -> bool {
+    if quitting {
+        return true;
+    }
+    let first = asked.load(Ordering::SeqCst);
+    if first != 0 && now_ms.saturating_sub(first) > 5000 {
+        return true;
+    }
+    if first == 0 {
+        asked.store(now_ms.max(1), Ordering::SeqCst);
+    }
+    false
+}
+
+fn request_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let ok = close_allowed(&CLOSE_ASKED, QUITTING.load(Ordering::SeqCst), project::uptime_ms() as u64);
+    if !ok {
+        let _ = app.emit("close-requested", ());
+    }
+    ok
+}
+
+/// The frontend's answer to "close-requested": quit (after saving or discarding) or stay open.
+#[tauri::command]
+fn quit_now(app: tauri::AppHandle, quit: bool) {
+    CLOSE_ASKED.store(0, Ordering::SeqCst);
+    if quit {
+        QUITTING.store(true, Ordering::SeqCst);
+        app.exit(0);
+    }
+}
+
 pub fn run() {
     let _ = project::STARTED.set(std::time::Instant::now());
     let app = tauri::Builder::default()
@@ -97,6 +139,13 @@ pub fn run() {
             project::smoke_watchdog(app.handle().clone());
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if !request_close(window.app_handle()) {
+                    api.prevent_close();
+                }
+            }
+        })
         .on_menu_event(|app, event| {
             let _ = app.emit("menu", event.id().0.clone());
         })
@@ -105,6 +154,7 @@ pub fn run() {
             fsops::read_file,
             fsops::write_file,
             fsops::export_file,
+            fsops::import_file,
             fsops::create_path,
             fsops::rename_path,
             fsops::delete_path,
@@ -177,11 +227,17 @@ pub fn run() {
             db::db_password_delete,
             db::db_password_exists,
             db::db_detect,
+            quit_now,
         ])
         .build(tauri::generate_context!())
         .expect("failed to start Garnet");
 
     app.run(|app, event| {
+        if let RunEvent::ExitRequested { code: None, api, .. } = &event {
+            if !request_close(app) {
+                api.prevent_exit();
+            }
+        }
         if let RunEvent::Exit = event {
             app.state::<pty::Ptys>().kill_all();
             app.state::<lsp::Lsp>().stop();
@@ -189,4 +245,18 @@ pub fn run() {
             tauri::async_runtime::block_on(app.state::<db::Db>().close_all());
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_waits_for_the_frontend_unless_it_never_answers() {
+        let asked = AtomicU64::new(0);
+        assert!(!close_allowed(&asked, false, 100));
+        assert!(!close_allowed(&asked, false, 3000));
+        assert!(close_allowed(&asked, false, 5200));
+        assert!(close_allowed(&AtomicU64::new(0), true, 100));
+    }
 }

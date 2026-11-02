@@ -102,6 +102,16 @@ pub async fn write_file(app: AppHandle, index: State<'_, Index>, path: String, c
     write_new(Path::new(&path), &content, false)
 }
 
+/// Writes an export (CSV/JSON) to a path the user picked in a save dialog: same symlink and `..` checks as
+/// `write_file`, with the chosen folder as the only allowed root.
+#[tauri::command]
+pub async fn export_file(path: String, content: String) -> Result<(), String> {
+    let dir = Path::new(&path).parent().ok_or("invalid export path")?;
+    let root = fs::canonicalize(dir).map_err(e2s)?;
+    check_write(&path, &[root], false)?;
+    write_new(Path::new(&path), &content, false)
+}
+
 #[tauri::command]
 pub async fn create_path(app: AppHandle, index: State<'_, Index>, path: String, dir: bool) -> Result<(), String> {
     check_write(&path, &write_roots(&app, &index), false)?;
@@ -184,6 +194,23 @@ mod tests {
         assert!(check_write("relative.rb", &roots, false).is_err());
         assert!(write_new(&proj.join("link.rb"), "pwned", false).is_err());
         assert_eq!(fs::read_to_string(outside.join("secret")).unwrap(), "keep");
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn exports_write_to_the_chosen_folder_but_never_through_symlinks() {
+        let base = std::env::temp_dir().join(format!("garnet-export-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join("target"), "keep").unwrap();
+        std::os::unix::fs::symlink(base.join("target"), base.join("link.csv")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let at = |p: &Path| p.to_string_lossy().into_owned();
+        rt.block_on(export_file(at(&base.join("out.csv")), "a,b\n".into())).unwrap();
+        assert_eq!(fs::read_to_string(base.join("out.csv")).unwrap(), "a,b\n");
+        assert!(rt.block_on(export_file(at(&base.join("link.csv")), "x".into())).is_err());
+        assert!(rt.block_on(export_file("out.csv".into(), "x".into())).is_err());
+        assert_eq!(fs::read_to_string(base.join("target")).unwrap(), "keep");
         fs::remove_dir_all(&base).unwrap();
     }
 }

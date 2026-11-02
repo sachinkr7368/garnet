@@ -3,7 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { allCommands, commands, installKeyHandler, keyLabel, runCommand, showPalette } from "./commands";
-import { attachToProcess, debugView, evaluateSelection, restartDebug, resume, step, stopDebug, toggleBreakpoint, viewBreakpoints } from "./debug";
+import { attachToProcess, debugView, evaluateSelection, gotoBreakpoint, loadBreakpoints, restartDebug, resume, step, stopAllSessions, stopDebug, toggleBreakpoint, toggleBreakpointEnabled, viewBreakpoints } from "./debug";
+import { rerunAll, rerunFailed, testResultsView } from "./testresults";
 import {
   activeTab, allTabs, closeActive, closeAll, cycleTab, editor, events, handleFsChanged, monaco, navigateBack, navigateForward, openFile, recentFileList,
   recentLocations, saveActive, saveAll,
@@ -35,6 +36,7 @@ sidebar.add({ id: "structure", title: "Structure", icon: "symbol-structure", el:
 
 bottom.add({ id: "terminal", title: "Terminal", icon: "terminal", el: terminals.el, onShow: showTerminalPanel });
 bottom.add({ id: "run", title: "Run", icon: "play", el: runs.el, onShow: () => runs.fitActive() });
+bottom.add({ id: "tests", title: "Test Results", icon: "beaker", el: testResultsView });
 bottom.add({ id: "find", title: "Find", icon: "search", el: searchView });
 bottom.add({ id: "problems", title: "Problems", icon: "warning", el: problemsView });
 bottom.add({ id: "debug", title: "Debug", icon: "debug-alt", el: debugView });
@@ -249,7 +251,13 @@ commands(
   { id: "debugRubyFile", title: "Run: Debug Current Ruby File", run: needProject(() => { const t = activeTab(); if (t) launch(newConfig("ruby", t.title, t.path), "debug"); }) },
   { id: "attach", title: "Run: Attach to Process (rdbg port/socket)…", run: needProject(attachToProcess) },
   { id: "toggleBreakpoint", title: "Debug: Toggle Line Breakpoint", key: "cmd+f8", run: () => toggleBreakpoint() },
-  { id: "viewBreakpoints", title: "Debug: View Breakpoints…", key: "cmd+shift+f8", run: viewBreakpoints },
+  { id: "viewBreakpoints", title: "Debug: View Breakpoints…", key: "cmd+shift+f8", run: needProject(() => viewBreakpoints()) },
+  { id: "gotoBreakpoint", title: "Debug: Go to Breakpoint…", run: needProject(gotoBreakpoint) },
+  { id: "toggleBreakpointEnabled", title: "Debug: Toggle Breakpoint Enabled", run: () => toggleBreakpointEnabled() },
+  { id: "stopAllSessions", title: "Debug: Stop All Sessions", run: stopAllSessions },
+  { id: "testResultsView", title: "View: Test Results", run: () => bottom.toggle("tests") },
+  { id: "rerunFailedTests", title: "Test: Rerun Failed Tests", run: needProject(rerunFailed) },
+  { id: "rerunTests", title: "Test: Rerun Last Test Run", run: needProject(rerunAll) },
   { id: "evaluate", title: "Debug: Evaluate Expression…", key: "alt+f8", run: evaluateSelection },
   { id: "resume", title: "Debug: Resume Program", key: "cmd+alt+r f9", run: resume },
   { id: "stepOver", title: "Debug: Step Over", key: "f8", run: () => step("next") },
@@ -332,6 +340,7 @@ async function openProject(path: string) {
   getCurrentWindow().setTitle(`${info.name} — Garnet`).catch(() => {});
   addRecentProject(info.root);
   sidebar.show("project");
+  await loadBreakpoints();
   const session = await loadSession(info.root);
   await initTree(session?.expanded ?? []);
   renderWelcome();

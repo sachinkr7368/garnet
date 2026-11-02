@@ -65,6 +65,15 @@ cat /tmp/report.json
 breakpoint in `PostsController#index`, requests `/posts` and checks that the
 request pauses there, evaluates an expression and completes after resuming.
 Use a throwaway app (`rails new blog && bin/rails g scaffold Post title body:text`).
+It also runs two copies of `lib/smoke_debug.rb` under the debugger at once and
+checks both pause at the breakpoint on line 5 (which it leaves set, so a second
+smoke run proves breakpoints survive a restart).
+
+The test tree checks expect `spec/calc_spec.rb` (one passing, one failing on
+line 7, one pending example; run with the global `rspec` gem) and
+`test/models/smoke_calc_test.rb` (pass, failure on line 8, skip). With Docker
+running, a `docker-compose.yml` service `app` (image `ruby:3.3-slim`, project
+mounted at `/app`) is used for the compose run check.
 
 ## Guidelines
 

@@ -3,7 +3,9 @@
 import { listen } from "@tauri-apps/api/event";
 import { allCommands, keymap } from "./commands";
 import { importJetBrainsKeymap, jetbrainsKeystroke } from "./keymapref";
-import { debugState, evaluate, resume, smokeHooks, stopDebug, toggleBreakpoint } from "./debug";
+import { breakpointsIn, debugSessions, debugState, evaluate, flushBreakpoints, loadBreakpoints, resume, resumeSession, selectDebugSession, smokeHooks, stopAllSessions, stopDebug, toggleBreakpoint } from "./debug";
+import { rerunFailed, testRunState, testStatusAt } from "./testresults";
+import { defaultDocker } from "./docker";
 import { activeTab, allTabs, closeTab, editor, languageFor, openFile } from "./editor";
 import { symbolPath } from "./breadcrumbs";
 import { snippetsFor } from "./languages/snippets";
@@ -12,8 +14,8 @@ import { decodeTokens, ruleFor, SEMANTIC_RULES } from "./semantic";
 import { refreshGit } from "./git";
 import { api, Channel, invoke, type PtyEvent } from "./ipc";
 import { cachedSymbols, goToImplementation, lspCapabilities, lspReady, request } from "./lsp";
-import { buildCommand, configList, editConfigurations, launch, newConfig, safeEnv, validateConfig } from "./run";
-import { isTrusted, loadSettings, setting, updateSetting } from "./settings";
+import { buildCommand, configList, dockerUnavailable, editConfigurations, launch, newConfig, runs, safeEnv, validateConfig, type RunConfig } from "./run";
+import { isDarkTheme, isTrusted, loadSettings, setting, toggleTheme, updateSetting } from "./settings";
 import { openSettingsWindow } from "./settingsui";
 import { refreshToolbar } from "./toolbar";
 import { monaco } from "./editor";
@@ -134,7 +136,14 @@ export async function runSmoke(project: string, withDebug: boolean, openProject:
 
     await uiChecks(check);
     await editorFeatureChecks(check, !!ok);
-    if (withDebug) await debugRailsRequest(report, controller, check);
+    const bpRestored = await breakpointChecks(check);
+    await testTreeChecks(report, check);
+    await dockerChecks(report, check);
+    if (withDebug) {
+      await debugRailsRequest(report, controller, check);
+      await twoDebugSessions(report, check);
+    }
+    check("breakpoint survives an app restart", bpRestored);
   } catch (e) {
     check("exception", String(e));
   }
@@ -146,11 +155,11 @@ async function debugRailsRequest(report: Report, controller: string, check: (n: 
   const model = editor.getModel()!;
   const bpLine = model.findMatches("@posts = Post.all", false, false, true, null, false)[0]?.range.startLineNumber;
   if (!bpLine) return check("debug: breakpoint line found", false);
-  toggleBreakpoint(bpLine);
+  if (!breakpointsIn(controller).some((b) => b.line === bpLine)) toggleBreakpoint(bpLine);
   const port = await api.freePort();
   const cfg = newConfig("rails-server", "Rails server", `-p ${port}`);
-  report.debugCommand = buildCommand(cfg, { port: 0 });
-  const connected = new Promise<void>((r) => (smokeHooks.connected = r));
+  report.debugCommand = buildCommand(cfg, { debug: { port: 0 } });
+  const connected = new Promise<void>((r) => (smokeHooks.connected = () => r()));
   const started = performance.now();
   launch(cfg, "debug");
   await Promise.race([connected, sleep(120000)]);
@@ -219,11 +228,24 @@ async function uiChecks(check: (n: string, ok: boolean | string) => void) {
   check("project setting reset", editor.getOption(monaco.editor.EditorOption.fontSize) === before);
   const names = configList().map((c) => c.name);
   check("default run configurations", names.includes("Rails server") && names.includes("Rails console") || names.join(","));
-  check(".garnet/run.json saved", (await api.readFile(`${state.project!.root}/.garnet/run.json`).catch(() => "")).includes("Rails server"));
+  const stored = JSON.parse((await api.configRead("run-configs.json")) ?? "{}")[state.project!.root];
+  const sharedNames = configList().filter((c) => c.shared).map((c) => c.name);
+  check("run configurations stored in Garnet's config dir", (stored?.configurations.length ?? 0) + sharedNames.length === names.length || JSON.stringify({ stored, sharedNames, names }));
   editConfigurations();
   check("run configuration dialog lists configs", overlay.querySelectorAll(".rc-item").length === names.length);
+  check("run configuration dialog offers Store as project file", [...overlay.querySelectorAll(".rc-check")].some((l) => l.textContent?.includes("Store as project file")));
   overlay.replaceChildren();
+  const prevTheme = setting<string>("appearance.theme");
+  const wasDark = isDarkTheme();
+  await toggleTheme();
+  const monacoDark = () => document.querySelector(".monaco-editor")?.classList.contains("vs-dark");
+  check("toggle theme switches chrome and editor live", isDarkTheme() === !wasDark && monacoDark() === !wasDark && setting("appearance.theme") === (wasDark ? "light" : "dark"));
+  await toggleTheme();
+  check("toggle theme back", isDarkTheme() === wasDark && monacoDark() === wasDark);
+  await updateSetting("appearance.theme", prevTheme === "system" ? undefined : prevTheme);
   await refreshToolbar();
+  const worktreeLabel = document.querySelector<HTMLElement>('#switchers [title="Git worktrees"]');
+  check("worktree switcher shows the current worktree name", !!worktreeLabel && !worktreeLabel.hidden && !/\d+ worktrees/.test(worktreeLabel.textContent ?? "") && (worktreeLabel.textContent ?? "").length > 0);
   const branch = (await invoke<string>("git_run", { root: state.project!.root, args: ["rev-parse", "--abbrev-ref", "HEAD"] })).trim();
   check("toolbar shows current branch", document.getElementById("switchers")!.textContent!.includes(branch));
   await invoke("git_run", { root: state.project!.root, args: ["branch", "garnet-smoke"] });
@@ -358,4 +380,106 @@ async function editorFeatureChecks(check: (n: string, ok: boolean | string) => v
 
 function clearToasts() {
   document.querySelector<HTMLElement>(".toasts")?.replaceChildren();
+}
+
+const SMOKE_SCRIPT = "lib/smoke_debug.rb";
+const SMOKE_BP_LINE = 5;
+
+/// Breakpoints follow edits, persist in Garnet's state dir and reload; the one left at SMOKE_BP_LINE is checked by the next run.
+async function breakpointChecks(check: (n: string, ok: boolean | string) => void): Promise<boolean | string> {
+  const path = `${state.project!.root}/${SMOKE_SCRIPT}`;
+  const restored = breakpointsIn(path).some((b) => b.line === SMOKE_BP_LINE && b.enabled);
+  await openFile(path);
+  const model = editor.getModel()!;
+  if (!restored) toggleBreakpoint(SMOKE_BP_LINE);
+  check("breakpoint set", breakpointsIn(path).some((b) => b.line === SMOKE_BP_LINE));
+  model.pushEditOperations([], [{ range: new monaco.Range(1, 1, 1, 1), text: "# moved\n# twice\n" }], () => null);
+  check("breakpoint follows inserted lines", breakpointsIn(path).some((b) => b.line === SMOKE_BP_LINE + 2) || JSON.stringify(breakpointsIn(path)));
+  while (model.canUndo() && model.getAlternativeVersionId() !== 1) model.undo();
+  check("breakpoint moves back on undo", breakpointsIn(path).some((b) => b.line === SMOKE_BP_LINE) || JSON.stringify(breakpointsIn(path)));
+  await flushBreakpoints();
+  const stored = (await api.configRead("breakpoints.json")) ?? "";
+  check("breakpoints stored in Garnet's state dir, not the repo", stored.includes(SMOKE_SCRIPT) && !(await api.readFile(`${state.project!.root}/.garnet/breakpoints.json`).then(() => true, () => false)));
+  await loadBreakpoints();
+  check("breakpoints reload from disk", breakpointsIn(path).some((b) => b.line === SMOKE_BP_LINE && b.enabled));
+  return restored || "first run: rerun the smoke to verify";
+}
+
+async function runToEnd(cfg: RunConfig, mode: "run" | "debug" = "run") {
+  const before = testRunState()?.id;
+  launch(cfg, mode);
+  const started = await until(() => testRunState()?.id !== before && testRunState(), 30000);
+  if (!started) return null;
+  return until(() => (testRunState()?.exited ? testRunState() : null), 180000, 200);
+}
+
+async function testTreeChecks(report: Report, check: (n: string, ok: boolean | string) => void) {
+  const root = state.project!.root;
+  const spec = `${root}/spec/calc_spec.rb`;
+  const rspec = { ...newConfig("rspec", "Smoke specs", "spec/calc_spec.rb"), bundler: false };
+  const r = await runToEnd(rspec);
+  report.rspecTree = r && { counts: r.counts, rows: r.rows, progress: r.progressWidth };
+  check("rspec tree: 1 passed, 1 failed, 1 pending", !!r && r.counts.passed === 1 && r.counts.failed === 1 && r.counts.pending === 1 || JSON.stringify(r?.counts ?? null));
+  check("rspec tree rows (file, groups, examples)", (r?.rows ?? 0) >= 5 || String(r?.rows));
+  const failed = r?.results.find((x) => x.status === "failed");
+  check("rspec failure message and backtrace", !!failed?.message?.includes("expected: 5") && !!failed.backtrace?.some((l) => l.includes("calc_spec.rb:8")) || JSON.stringify(failed ?? null));
+  check("rspec progress complete", r?.progressWidth === "100%" || String(r?.progressWidth));
+  check("gutter shows last result", testStatusAt(spec, 7) === "failed" && testStatusAt(spec, 3) === "passed" && testStatusAt(spec, 2) === "failed" || String(testStatusAt(spec, 7)));
+  const before = testRunState()?.id;
+  rerunFailed();
+  await until(() => testRunState()?.id !== before, 30000);
+  const rf = await until(() => (testRunState()?.exited ? testRunState() : null), 180000, 200);
+  check("rspec rerun failed runs only the failure", !!rf && rf.counts.failed === 1 && rf.counts.total === 1 || JSON.stringify(rf?.counts ?? null));
+
+  const mt = await runToEnd(newConfig("minitest", "Smoke tests", "test/models/smoke_calc_test.rb"));
+  report.minitestTree = mt && { counts: mt.counts, rows: mt.rows };
+  check("minitest tree: 1 passed, 1 failed, 1 skipped", !!mt && mt.counts.passed === 1 && mt.counts.failed === 1 && mt.counts.pending === 1 || JSON.stringify(mt?.counts ?? null));
+  const mf = mt?.results.find((x) => x.status === "failed");
+  check("minitest failure message and line", !!mf?.message?.includes("Expected: 5") && mf.line === 8 || JSON.stringify(mf ?? null));
+  const before2 = testRunState()?.id;
+  rerunFailed();
+  await until(() => testRunState()?.id !== before2, 30000);
+  const mrf = await until(() => (testRunState()?.exited ? testRunState() : null), 180000, 200);
+  check("minitest rerun failed runs only the failure", !!mrf && mrf.counts.failed === 1 && mrf.counts.total === 1 || JSON.stringify(mrf?.counts ?? null));
+}
+
+async function dockerChecks(report: Report, check: (n: string, ok: boolean | string) => void) {
+  const why = await dockerUnavailable();
+  report.docker = why || "available";
+  if (why) return check("docker compose run", `untested: ${why}`);
+  const cfg: RunConfig = { ...newConfig("ruby", "Smoke docker", SMOKE_SCRIPT), bundler: false, rubyManager: "none", docker: { ...defaultDocker(), service: "app", composeFile: "docker-compose.yml" } };
+  report.dockerCommand = buildCommand(cfg);
+  launch(cfg, "run");
+  const item = await until(() => runs.items.find((i) => i.title === cfg.name && i.view.exited), 300000, 500);
+  const buffer = item ? [...Array(item.view.term.buffer.active.length).keys()].map((y) => item.view.term.buffer.active.getLine(y)?.translateToString(true) ?? "").join("\n") : "";
+  check("docker compose run (exit 0, output from container)", (item?.status === "ok" && buffer.includes("total=3")) || `${item?.status}: ${buffer.slice(-300)}`);
+}
+
+/// Two configurations under rdbg at once, both paused at the same persisted breakpoint.
+async function twoDebugSessions(report: Report, check: (n: string, ok: boolean | string) => void) {
+  const path = `${state.project!.root}/${SMOKE_SCRIPT}`;
+  const a = newConfig("ruby", "Smoke A", SMOKE_SCRIPT);
+  const b = newConfig("ruby", "Smoke B", SMOKE_SCRIPT);
+  launch(a, "debug");
+  await sleep(300);
+  launch(b, "debug");
+  const both = await until(() => {
+    const list = debugSessions().filter((s) => (s.name === "Smoke A" || s.name === "Smoke B") && s.paused && s.frame);
+    return list.length === 2 ? list : null;
+  }, 120000, 200);
+  report.twoSessions = both ?? debugSessions();
+  check("two debug sessions paused at the same time", !!both && both.every((s) => s.frame?.path === path && s.frame.line === SMOKE_BP_LINE) || JSON.stringify(debugSessions()));
+  if (both) {
+    selectDebugSession("Smoke A");
+    const aFrame = debugState().frame;
+    selectDebugSession("Smoke B");
+    const bFrame = debugState().frame;
+    check("panel follows the selected session", aFrame?.line === SMOKE_BP_LINE && bFrame?.line === SMOKE_BP_LINE && debugSessions().find((s) => s.selected)?.name === "Smoke B");
+    resumeSession("Smoke A");
+    const aEnded = await until(() => debugSessions().find((s) => s.name === "Smoke A")?.ended, 30000);
+    check("resuming one session leaves the other paused", !!aEnded && !!debugSessions().find((s) => s.name === "Smoke B")?.paused);
+    resumeSession("Smoke B");
+    await until(() => debugSessions().find((s) => s.name === "Smoke B")?.ended, 30000);
+  }
+  await stopAllSessions();
 }

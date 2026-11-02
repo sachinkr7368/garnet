@@ -1,39 +1,26 @@
+import { monacoTheme, type Theme } from "./theme";
+
 export interface TokenRule {
   token: string;
   foreground?: string;
   fontStyle?: string;
 }
 
-export type ThemeKind = "dark" | "light";
+export type ThemeKind = Theme;
 
-/// Colors for ruby-lsp semantic token types (and modifiers as `type.modifier`), per theme kind.
-/// Every type ruby-lsp emits has a rule so no token falls back to the plain foreground.
+/// Token types and modifiers in the LSP semantic token legend (ruby-lsp emits namespace, type, class,
+/// parameter, variable[.defaultLibrary] and method).
+const SEMANTIC_TYPES = new Set(["namespace", "type", "class", "enum", "interface", "struct", "typeParameter", "parameter", "variable", "property", "enumMember", "event", "function", "method", "macro", "decorator"]);
+
+/// Semantic token rules per theme, taken from the theme palette (src/theme.ts) so they share its contrast checks.
 export const SEMANTIC_RULES: Record<ThemeKind, TokenRule[]> = {
-  dark: [
-    { token: "namespace", foreground: "c792ea" },
-    { token: "class", foreground: "c792ea" },
-    { token: "type", foreground: "6fb3d2" },
-    { token: "method", foreground: "e3c98a" },
-    { token: "function", foreground: "e3c98a" },
-    { token: "parameter", foreground: "d9a46f" },
-    { token: "variable", foreground: "d6d6dc" },
-    { token: "variable.defaultLibrary", foreground: "e0876a" },
-    { token: "property", foreground: "9cc3e6" },
-    { token: "enumMember", foreground: "c792ea" },
-  ],
-  light: [
-    { token: "namespace", foreground: "7a3e9d" },
-    { token: "class", foreground: "7a3e9d" },
-    { token: "type", foreground: "2f6fc4" },
-    { token: "method", foreground: "795e26" },
-    { token: "function", foreground: "795e26" },
-    { token: "parameter", foreground: "9c5d27" },
-    { token: "variable", foreground: "24242a" },
-    { token: "variable.defaultLibrary", foreground: "a8323e" },
-    { token: "property", foreground: "1f5f99" },
-    { token: "enumMember", foreground: "7a3e9d" },
-  ],
+  dark: semanticRules("dark"),
+  light: semanticRules("light"),
 };
+
+function semanticRules(t: Theme): TokenRule[] {
+  return monacoTheme(t).rules.filter((r) => SEMANTIC_TYPES.has(r.token.split(".")[0]));
+}
 
 export interface Legend {
   tokenTypes: string[];

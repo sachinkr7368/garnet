@@ -168,6 +168,7 @@ export interface PickItem {
 
 interface QuickPickOptions {
   placeholder: string;
+  title?: string;
   items: PickItem[] | ((query: string) => Promise<PickItem[]> | PickItem[]);
   value?: string;
   onAccept: (item: PickItem | undefined, query: string) => void;
@@ -182,7 +183,7 @@ export function quickPick(opts: QuickPickOptions) {
   const previousFocus = document.activeElement as HTMLElement | null;
   const input = h("input", { class: "qp-input", placeholder: opts.placeholder, spellcheck: false, value: opts.value ?? "" });
   const list = h("div", { class: "qp-list" });
-  const box = h("div", { class: "qp" }, input, list);
+  const box = h("div", { class: "qp" }, opts.title ? h("div", { class: "qp-title" }, opts.title) : null, input, list);
   const backdrop = h("div", { class: "qp-backdrop", onmousedown: (e: MouseEvent) => e.target === backdrop && close() }, box);
   document.getElementById("overlay-root")!.append(backdrop);
   let items: PickItem[] = [];

@@ -4,10 +4,13 @@ export const fake = {
   config: new Map<string, string>(),
   trustedFlag: false,
   calls: [] as string[],
+  /// Stdout for `api.runCapture(root, command)`; defaults to "".
+  capture: (_command: string): string => "",
   reset() {
     this.files.clear();
     this.config.clear();
     this.calls.length = 0;
+    this.capture = () => "";
     this.trustedFlag = false;
   },
 };
@@ -33,7 +36,7 @@ export const api = new Proxy(
     configPath: async (name: string) => `/config/${name}`,
     canonicalPath: async (path: string) => path.replace(/\/+$/, ""),
     gitSetTrusted: async (t: boolean) => void (fake.trustedFlag = t),
-    runCapture: async () => "",
+    runCapture: async (_root: string, command: string) => fake.capture(command),
     indexFiles: async () => [...fake.files.keys()],
   } as Record<string, (...a: any[]) => Promise<any>>,
   {

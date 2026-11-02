@@ -10,8 +10,8 @@ import { api } from "./ipc";
 import { hamlConf, hamlLanguage } from "./languages/haml";
 import { slimConf, slimLanguage } from "./languages/slim";
 import { snippetsFor } from "./languages/snippets";
-import { SEMANTIC_RULES } from "./semantic";
 import { styleFor } from "./codestyle";
+import { monacoTheme } from "./theme";
 import { globToRegExp, isDarkTheme, loadSettings, onSettingsChange, projectSettingsPath, setting, settingsPath } from "./settings";
 import { basename, rel } from "./state";
 import { h, icon, statusSlot, toast } from "./ui";
@@ -74,47 +74,8 @@ function registerSnippets() {
 }
 
 function defineThemes() {
-  monaco.editor.defineTheme("garnet-dark", {
-    base: "vs-dark",
-    inherit: true,
-    rules: [
-      { token: "comment", foreground: "7a7e85", fontStyle: "italic" },
-      { token: "keyword", foreground: "e0876a" },
-      { token: "string", foreground: "8fbf7a" },
-      { token: "number", foreground: "6fb3d2" },
-      { token: "constant", foreground: "c792ea" },
-      { token: "metatag.erb", foreground: "e0476a", fontStyle: "bold" },
-      { token: "metatag.haml", foreground: "e0476a", fontStyle: "bold" },
-      { token: "metatag.slim", foreground: "e0476a", fontStyle: "bold" },
-      { token: "tag", foreground: "e0876a" },
-      { token: "attribute.name", foreground: "9cc3e6" },
-      ...SEMANTIC_RULES.dark,
-    ],
-    colors: {
-      "editor.background": "#18181d",
-      "editorGutter.background": "#18181d",
-      "editor.lineHighlightBackground": "#22222a",
-      "editorLineNumber.foreground": "#4b4d55",
-      "editorLineNumber.activeForeground": "#a0a3ab",
-      "editor.selectionBackground": "#3a3d4a",
-      "editorIndentGuide.background1": "#26262d",
-    },
-  });
-  monaco.editor.defineTheme("garnet-light", {
-    base: "vs",
-    inherit: true,
-    rules: [
-      { token: "comment", foreground: "8c8c8c", fontStyle: "italic" },
-      { token: "keyword", foreground: "a8323e" },
-      { token: "metatag.erb", foreground: "b8263d", fontStyle: "bold" },
-      { token: "metatag.haml", foreground: "b8263d", fontStyle: "bold" },
-      { token: "metatag.slim", foreground: "b8263d", fontStyle: "bold" },
-      { token: "tag", foreground: "a8323e" },
-      { token: "attribute.name", foreground: "1f5f99" },
-      ...SEMANTIC_RULES.light,
-    ],
-    colors: { "editor.lineHighlightBackground": "#f5f5f8" },
-  });
+  monaco.editor.defineTheme("garnet-dark", monacoTheme("dark"));
+  monaco.editor.defineTheme("garnet-light", monacoTheme("light"));
 }
 
 registerErb();

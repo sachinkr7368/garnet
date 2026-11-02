@@ -64,6 +64,7 @@ Feature status compared with RubyMine. The full checklist lives in
 | GitHub PR list/review panel, OAuth device flow | Planned |
 | Rails navigation: related files (model/controller/views/tests/migrations), routes browser | Done |
 | Settings window (searchable, global + per-project), keymap editor with presets, command palette, recent projects, session restore | Done |
+| Light / Dark / System theme (follows macOS live), Toggle Theme in the toolbar | Done |
 | Database tools, HAML/Slim, Docker run targets, refactorings beyond rename | Planned |
 
 ## Install
@@ -82,9 +83,19 @@ Open a project from the welcome screen, with ⌘O, or from a terminal:
 open -a Garnet --args /path/to/your/rails/app
 ```
 
-For Ruby intelligence install ruby-lsp (Garnet offers a one-click install if it
-is missing): `gem install ruby-lsp`. For debugging, keep the `debug` gem in your
-Gemfile (Rails includes it by default).
+For Ruby intelligence install ruby-lsp for your Ruby (Garnet offers a one-click
+install if it is missing): `gem install ruby-lsp`. Like the official VS Code
+extension, Garnet runs the global `ruby-lsp` (not `bundle exec`) with the
+project's Ruby, picked from mise, rbenv, asdf, chruby or rvm by the project's
+`mise.toml`, `.tool-versions` or `.ruby-version` (override it in Settings ›
+Languages › Ruby). ruby-lsp builds its own bundle in `.ruby-lsp/`, so a project
+with missing gems still gets a working server; Garnet tells you why and offers
+to run `bundle install` in a terminal, but never runs it on its own. For
+debugging, keep the `debug` gem in your Gemfile (Rails includes it by default).
+
+Run configurations are stored in Garnet's own settings, not in your repository.
+Tick "Store as project file (share via VCS)" on a configuration to write it to
+`.garnet/run.json` for your team.
 
 ## Build from source
 

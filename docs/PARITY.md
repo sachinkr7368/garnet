@@ -87,10 +87,19 @@ partial row is meant to become a GitHub issue.
 | Feature | Status | Notes |
 | --- | --- | --- |
 | Changes panel, stage/unstage (file), commit, commit checks for errors | done | |
-| Diff view (Monaco diff editor), gutter change markers, blame current line | partial | gutter markers refresh on save, not while typing |
+| Changes as a directory tree: filter, status badges, +/- counts, Viewed marks (per branch, cleared when the file changes), expand/collapse all, group by changelist or directory | done | |
+| Compare with Branch (`git diff <base>...HEAD`, PR-style review tree) | done | diffs show merge base ↔ HEAD, not uncommitted edits |
+| Diff view: side-by-side / unified, collapse unchanged regions, next/previous difference (F7 / ⇧F7), read-only revision diffs | done | |
+| Live gutter change markers (buffer vs HEAD in a worker, debounced), click a marker: old text, Rollback, Stage This Hunk, previous/next | done | |
+| Rollback Lines (⌘⌥Z), Next/Previous Change (⌃⌥⇧↓/↑), blame current line | done | |
+| Partial staging in the Commit panel (stage/unstage single hunks) | done | hunk-level, not single lines; files with a clean filter (git-crypt, LFS) are staged whole only |
+| Git log tool window (⌘9): commit graph, filter by branch/user/path/text, commit details with changed files and diffs, file history (Project tree › Show History) | done | text filter matches commit messages, not hashes |
+| Log actions: copy revision, new branch/tag, cherry-pick, revert, reset soft/mixed/hard (confirmed) | done | |
+| Stashes: list, stash with message and untracked files, apply, pop, drop (confirmed), view a stash's changes | done | |
+| Merge conflicts (merge, rebase, cherry-pick, revert, stash pop): Conflicts list, 3-pane resolver (yours / result / theirs) with accept yours/theirs/both per chunk, mark resolved, abort/continue | done | symlink conflicts resolve by taking one side; binary files resolve with Accept Yours/Theirs |
 | Branch switcher: local/remote, checkout (stash or carry changes), new, rename, delete, fetch/pull/push, ahead/behind | done | |
-| Worktree switcher: list, open here / new window, create from branch, remove | done | |
-| Hunk/line staging, stash list UI, log/history view, merge conflict resolver, interactive rebase | planned | |
+| Worktrees: toolbar switcher and Commit panel section (folder, branch, dirty marker, current), open here / new window, create from branch, remove, reveal | done | |
+| Line-level staging, interactive rebase | planned | |
 
 ## GitHub
 
@@ -129,6 +138,7 @@ partial row is meant to become a GitHub issue.
 
 | Feature | Status | Notes |
 | --- | --- | --- |
+| File writes limited to the open project and Garnet's config folder; never through symlinks | done | files outside the project (e.g. gem sources reached via Go to Declaration) cannot be saved |
 | Settings window (searchable tree, global + `.garnet/settings.json` overrides, JSON stays editable) | done | |
 | JetBrains macOS default keymap for every implemented action; keymap editor (search, rebind, conflict prompt, find by shortcut), VS Code preset, JetBrains keymap XML import, Help › Keymap Reference | done | XML import skips two-keystroke shortcuts and actions Garnet does not have |
 | Command palette, recent projects, session restore, multiple windows (one process per window) | done | |
@@ -144,8 +154,8 @@ Independent chunks that touch separate files, so they can be built in parallel:
 1. **Test results tree** — new `src/testresults.ts`; run RSpec with `--format json` / Minitest reporter output, render pass/fail tree, rerun failed. Hooks into `run.ts` `launch` only.
 2. **GitHub PR panel** — new `src/github-prs.ts` + `github_api` (exists): PR list (search API), CI status (check-runs), PR diff (Monaco diff per file), review comments as editor view zones, checkout PR branch (`git fetch origin pull/N/head`).
 3. **OAuth device flow** — `src-tauri/src/github.rs`: device code + polling; requires registering an OAuth app and embedding its client id.
-4. **Git history and stash** — new `src/gitlog.ts`: `git log --graph` view, commit details, stash list/apply/drop, hunk staging via `git apply --cached`.
-5. **Merge conflict resolver** — new `src/merge.ts`: three-way view using Monaco diff editors.
+4. **Interactive rebase** — `src/gitlog.ts`: reorder/squash/fixup/reword from the log, driving `git rebase -i` with a generated todo via `GIT_SEQUENCE_EDITOR`.
+5. **Line-level staging** — `src/git.ts`: select lines inside a hunk in the Commit panel and build the patch from those lines only.
 6. **Breadcrumbs and Go to Implementation** — `src/editor.ts`/`src/lsp.ts`: breadcrumbs from document symbols; bind ⌘⌥B once ruby-lsp offers implementations.
 7. **Replace in Files** — `src/search.ts` + Rust `search.rs` replace command with preview.
 8. **Breakpoint persistence and tracking** — `src/debug.ts`: decorations with stickiness to follow edits, persist per project in `.garnet/breakpoints.json`; hit-count breakpoints.
@@ -154,4 +164,3 @@ Independent chunks that touch separate files, so they can be built in parallel:
 11. **HAML/Slim grammars and snippets** — `src/editor.ts` Monarch definitions, snippet provider.
 12. **Database tools** — new Rust module + `src/db.ts`: read `config/database.yml`, connect via `psql`/`mysql`/`sqlite3` CLIs, table browser and SQL console.
 13. **Rails generators and i18n/partials navigation** — `src/rails.ts`.
-14. **Live gutter diff while typing** — `src/git.ts`: diff buffer against cached HEAD text in a worker.

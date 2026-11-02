@@ -12,7 +12,9 @@ judged on two things: does it fully work, and does it keep the app fast.
 - `src/` TypeScript frontend (no framework): `editor.ts` (Monaco, tabs),
   `tree.ts`, `search.ts`, `terminal.ts`, `lsp.ts` (LSP client and Monaco
   providers), `run.ts` (run configurations), `debug.ts` (DAP client and
-  debugger UI), `git.ts`, `toolbar.ts` (project/worktree/branch switchers,
+  debugger UI), `git.ts` (Commit panel, gutter hunks), `gitlog.ts` (Git log,
+  stashes), `merge.ts` (conflict resolver), `difflogic.ts` + `diffworker.ts`
+  (line diff, patches), `toolbar.ts` (project/worktree/branch switchers,
   GitHub), `rails.ts`, `settings.ts` + `settingsui.ts`, `commands.ts` (keymap,
   palette), `smoke.ts` (end-to-end harness).
 

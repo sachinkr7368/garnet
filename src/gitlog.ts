@@ -9,7 +9,7 @@ import { bottom, contextMenu, h, icon, iconButton, inputBox, quickPick, toast } 
 
 const ROW = 24;
 const LANE = 12;
-const COLORS = ["#d6455d", "#5b8fd6", "#5aa469", "#d6a84a", "#a678c9", "#4fb3b3", "#c97b4f", "#8a8c95"];
+const COLORS = ["--accent", "--modified", "--added", "--warn", "--purple", "--blue", "--yellow", "--dim"].map((t) => `var(${t})`);
 const refresh = () => window.dispatchEvent(new Event("garnet:git-refresh"));
 const git = (...args: string[]) => api.git(root(), ...args);
 
@@ -132,15 +132,15 @@ function graphSvg(c: LogCommit, width: number) {
     line.setAttribute("y1", String(y1));
     line.setAttribute("x2", String(x2));
     line.setAttribute("y2", String(y2));
-    line.setAttribute("stroke", COLORS[(e.kind === 1 ? e.from : e.to) % COLORS.length]);
+    line.style.stroke = COLORS[(e.kind === 1 ? e.from : e.to) % COLORS.length];
     svg.append(line);
   }
   const dot = document.createElementNS(ns, "circle");
   dot.setAttribute("cx", String(x(c.col)));
   dot.setAttribute("cy", String(ROW / 2));
   dot.setAttribute("r", c.parents.length > 1 ? "3" : "3.5");
-  dot.setAttribute("fill", c.parents.length > 1 ? "var(--panel)" : COLORS[c.col % COLORS.length]);
-  dot.setAttribute("stroke", COLORS[c.col % COLORS.length]);
+  dot.style.fill = c.parents.length > 1 ? "var(--panel)" : COLORS[c.col % COLORS.length];
+  dot.style.stroke = COLORS[c.col % COLORS.length];
   svg.append(dot);
   return svg;
 }

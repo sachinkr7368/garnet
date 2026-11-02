@@ -3,6 +3,7 @@ import { languageFor, monaco } from "./editor";
 import { hasConflictMarkers, parseConflicts, type Segment } from "./difflogic";
 import { api, type OpState } from "./ipc";
 import { abs, basename, root } from "./state";
+import { setting } from "./settings";
 import { h, icon, iconButton, toast } from "./ui";
 
 const refresh = () => window.dispatchEvent(new Event("garnet:git-refresh"));
@@ -196,7 +197,7 @@ export async function openResolver(relPath: string): Promise<Resolver | null> {
   const models = { left: mk(left, "left"), result: mk(result, "result"), right: mk(right, "right") };
   const panes = { left: h("div", { class: "merge-pane" }), result: h("div", { class: "merge-pane" }), right: h("div", { class: "merge-pane" }) };
   const status = h("span", { class: "dim" });
-  const opts = { automaticLayout: true, minimap: { enabled: false }, glyphMargin: true, scrollBeyondLastLine: false, fontSize: 13, lineNumbersMinChars: 3 };
+  const opts = { automaticLayout: true, minimap: { enabled: false }, glyphMargin: true, scrollBeyondLastLine: false, fontSize: setting<number>("editor.fontSize"), fontFamily: setting<string>("editor.fontFamily"), lineNumbersMinChars: 3 };
   const rebase = st.op === "rebase";
   const dialog = h(
     "div",

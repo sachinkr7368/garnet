@@ -4,9 +4,14 @@ export const fake = {
   config: new Map<string, string>(),
   trustedFlag: false,
   calls: [] as string[],
+  /// Per-command handlers for `invoke`, and every invoke with its arguments.
+  handlers: new Map<string, (args: any) => unknown>(),
+  invocations: [] as { cmd: string; args: any }[],
   /// Stdout for `api.runCapture(root, command)`; defaults to "".
   capture: (_command: string): string => "",
   reset() {
+    this.handlers.clear();
+    this.invocations.length = 0;
     this.files.clear();
     this.config.clear();
     this.calls.length = 0;
@@ -20,9 +25,11 @@ const missing = (path: string) => Promise.reject(new Error(`No such file: ${path
 export class Channel<T> {
   onmessage: (m: T) => void = () => {};
 }
-export const invoke = async (cmd: string) => {
+export const invoke = async (cmd: string, args?: any) => {
   fake.calls.push(cmd);
-  return null;
+  fake.invocations.push({ cmd, args });
+  const handler = fake.handlers.get(cmd);
+  return handler ? handler(args) : null;
 };
 
 export const api = new Proxy(

@@ -16,7 +16,7 @@ let rerender: (() => void) | null = null;
 onSettingsChange(() => rerender?.());
 
 export function openSettingsWindow(initialPage = "Appearance") {
-  if (backdrop) return;
+  if (backdrop?.isConnected) return;
   let page = initialPage;
   let scope: Scope = "global";
   let query = "";

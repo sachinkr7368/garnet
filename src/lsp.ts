@@ -1,7 +1,9 @@
 import { allTabs, editor, ensureModel, events, handlePathMoved, monaco, openFile, uriFor, activeTab } from "./editor";
 import { api, Channel, invoke, type RpcEvent } from "./ipc";
 import { runInPanel } from "./run";
-import { askTrust, setting } from "./settings";
+import { symbolPath } from "./breadcrumbs";
+import { applyTokenEdits } from "./semantic";
+import { askTrust, onSettingsChange, setting } from "./settings";
 import { showLocations, type Loc } from "./search";
 import { debounce, rel, root, state } from "./state";
 import { bottom, h, icon, quickPick, statusSlot, toast, type PickItem } from "./ui";
@@ -170,7 +172,10 @@ export async function startLsp() {
     capabilities = init.capabilities ?? {};
     notify("initialized", {});
     setStatus("Ruby LSP", "ok");
+    registerFeatureProviders();
     for (const { model } of tracked.values()) didOpen(model);
+    refreshOutline();
+    refreshBreadcrumbs();
   } catch (e) {
     ready = false;
     setStatus("Ruby LSP: failed", "off");
@@ -224,6 +229,18 @@ function initializeParams() {
         },
         hover: { contentFormat: ["markdown", "plaintext"] },
         definition: { linkSupport: true },
+        implementation: { linkSupport: true },
+        typeDefinition: { linkSupport: true },
+        typeHierarchy: {},
+        semanticTokens: {
+          requests: { full: { delta: true }, range: false },
+          tokenTypes: ["namespace", "type", "class", "enum", "interface", "struct", "typeParameter", "parameter", "variable", "property", "enumMember", "event", "function", "method", "macro", "keyword", "modifier", "comment", "string", "number", "regexp", "operator", "decorator"],
+          tokenModifiers: ["declaration", "definition", "readonly", "static", "deprecated", "abstract", "async", "modification", "documentation", "defaultLibrary"],
+          formats: ["relative"],
+          multilineTokenSupport: false,
+          overlappingTokenSupport: false,
+        },
+        inlayHint: {},
         references: {},
         documentSymbol: { hierarchicalDocumentSymbolSupport: true },
         formatting: {},
@@ -239,7 +256,8 @@ function initializeParams() {
       },
     },
     initializationOptions: {
-      enabledFeatures: { semanticHighlighting: false, inlayHint: false, codeLens: false },
+      enabledFeatures: { codeLens: false },
+      featuresConfiguration: { inlayHint: { enableAll: true } },
       formatter: "auto",
       linters: setting("inspections.rubocop") ? ["rubocop"] : [],
     },
@@ -565,6 +583,21 @@ export async function documentSymbols(model: monaco.editor.ITextModel, token?: m
   return (res ?? []).map(convert);
 }
 
+const symbolCache = new WeakMap<monaco.editor.ITextModel, { version: number; symbols: Promise<monaco.languages.DocumentSymbol[]> }>();
+
+/// Document symbols for the model's current version, shared by the Structure panel and breadcrumbs.
+export function cachedSymbols(model: monaco.editor.ITextModel): Promise<monaco.languages.DocumentSymbol[]> {
+  const version = model.getVersionId();
+  const hit = symbolCache.get(model);
+  if (hit?.version === version) return hit.symbols;
+  const symbols = documentSymbols(model).then((list) => {
+    if (!list.length && symbolCache.get(model)?.version === version) symbolCache.delete(model);
+    return list;
+  });
+  symbolCache.set(model, { version, symbols });
+  return symbols;
+}
+
 const symbolIcons: Record<number, string> = {
   4: "symbol-class", 1: "symbol-namespace", 5: "symbol-method", 11: "symbol-function", 8: "symbol-constant",
   13: "symbol-constant", 6: "symbol-property", 7: "symbol-field", 12: "symbol-variable", 9: "symbol-constructor",
@@ -643,7 +676,7 @@ export const refreshOutline = debounce(async () => {
     outlineBody.replaceChildren(h("div", { class: "empty" }, model ? "Structure is available for Ruby files." : "No file open."));
     return;
   }
-  const symbols = await documentSymbols(model);
+  const symbols = await cachedSymbols(model);
   if (seq !== outlineSeq) return;
   const render = (list: monaco.languages.DocumentSymbol[], depth: number): HTMLElement[] =>
     list.flatMap((s) => [
@@ -665,6 +698,161 @@ export const refreshOutline = debounce(async () => {
 
 events.activated.on(() => refreshOutline());
 editor.onDidChangeModelContent(() => refreshOutline());
+
+/// Breadcrumbs
+
+const crumbsEl = h("div", { class: "breadcrumbs" });
+document.getElementById("editor-area")!.before(crumbsEl);
+let crumbsSeq = 0;
+
+export const refreshBreadcrumbs = debounce(async () => {
+  const seq = ++crumbsSeq;
+  const tab = activeTab();
+  const model = editor.getModel();
+  const pos = editor.getPosition();
+  if (!setting("editor.breadcrumbs") || tab?.kind !== "file" || !model || !pos) {
+    crumbsEl.hidden = true;
+    return;
+  }
+  const symbols = live(model) ? await cachedSymbols(model) : [];
+  if (seq !== crumbsSeq || model.isDisposed()) return;
+  const path = symbolPath(symbols, pos.lineNumber, pos.column);
+  crumbsEl.hidden = false;
+  crumbsEl.replaceChildren(
+    h("span", { class: "crumb file", title: rel(model.uri.fsPath) }, icon("file"), h("span", {}, rel(model.uri.fsPath).split("/").pop()!)),
+    ...path.flatMap((s) => [
+      icon("chevron-right", "crumb-sep"),
+      h(
+        "span",
+        {
+          class: "crumb",
+          title: s.detail || s.name,
+          onclick: () => openFile(model.uri.fsPath, { line: s.selectionRange.startLineNumber, column: s.selectionRange.startColumn }),
+        },
+        icon(symbolIcon(s.kind)),
+        h("span", {}, s.name),
+      ),
+    ]),
+  );
+}, 80);
+
+events.activated.on(() => refreshBreadcrumbs());
+editor.onDidChangeCursorPosition(() => refreshBreadcrumbs());
+editor.onDidChangeModelContent(debounce(() => refreshBreadcrumbs(), 300));
+onSettingsChange(() => refreshBreadcrumbs());
+
+/// Go to Implementation / Type Declaration
+
+async function jumpOrPick(title: string, locs: monaco.languages.Location[]) {
+  if (!locs.length) return toast(`No ${title.toLowerCase()} found.`);
+  const go = (l: monaco.languages.Location) =>
+    openFile(l.uri.fsPath, { line: l.range.startLineNumber, column: l.range.startColumn, endLine: l.range.endLineNumber, endColumn: l.range.endColumn });
+  if (locs.length === 1) return go(locs[0]);
+  quickPick({
+    placeholder: `Choose ${title}`,
+    items: locs.map((l) => {
+      const text = monaco.editor.getModel(l.uri)?.getLineContent(l.range.startLineNumber).trim() ?? "";
+      return { label: text || rel(l.uri.fsPath), description: `${rel(l.uri.fsPath)}:${l.range.startLineNumber}`, icon: "symbol-class", data: l };
+    }),
+    onAccept: (item) => item && go(item.data as monaco.languages.Location),
+  });
+}
+
+/// Uses textDocument/implementation when the server has it; ruby-lsp doesn't, so classes and modules fall back
+/// to the type hierarchy (subclasses and including modules).
+export async function goToImplementation() {
+  const model = editor.getModel();
+  const pos = editor.getPosition();
+  if (!model || !pos || !live(model)) return toast("Go to Implementation needs Ruby LSP on a Ruby file.");
+  if (capabilities.implementationProvider) {
+    return jumpOrPick("Implementations", await locations(await request("textDocument/implementation", docPos(model, pos)).catch(() => null)));
+  }
+  if (!capabilities.typeHierarchyProvider) return toast("The language server does not provide implementations.");
+  const items: Json[] = (await request("textDocument/prepareTypeHierarchy", docPos(model, pos)).catch(() => null)) ?? [];
+  if (!items.length) return toast("Place the caret on a class or module to find its implementations.");
+  const subs: Json[] = (await Promise.all(items.map((item) => request("typeHierarchy/subtypes", { item }).catch(() => null)))).flat().filter(Boolean);
+  jumpOrPick("Implementations", await locations(subs.map((s) => ({ uri: s.uri, range: s.selectionRange ?? s.range }))));
+}
+
+export async function goToTypeDefinition() {
+  const model = editor.getModel();
+  const pos = editor.getPosition();
+  if (!model || !pos || !live(model)) return toast("Go to Type Declaration needs Ruby LSP on a Ruby file.");
+  if (!capabilities.typeDefinitionProvider)
+    return toast("The language server does not provide type declarations. ruby-lsp has none; a typed server such as Sorbet (set ruby.lspCommand) does.");
+  jumpOrPick("Type Declarations", await locations(await request("textDocument/typeDefinition", docPos(model, pos)).catch(() => null)));
+}
+
+/// Semantic highlighting and inlay hints
+
+let featureSubs: monaco.IDisposable[] = [];
+const semanticChanged = new monaco.Emitter<void>();
+const inlayChanged = new monaco.Emitter<void>();
+const tokenCache = new Map<string, { resultId?: string; data: number[] }>();
+
+function registerFeatureProviders() {
+  featureSubs.forEach((d) => d.dispose());
+  featureSubs = [];
+  tokenCache.clear();
+  const st = capabilities.semanticTokensProvider;
+  for (const lang of LANGS) {
+    if (st?.legend && st.full) {
+      featureSubs.push(
+        monaco.languages.registerDocumentSemanticTokensProvider(lang, {
+          onDidChange: semanticChanged.event,
+          getLegend: () => st.legend,
+          async provideDocumentSemanticTokens(model, lastResultId, token) {
+            if (!live(model) || !setting("editor.semanticHighlighting")) return null;
+            const key = model.uri.toString();
+            const prev = tokenCache.get(key);
+            const delta = !!st.full.delta && !!prev?.resultId && prev.resultId === lastResultId;
+            const res = await request(
+              delta ? "textDocument/semanticTokens/full/delta" : "textDocument/semanticTokens/full",
+              delta ? { textDocument: docId(model), previousResultId: prev!.resultId } : { textDocument: docId(model) },
+              token,
+            ).catch(() => null);
+            if (!res) return null;
+            const data: number[] = res.edits ? applyTokenEdits(prev!.data, res.edits) : (res.data ?? []);
+            tokenCache.set(key, { resultId: res.resultId, data });
+            return { resultId: res.resultId, data: new Uint32Array(data) };
+          },
+          releaseDocumentSemanticTokens() {},
+        }),
+      );
+    }
+    if (capabilities.inlayHintProvider) {
+      featureSubs.push(
+        monaco.languages.registerInlayHintsProvider(lang, {
+          onDidChangeInlayHints: inlayChanged.event,
+          async provideInlayHints(model, range, token) {
+            const none = { hints: [], dispose() {} };
+            if (!live(model) || !setting("editor.inlayHints")) return none;
+            const res: Json[] | null = await request("textDocument/inlayHint", { textDocument: docId(model), range: lspRange(range) }, token).catch(() => null);
+            const text = (t: Json) => (typeof t === "string" ? t : t?.value);
+            return {
+              hints: (res ?? []).map((hint) => ({
+                position: { lineNumber: hint.position.line + 1, column: hint.position.character + 1 },
+                label: typeof hint.label === "string" ? hint.label : hint.label.map((p: Json) => ({ label: p.value, tooltip: text(p.tooltip) })),
+                kind: hint.kind,
+                tooltip: text(hint.tooltip),
+                paddingLeft: hint.paddingLeft,
+                paddingRight: hint.paddingRight,
+              })),
+              dispose() {},
+            };
+          },
+        }),
+      );
+    }
+  }
+}
+
+onSettingsChange(() => {
+  semanticChanged.fire();
+  inlayChanged.fire();
+});
+
+events.modelClosed.on((model) => tokenCache.delete(model.uri.toString()));
 
 /// Problems tool window
 
@@ -706,6 +894,7 @@ monaco.editor.onDidChangeMarkers(debounce(renderProblems, 100));
 renderProblems();
 setStatus("Ruby LSP: off", "off");
 
+export const lspCapabilities = () => capabilities;
 export const lspReady = () => ready && !!capabilities.textDocumentSync;
 export const lspActiveForTab = () => {
   const t = activeTab();

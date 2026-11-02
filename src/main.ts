@@ -10,13 +10,13 @@ import {
 } from "./editor";
 import { blameCurrentLine, commitView, diffActiveFile, onGitChanged, refreshGit } from "./git";
 import { api, invoke } from "./ipc";
-import { fileStructurePopup, findUsages, lspLogView, lspReady, request, outlineView, problemsView, startLsp, stopLsp, workspaceSymbolsPopup } from "./lsp";
+import { fileStructurePopup, findUsages, goToImplementation, goToTypeDefinition, lspLogView, lspReady, request, outlineView, problemsView, startLsp, stopLsp, workspaceSymbolsPopup } from "./lsp";
 import { goToTest, loadRoutes, routesView, showRelated } from "./rails";
 import { importJetBrainsKeymap, showKeymapReference } from "./keymapref";
 import { editConfigurations, launch, loadRunConfigs, newConfig, pickConfiguration, rakeTask, rerun, runs, runTests, selected } from "./run";
-import { findInFiles, searchView } from "./search";
+import { findInFiles, replaceInFiles, searchView } from "./search";
 import { loadCodeStyle } from "./codestyle";
-import { addRecentProject, askTrust, checkTrust, isTrusted, loadSession, trustProject, loadSettings, recentProjects, saveSession, setting, settingsPath } from "./settings";
+import { addRecentProject, askTrust, checkTrust, isTrusted, loadSession, trustProject, loadSettings, recentProjects, saveSession, setting, settingsPath, updateSetting } from "./settings";
 import { openSettingsWindow } from "./settingsui";
 import { createGist, createPullRequest, githubSignIn, initToolbar, openOnGitHub, pullCurrent, pushCurrent, refreshToolbar, showBranches, showProjects, showWorktrees } from "./toolbar";
 import { abs, debounce, rel, state } from "./state";
@@ -200,6 +200,8 @@ commands(
   { id: "goToLine", title: "Navigate: Go to Line…", key: "cmd+l", editor: true, run: editorAction("editor.action.gotoLine") },
   { id: "fileStructure", title: "Navigate: File Structure…", key: "cmd+f12", run: fileStructurePopup },
   E("goToDefinition", "Navigate: Go to Declaration", "cmd+b", "editor.action.revealDefinition"),
+  { id: "goToImplementation", title: "Navigate: Go to Implementation(s)", key: "cmd+alt+b", run: goToImplementation },
+  { id: "goToTypeDefinition", title: "Navigate: Go to Type Declaration", key: "ctrl+shift+b", run: goToTypeDefinition },
   E("peekDefinition", "Navigate: Quick Definition", "alt+space", "editor.action.peekDefinition"),
   { id: "findUsages", title: "Navigate: Find Usages", key: "alt+f7", run: findUsages },
   E("peekReferences", "Navigate: Show Usages", "cmd+alt+f7", "editor.action.referenceSearch.trigger"),
@@ -211,6 +213,7 @@ commands(
   E("findNext", "Find: Find Next", "cmd+g", "editor.action.nextMatchFindAction"),
   E("findPrevious", "Find: Find Previous", "cmd+shift+g", "editor.action.previousMatchFindAction"),
   { id: "findInFiles", title: "Find: Find in Files…", key: "cmd+shift+f", run: needProject(() => findInFiles()) },
+  { id: "replaceInFiles", title: "Find: Replace in Files…", key: "cmd+shift+r", run: needProject(replaceInFiles) },
   E("format", "Code: Reformat Code", "cmd+alt+l", "editor.action.formatDocument"),
   E("rename", "Refactor: Rename…", "shift+f6", "editor.action.rename"),
   E("codeActions", "Code: Show Context Actions", "alt+enter", "editor.action.quickFix"),
@@ -271,6 +274,9 @@ commands(
   { id: "githubGist", title: "GitHub: Create Gist from Selection…", run: needProject(createGist) },
   { id: "restartLsp", title: "Ruby LSP: Restart", run: needProject(startLsp) },
   { id: "trustProject", title: "File: Trust Project…", run: needProject(askTrust) },
+  { id: "toggleBreadcrumbs", title: "View: Toggle Breadcrumbs", run: () => updateSetting("editor.breadcrumbs", !setting("editor.breadcrumbs")) },
+  { id: "toggleSemanticHighlighting", title: "View: Toggle Semantic Highlighting", run: () => updateSetting("editor.semanticHighlighting", !setting("editor.semanticHighlighting")) },
+  { id: "toggleInlayHints", title: "View: Toggle Inlay Hints", run: () => updateSetting("editor.inlayHints", !setting("editor.inlayHints")) },
   { id: "lspLog", title: "Ruby LSP: Show Log", run: () => bottom.show("log") },
 );
 

@@ -374,6 +374,14 @@ body:not(.has-project) #run-widget {
   color: var(--dim);
   font-size: 12px;
 }
+.switcher .tag {
+  color: var(--dim);
+  font-size: 10px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+  line-height: 14px;
+}
 .switcher .counts {
   color: var(--dim);
   font-size: 11px;

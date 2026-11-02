@@ -60,9 +60,42 @@ export async function refreshToolbar() {
     h("span", { class: "counts" }, counts ? `${ahead ? `↑${ahead}` : ""}${behind ? ` ↓${behind}` : ""}`.trim() : ""),
     icon("chevron-down"),
   );
-  const count = worktrees.split("\n").filter((l) => l.startsWith("worktree ")).length;
-  worktreeBtn.hidden = count < 1;
-  worktreeBtn.replaceChildren(icon("repo"), h("span", {}, count > 1 ? `${count} worktrees` : "worktree"), icon("chevron-down"));
+  const label = worktreeLabel(parseWorktrees(worktrees), p.root);
+  worktreeBtn.hidden = !label;
+  if (label)
+    worktreeBtn.replaceChildren(
+      ...[icon(label.main ? "repo" : "repo-forked"), h("span", { class: "name" }, label.name), label.main && h("span", { class: "tag" }, "main worktree"), icon("chevron-down")].filter((n): n is HTMLSpanElement => !!n),
+    );
+}
+
+export interface Worktree {
+  path: string;
+  branch: string;
+  main: boolean;
+}
+
+/// `git worktree list --porcelain`; the first entry is the main checkout.
+export function parseWorktrees(out: string): Worktree[] {
+  return out
+    .split(/\n\n+/)
+    .map((b) => b.trim())
+    .filter((b) => b.startsWith("worktree "))
+    .map((b, i) => ({
+      path: b.match(/^worktree (.+)$/m)![1],
+      branch: b.match(/^branch refs\/heads\/(.+)$/m)?.[1] ?? (/^detached$/m.test(b) ? "detached" : /^bare$/m.test(b) ? "bare" : ""),
+      main: i === 0,
+    }));
+}
+
+/// The worktree that contains `root` (the deepest one, since worktrees can live inside the main checkout).
+export function currentWorktree(trees: Worktree[], root: string): Worktree | undefined {
+  return trees.filter((t) => root === t.path || root.startsWith(t.path + "/")).sort((a, b) => b.path.length - a.path.length)[0];
+}
+
+/// Toolbar label: the current worktree's folder name; the main checkout shows the repository name and a tag.
+export function worktreeLabel(trees: Worktree[], root: string): { name: string; main: boolean } | null {
+  const t = currentWorktree(trees, root);
+  return t ? { name: basename(t.path), main: t.main } : null;
 }
 
 /// Project switcher
@@ -256,20 +289,16 @@ async function checkout(name: string, from?: string, create = false) {
 
 worktreeBtn.onclick = async () => {
   const out = await git("worktree", "list", "--porcelain").catch((e) => (toast(String(e), "error"), ""));
-  const trees = out
-    .split("\n\n")
-    .filter((b) => b.startsWith("worktree "))
-    .map((b) => ({
-      path: b.match(/^worktree (.+)$/m)![1],
-      branch: b.match(/^branch refs\/heads\/(.+)$/m)?.[1] ?? (b.includes("detached") ? "detached" : ""),
-    }));
+  const trees = parseWorktrees(out);
+  const current = currentWorktree(trees, state.project?.root ?? "");
   quickPick({
-    placeholder: "Worktrees",
+    title: `${trees.length} worktree${trees.length === 1 ? "" : "s"}`,
+    placeholder: "Switch worktree or type to filter",
     items: [
       ...trees.map((t) => ({
         label: basename(t.path),
-        description: `${t.branch} · ${t.path}`,
-        icon: t.path === state.project?.root ? "check" : "repo",
+        description: `${t.main ? "main worktree · " : ""}${t.branch} · ${t.path}`,
+        icon: t === current ? "check" : t.main ? "repo" : "repo-forked",
         data: t,
       })),
       { label: "New Worktree from Branch…", icon: "add", data: "new" },

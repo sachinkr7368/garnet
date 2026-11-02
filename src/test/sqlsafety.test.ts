@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { classify, defaultReadOnly, isLocalHost, splitStatements, sqlLiteral, statementAt, toCsv, toJson, toMarkdown, toSqlInsert, tokenize, updateSql, withAutoLimit } from "../sqlsafety";
+import attacks from "./fixtures/sql-attacks.json";
+import { classify, defaultReadOnly, isLocalHost, splitStatements, sqlLiteral, statementAt, statementCount, toCsv, toJson, toMarkdown, toSqlInsert, tokenize, withAutoLimit } from "../sqlsafety";
 
 const texts = (sql: string, d?: "postgres" | "mysql" | "sqlite") => splitStatements(sql, d).map((s) => s.text);
 
@@ -169,7 +170,7 @@ describe("exports (B74)", () => {
   });
 });
 
-describe("cell edit UPDATEs", () => {
+describe("SQL INSERT literals", () => {
   it("quotes values so no server setting can misread them", () => {
     expect(sqlLiteral("it's \\ $g$", "postgres")).toBe("$g0$it's \\ $g$$g0$");
     expect(sqlLiteral("a$g", "postgres")).toBe("$g0$a$g$g0$");
@@ -183,15 +184,12 @@ describe("cell edit UPDATEs", () => {
       expect(tokenize(sql, "postgres").filter((t) => t.type === "string")).toHaveLength(1);
     }
   });
+});
 
-  it("keys each UPDATE by the primary key and refuses without one", () => {
-    const cols = ["id", "name", "bio"];
-    expect(updateSql("postgres", "public", "users", ["id"], cols, ["7", "ann", null], new Map([[1, "bo"], [2, null]]))).toBe(
-      'UPDATE "public"."users" SET "name" = $g$bo$g$, "bio" = NULL WHERE "id" = $g$7$g$',
-    );
-    expect(updateSql("sqlite", "main", "t", ["a", "b"], ["a", "b", "c"], ["1", "2", "x"], new Map([[2, "y"]]))).toBe(`UPDATE "t" SET "c" = 'y' WHERE "a" = '1' AND "b" = '2'`);
-    expect(updateSql("postgres", "public", "t", [], cols, ["1", "a", "b"], new Map([[1, "x"]]))).toBeNull();
-    expect(updateSql("postgres", "public", "t", ["id"], ["name"], ["a"], new Map([[0, "x"]]))).toBeNull();
-    expect(updateSql("postgres", "public", "t", ["id"], cols, [null, "a", "b"], new Map([[1, "x"]]))).toBeNull();
+describe("attack corpus shared with the Rust checks", () => {
+  it.each(attacks as { sql: string; dialect: "postgres" | "mysql" | "sqlite"; readOnly: string; writable: string }[])("$dialect: $sql", ({ sql, dialect, readOnly, writable }) => {
+    const multi = statementCount(sql, dialect) !== 1;
+    const c = classify(sql, dialect);
+    expect({ readOnly: multi || c.kind !== "read" ? "refuse" : "allow", writable: multi || c.dangerous ? "confirm" : "run" }).toEqual({ readOnly, writable });
   });
 });

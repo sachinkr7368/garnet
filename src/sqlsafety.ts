@@ -12,10 +12,34 @@ const DOLLAR = /\$([A-Za-z_]\w*)?\$/y;
 const WORD_START = /[\p{L}_]/u;
 const WORD_PART = /[\p{L}\p{N}_$]/u;
 
-export function tokenize(sql: string, dialect: Dialect = "postgres"): Token[] {
+/// How the server might read the text: backslash escapes in strings (MySQL default; Postgres with
+/// standard_conforming_strings off) and whether version-gated MySQL comments (`/*!50700 … */`, MariaDB `/*M! … */`) run.
+export interface Reading {
+  backslash: boolean;
+  gated: boolean;
+}
+
+const defaultReading = (d: Dialect): Reading => ({ backslash: d === "mysql", gated: true });
+
+/// Every reading the safety checks must pass under; mirrors `check_single` in src-tauri/src/db/sql.rs.
+export const readings = (d: Dialect): Reading[] =>
+  d === "sqlite" ? [defaultReading(d)] : d === "postgres" ? [false, true].map((backslash) => ({ backslash, gated: true })) : [true, false].flatMap((backslash) => [true, false].map((gated) => ({ backslash, gated })));
+
+const EXEC_COMMENT = /\/\*(M!|!)(\d*)/y;
+
+/// End of a MySQL executable-comment opener at `i`, or -1. `/*!` always runs; `/*!NNNNN` and `/*M!` only when `gated`.
+function execOpener(sql: string, i: number, gated: boolean): number {
+  EXEC_COMMENT.lastIndex = i;
+  const m = EXEC_COMMENT.exec(sql);
+  if (!m) return -1;
+  return m[1] === "!" && !m[2] ? EXEC_COMMENT.lastIndex : gated ? EXEC_COMMENT.lastIndex : -1;
+}
+
+export function tokenize(sql: string, dialect: Dialect = "postgres", reading: Reading = defaultReading(dialect)): Token[] {
   const out: Token[] = [];
   const n = sql.length;
   let i = 0;
+  let exec = false;
   const push = (type: TokenType, end: number) => {
     out.push({ type, text: sql.slice(i, end), start: i, end });
     i = end;
@@ -42,6 +66,13 @@ export function tokenize(sql: string, dialect: Dialect = "postgres"): Token[] {
       // MySQL needs whitespace or a control character after `--`; `1--1` is 1 - -1.
       const j = sql.indexOf("\n", i);
       push("comment", j < 0 ? n : j);
+    } else if (exec && c === "*" && d === "/") {
+      exec = false;
+      push("comment", i + 2);
+    } else if (dialect === "mysql" && !exec && c === "/" && d === "*" && execOpener(sql, i, reading.gated) > 0) {
+      // The server runs the body of an executable comment as SQL: only the opener and closer are comments.
+      exec = true;
+      push("comment", execOpener(sql, i, reading.gated));
     } else if (c === "/" && d === "*") {
       let depth = 1;
       let j = i + 2;
@@ -51,8 +82,8 @@ export function tokenize(sql: string, dialect: Dialect = "postgres"): Token[] {
         else j++;
       }
       push("comment", j);
-    } else if (c === "'") push("string", quoted("'", i + 1, dialect === "mysql"));
-    else if (c === '"') push(dialect === "mysql" ? "string" : "ident", quoted('"', i + 1, dialect === "mysql"));
+    } else if (c === "'") push("string", quoted("'", i + 1, reading.backslash));
+    else if (c === '"') push(dialect === "mysql" ? "string" : "ident", quoted('"', i + 1, dialect === "mysql" && reading.backslash));
     else if (c === "`") push("ident", quoted("`", i + 1, false));
     else if (c === "[" && dialect === "sqlite") {
       const j = sql.indexOf("]", i);
@@ -84,7 +115,7 @@ export interface Statement {
 }
 
 /// Statements separated by top-level semicolons; comment-only pieces are dropped.
-export function splitStatements(sql: string, dialect: Dialect = "postgres"): Statement[] {
+export function splitStatements(sql: string, dialect: Dialect = "postgres", reading: Reading = defaultReading(dialect)): Statement[] {
   const out: Statement[] = [];
   let first = -1;
   let last = -1;
@@ -96,7 +127,7 @@ export function splitStatements(sql: string, dialect: Dialect = "postgres"): Sta
     sig = false;
     segStart = segEnd;
   };
-  for (const t of tokenize(sql, dialect)) {
+  for (const t of tokenize(sql, dialect, reading)) {
     if (t.type === "punct" && t.text === ";") {
       flush(t.end);
       continue;
@@ -130,10 +161,13 @@ interface Sig {
   depth: number;
 }
 
-function significant(sql: string, dialect: Dialect): Sig[] {
+/// Statements in the text under the reading that sees the most; the safety checks need exactly one.
+export const statementCount = (sql: string, dialect: Dialect = "postgres") => Math.max(...readings(dialect).map((r) => splitStatements(sql, dialect, r).length));
+
+function significant(sql: string, dialect: Dialect, reading: Reading = defaultReading(dialect)): Sig[] {
   const out: Sig[] = [];
   let depth = 0;
-  for (const t of tokenize(sql, dialect)) {
+  for (const t of tokenize(sql, dialect, reading)) {
     if (t.type === "ws" || t.type === "comment") continue;
     const up = t.type === "word" ? t.text.toUpperCase() : t.type === "punct" ? t.text : "";
     if (up === ")") depth = Math.max(0, depth - 1);
@@ -172,16 +206,24 @@ function locks(toks: Sig[], from: number, base: number): boolean {
   return false;
 }
 
+const worst = (kinds: Kind[]): Kind => (["ddl", "write", "tx", "other"] as Kind[]).find((k) => kinds.includes(k)) ?? "read";
+
+/// Classified under every reading (see `readings`); the worst kind wins and any dangerous reading makes it dangerous.
 export function classify(sql: string, dialect: Dialect = "postgres"): Classification {
+  const all = readings(dialect).map((r) => classifyAs(sql, dialect, r));
+  const danger = all.find((c) => c.dangerous);
+  return { kind: worst(all.map((c) => c.kind)), dangerous: !!danger, ...(danger?.reason ? { reason: danger.reason } : {}) };
+}
+
+function classifyAs(sql: string, dialect: Dialect, reading: Reading): Classification {
   // Drivers run every statement in a multi-statement string (Postgres simple query, MySQL text protocol),
   // so one string with several statements is never treated as a single read.
-  const parts = splitStatements(sql, dialect);
+  const parts = splitStatements(sql, dialect, reading);
   if (parts.length > 1) {
-    const kinds = parts.map((p) => classify(p.text, dialect).kind);
-    const kind = (["ddl", "write", "tx", "other"] as Kind[]).find((k) => kinds.includes(k)) ?? "read";
+    const kind = worst(parts.map((p) => classifyAs(p.text, dialect, reading).kind));
     return { kind, dangerous: true, reason: `${parts.length} statements in one string` };
   }
-  const toks = significant(sql, dialect);
+  const toks = significant(sql, dialect, reading);
   const hd = head(toks);
   if (!hd) return { kind: "other", dangerous: false };
   const first = toks[hd.first].up;
@@ -189,7 +231,7 @@ export function classify(sql: string, dialect: Dialect = "postgres"): Classifica
   if (first === "EXPLAIN" || first === "DESCRIBE" || first === "DESC") {
     const i = toks.findIndex((x, k) => k > hd.first && x.depth === hd.base && EXPLAINED.has(x.up));
     if (i < 0) return { kind: "read", dangerous: false };
-    const inner = classify(sql.slice(toks[i].t.start), dialect);
+    const inner = classifyAs(sql.slice(toks[i].t.start), dialect, reading);
     const analyze = toks.slice(hd.first + 1, i).some((x) => x.up === "ANALYZE" || x.up === "ANALYSE");
     return analyze && inner.kind !== "read" ? inner : { kind: "read", dangerous: false };
   }
@@ -285,22 +327,4 @@ export function toMarkdown(columns: string[], rows: (string | null)[][]): string
   const cell = (v: string | null) => (v === null ? "NULL" : v.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>"));
   const line = (r: (string | null)[]) => `| ${r.map(cell).join(" | ")} |`;
   return [line(columns), `|${columns.map(() => " --- |").join("")}`, ...rows.map(line)].join("\n") + "\n";
-}
-
-/// One UPDATE per edited row, keyed by the primary key's original values; null when there is no usable key.
-export function updateSql(
-  d: Dialect,
-  schema: string,
-  table: string,
-  pk: string[],
-  columns: string[],
-  original: (string | null)[],
-  changes: Map<number, string | null>,
-): string | null {
-  const keyIdx = pk.map((k) => columns.indexOf(k));
-  if (!pk.length || keyIdx.some((i) => i < 0 || original[i] === null) || !changes.size) return null;
-  const from = d === "sqlite" ? quoteIdent(d, table) : `${quoteIdent(d, schema)}.${quoteIdent(d, table)}`;
-  const set = [...changes].map(([i, v]) => `${quoteIdent(d, columns[i])} = ${sqlLiteral(v, d)}`).join(", ");
-  const where = keyIdx.map((i) => `${quoteIdent(d, columns[i])} = ${sqlLiteral(original[i], d)}`).join(" AND ");
-  return `UPDATE ${from} SET ${set} WHERE ${where}`;
 }

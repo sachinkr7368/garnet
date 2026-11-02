@@ -172,6 +172,7 @@ pub fn run() {
             db::db_query,
             db::db_cancel,
             db::db_test,
+            db::db_update_rows,
             db::db_schema,
             db::db_table_page,
             db::db_password_set,

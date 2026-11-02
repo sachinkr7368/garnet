@@ -4,7 +4,7 @@ import { commands } from "./commands";
 import { activate as activateEditorTab, activeTab as activeFileTab, activeViewTab, closeTab as closeEditorTab, findViewTab, monaco, openViewTab, retitleViewTab } from "./editor";
 import { api, invoke } from "./ipc";
 import { setting } from "./settings";
-import { classify, defaultReadOnly, envSegment, isLocalHost, csvLine, splitStatements, statementAt, toCsv, toJson, toMarkdown, toSqlInsert, updateSql, withAutoLimit, type Dialect, type Kind } from "./sqlsafety";
+import { classify, defaultReadOnly, envSegment, isLocalHost, csvLine, splitStatements, statementAt, statementCount, toCsv, toJson, toMarkdown, toSqlInsert, withAutoLimit, type Dialect, type Kind } from "./sqlsafety";
 import { pluralize, underscore } from "./inflect";
 import { state } from "./state";
 import { contextMenu, h, icon, iconButton, modal, quickPick, rightbar, toast, trackDrag, type MenuItem } from "./ui";
@@ -152,7 +152,7 @@ export function readOnlyReason(c: Conn): string {
   else if (c.unresolved.includes("host")) why = "The host comes from ERB/ENV in config/database.yml and couldn't be resolved, so Garnet can't tell whether it's this machine.";
   else if (c.engine !== "sqlite" && !isLocalHost(c.host)) why = `It points at ${c.host}, not this machine.`;
   else why = "You marked it read-only.";
-  return `Read-only: Garnet blocks writes and the database session is read-only.\n${why}\n${how}`;
+  return `Read-only: Garnet refuses statements that write and opens the session read-only, which stops ordinary INSERT/UPDATE/DELETE/DDL. It can't stop functions with side effects that a read-only session still allows (pg_terminate_backend, dblink, advisory locks); for a shared or production database, connect as a role without those privileges.\n${why}\n${how}`;
 }
 
 const q = (d: Dialect, name: string) => (d === "mysql" ? `\`${name.replace(/`/g, "``")}\`` : `"${name.replace(/"/g, '""')}"`);
@@ -212,8 +212,8 @@ export async function runBatch(
   sqls: string[],
   opts: { autoLimit?: number; onResult?: (o: Outcome) => void; cancelled?: () => boolean; onQuery?: (queryId: string) => void } = {},
 ): Promise<{ outcomes: Outcome[]; blocked?: string }> {
-  const multi = sqls.find((sql) => splitStatements(sql, dialect(conn)).length !== 1);
-  if (multi !== undefined) return { outcomes: [], blocked: `Run one statement at a time; nothing was run. This text holds ${splitStatements(multi, dialect(conn)).length || "no"} statements:\n\n${multi}` };
+  const multi = sqls.find((sql) => statementCount(sql, dialect(conn)) !== 1);
+  if (multi !== undefined) return { outcomes: [], blocked: `Run one statement at a time; nothing was run. This text holds ${statementCount(multi, dialect(conn)) || "no"} statements:\n\n${multi}` };
   const checks = sqls.map((sql) => ({ sql, c: classify(sql, dialect(conn)) }));
   const confirmRun = (items: { reason?: string; sql: string }[]) =>
     (dbSmokeHooks.ask ?? ask)(`Run on "${conn.name}"?\n\n${items.map((x) => `${x.reason}:\n${x.sql}`).join("\n\n")}`, {
@@ -252,16 +252,19 @@ export async function runBatch(
 
 /// The backend refuses a destructive statement with `CONFIRM:<token>:<reason>` (its own check, independent of
 /// `classify`); it runs only when sent again with that token, which happens only after `confirm` says yes.
+export const CONFIRM_ERROR = /^CONFIRM:([0-9a-f]{16}):([^\n]+)$/;
+
 async function dbQuery(conn: Conn, sql: string, onQuery: ((id: string) => void) | undefined, confirm: (reason: string) => Promise<boolean>): Promise<QueryResult> {
+  // The backend keeps one pending confirmation per query id, so the confirmed resend reuses the id.
+  const queryId = crypto.randomUUID();
   const send = (token?: string) => {
-    const queryId = crypto.randomUUID();
     onQuery?.(queryId);
     return invoke<QueryResult>("db_query", { id: conn.id, sql, maxRows: MAX_ROWS, queryId, confirm: token });
   };
   try {
     return await send();
   } catch (e) {
-    const m = /CONFIRM:([0-9a-f]+):(.*)/s.exec(String(e));
+    const m = typeof e === "string" ? CONFIRM_ERROR.exec(e) : null;
     if (!m) throw e;
     if (!(await confirm(m[2]))) throw new Error(`Cancelled: ${m[2]}`);
     return send(m[1]);
@@ -377,7 +380,7 @@ async function connect(c: Conn) {
       const p = await promptPassword(c);
       if (!p) return;
       password = p.password;
-      if (p.keep) await invoke("db_password_set", { id: c.id, password }).catch((e) => toast(`Keychain: ${e}`, "error"));
+      if (p.keep) await invoke("db_password_set", { id: c.id, password, config: configOf(c) }).catch((e) => toast(`Keychain: ${e}`, "error"));
       else sessionPasswords.set(c.id, password);
     }
   }
@@ -395,7 +398,7 @@ async function connect(c: Conn) {
     if (c.engine !== "sqlite" && c.ymlPassword === undefined && isAuthFailure(e)) {
       const p = await promptPassword(c, `${e}`.split("\n")[0], true);
       if (p) {
-        if (p.keep) await invoke("db_password_set", { id: c.id, password: p.password }).catch((err) => toast(`Keychain: ${err}`, "error"));
+        if (p.keep) await invoke("db_password_set", { id: c.id, password: p.password, config: configOf(c) }).catch((err) => toast(`Keychain: ${err}`, "error"));
         else sessionPasswords.set(c.id, p.password);
         retry = true;
       }
@@ -588,7 +591,7 @@ function editConnection(existing?: Conn, engine: Dialect = "postgres") {
               : field("Password", password, missing.has("password") ? "couldn't be resolved from config/database.yml; enter it here or when connecting" : ""),
             ymlPassword ? null : h("label", { class: "rc-check" }, keep, " Save password in Keychain"),
           ]),
-      h("label", { class: "rc-check" }, readOnly, " Read-only (Garnet blocks writes; the database session is read-only too)"),
+      h("label", { class: "rc-check", title: "A read-only session can still call functions with side effects (pg_terminate_backend, dblink). For production, use a database role without those privileges." }, readOnly, " Read-only (Garnet refuses writes and opens a read-only session; use a limited role for production)"),
       field("Colour", select(COLORS, draft.color, (v) => (draft.color = v))),
     );
   };
@@ -624,7 +627,7 @@ function editConnection(existing?: Conn, engine: Dialect = "postgres") {
       else store.manual.push(m);
     }
     if (draft.engine !== "sqlite" && !ymlPassword) {
-      if (password.value && keep.checked) await invoke("db_password_set", { id, password: password.value }).catch((e) => toast(`Keychain: ${e}`, "error"));
+      if (password.value && keep.checked) await invoke("db_password_set", { id, password: password.value, config: configOf({ ...draft, id, source: "manual", unresolved: [] } as Conn) }).catch((e) => toast(`Keychain: ${e}`, "error"));
       else if (password.value) sessionPasswords.set(id, password.value);
       if (!keep.checked && hadSaved) await invoke("db_password_delete", { id }).catch(() => {});
       if (password.value && keep.checked) sessionPasswords.delete(id);
@@ -882,6 +885,8 @@ export interface GridEdit {
   /// Staged values by row then column; the grid fills it, the table viewer submits it.
   staged: Map<number, Map<number, string | null>>;
   onChange: () => void;
+  /// Filled in by the grid: stages NULL for the selected cell (the Set NULL action).
+  setNull?: () => void;
 }
 
 export interface GridOpts {
@@ -946,10 +951,13 @@ export function grid(columns: string[], rows: (string | null)[][], opts: GridOpt
     input.focus();
     input.select();
     let done = false;
+    // Only typing stages a value: clicking into a NULL cell and away must not turn it into ''.
+    let typed = false;
+    input.addEventListener("input", () => (typed = true));
     const finish = (save: boolean) => {
       if (done) return;
       done = true;
-      if (save) stage(r, c, input.value);
+      if (save && typed) stage(r, c, input.value);
       else renderBody();
     };
     input.addEventListener("keydown", (e) => {
@@ -1013,6 +1021,14 @@ export function grid(columns: string[], rows: (string | null)[][], opts: GridOpt
     );
   renderHead();
   let cell: HTMLTableCellElement | null = null;
+  if (edit)
+    edit.setNull = () => {
+      if (!cell?.isConnected) return toast("Select a cell first.");
+      const c = cell.cellIndex;
+      const why = edit.blocked(c);
+      if (why) return toast(why);
+      stage(rowOf(cell.parentElement!), c, null);
+    };
   body.onclick = (e) => {
     const td = (e.target as HTMLElement).closest("td");
     if (!td || td.querySelector("input")) return;
@@ -1081,7 +1097,7 @@ interface DbTab {
   refresh: () => void;
   dispose?: () => void;
   /// Toolbar actions the dbXxx commands run on the active tab.
-  actions?: Partial<Record<"submit" | "revert" | "reload" | "prev" | "next" | "viewer", () => unknown>>;
+  actions?: Partial<Record<"submit" | "revert" | "setNull" | "reload" | "prev" | "next" | "viewer", () => unknown>>;
 }
 
 const tabs: DbTab[] = [];
@@ -1188,28 +1204,53 @@ export function editBlocked(c: Conn | undefined, t: TableInfo | undefined): stri
 const tableInfo = (id: string, schema: string, table: string) =>
   live.get(id)?.schema?.schemas.find((s) => s.name === schema)?.tables.find((t) => t.name === table);
 
-/// Submits staged cell edits as one UPDATE per row, after listing them for confirmation.
-export async function submitEdits(c: Conn, schema: string, t: TableInfo, columns: string[], rows: (string | null)[][], staged: Map<number, Map<number, string | null>>) {
+const shown = (v: string | null) => (v === null ? "NULL" : `'${v}'`);
+
+export interface RowEdit {
+  pk: Record<string, string>;
+  changes: Record<string, string | null>;
+  originals: Record<string, string | null>;
+}
+
+/// Staged grid cells as `db_update_rows` input; null when a row has no usable primary key value.
+export function rowEdits(t: TableInfo, columns: string[], rows: (string | null)[][], staged: Map<number, Map<number, string | null>>): RowEdit[] | null {
   const pk = t.columns.filter((x) => x.primaryKey).map((x) => x.name);
-  const sqls: string[] = [];
+  const out: RowEdit[] = [];
   for (const [r, changes] of staged) {
-    const sql = updateSql(dialect(c), schema, t.name, pk, columns, rows[r], changes);
-    if (!sql) return { error: `Row ${r + 1} has no usable primary key value; nothing was submitted.` };
-    sqls.push(sql);
+    const key = pk.map((k) => [k, rows[r][columns.indexOf(k)]] as const);
+    if (!pk.length || key.some(([k, v]) => !columns.includes(k) || v === null)) return null;
+    out.push({
+      pk: Object.fromEntries(key) as Record<string, string>,
+      changes: Object.fromEntries([...changes].map(([c, v]) => [columns[c], v])),
+      originals: Object.fromEntries([...changes].map(([c]) => [columns[c], rows[r][c]])),
+    });
   }
-  if (!sqls.length) return { error: "" };
-  const ok = await (dbSmokeHooks.ask ?? ask)(`Run ${sqls.length} UPDATE statement${sqls.length === 1 ? "" : "s"} on "${c.name}"?\n\n${sqls.join(";\n")};`, {
+  return out;
+}
+
+/// Submits staged cell edits after listing them: the backend checks them against the schema and runs them as
+/// parameterized UPDATEs in one transaction, rolled back unless each matches exactly its row.
+export async function submitEdits(c: Conn, schema: string, t: TableInfo, columns: string[], rows: (string | null)[][], staged: Map<number, Map<number, string | null>>) {
+  const edits = rowEdits(t, columns, rows, staged);
+  if (!edits) return { error: "A row has no usable primary key value; nothing was submitted." };
+  if (!edits.length) return { error: "" };
+  const lines = edits.map(
+    (e) =>
+      `UPDATE ${t.name} SET ${Object.entries(e.changes).map(([k, v]) => `${k} = ${shown(v)}`).join(", ")} WHERE ${Object.entries(e.pk).map(([k, v]) => `${k} = ${shown(v)}`).join(" AND ")} (only if ${Object.entries(e.originals).map(([k, v]) => `${k} is still ${shown(v)}`).join(", ")})`,
+  );
+  const ok = await (dbSmokeHooks.ask ?? ask)(`Run ${edits.length} UPDATE statement${edits.length === 1 ? "" : "s"} on "${c.name}" in one transaction?\n\n${lines.join("\n")}`, {
     title: "Submit Changes",
     kind: "warning",
     okLabel: "Submit",
     cancelLabel: "Cancel",
   });
   if (!ok) return { error: "Cancelled; nothing was submitted." };
-  const res = await runBatch(c, sqls);
-  const failed = res.outcomes.find((o) => o.error);
-  const odd = res.outcomes.filter((o) => o.result && o.result.rowsAffected !== 1).length;
-  if (res.blocked || failed) return { error: res.blocked ?? `${failed!.error}\n\n${failed!.sql}\n\n${res.outcomes.length - 1} earlier statement(s) ran.` };
-  return { error: odd ? `${odd} UPDATE(s) matched no row or more than one row; reload to check.` : "", done: res.outcomes.length };
+  try {
+    const done = await invoke<number>("db_update_rows", { id: c.id, schema, table: t.name, rows: edits });
+    return { error: "", done };
+  } catch (e) {
+    return { error: String(e) };
+  }
 }
 
 function openTable(id: string, schema: string, table: string) {
@@ -1232,6 +1273,8 @@ function openTable(id: string, schema: string, table: string) {
   sizeSel.onchange = () => ((pageSize = Number(sizeSel.value)), (offset = 0), load());
   const submitBtn = iconButton("check", "Submit changes (⌘↩)", () => submit(), "dbSubmitEdits");
   const revertBtn = iconButton("discard", "Revert changes", () => revert(), "dbRevertEdits");
+  const nullBtn = iconButton("circle-slash", "Set NULL (selected cell)", () => gridEdit?.setNull?.(), "dbSetNull");
+  let gridEdit: GridEdit | undefined;
   const viewer = valueViewer();
   const viewerBtn = iconButton("open-preview", "Value viewer", () => ((viewer.el.hidden = !viewer.el.hidden), viewerBtn.classList.toggle("on", !viewer.el.hidden)), "dbValueViewer");
   const exportBtn = (fmt: "csv" | "json") => h("button", { class: "btn small", title: `Export this page as ${fmt.toUpperCase()}`, onclick: () => page && exportResult(page, fmt) }, fmt.toUpperCase());
@@ -1270,7 +1313,7 @@ function openTable(id: string, schema: string, table: string) {
     const c = connById(id);
     const t = tableInfo(id, schema, table);
     const blocked = editBlocked(c, t);
-    submitBtn.hidden = revertBtn.hidden = blocked !== null;
+    submitBtn.hidden = revertBtn.hidden = nullBtn.hidden = blocked !== null;
     const edit: GridEdit | undefined = blocked
       ? undefined
       : {
@@ -1283,6 +1326,7 @@ function openTable(id: string, schema: string, table: string) {
             return null;
           },
         };
+    gridEdit = edit;
     content.replaceChildren(
       grid(page.columns, page.rows, {
         sort: {
@@ -1332,6 +1376,7 @@ function openTable(id: string, schema: string, table: string) {
       filterInput,
       submitBtn,
       revertBtn,
+      nullBtn,
       prev,
       range,
       next,
@@ -1348,7 +1393,7 @@ function openTable(id: string, schema: string, table: string) {
       submit();
     }
   });
-  addTab({ key, connId: id, iconName: "table", title: () => table, el, refresh: () => (header.refresh(), render()), actions: { submit, revert, reload: load, prev: () => !prev.disabled && prev.click(), next: () => !next.disabled && next.click(), viewer: () => viewerBtn.click() } });
+  addTab({ key, connId: id, iconName: "table", title: () => table, el, refresh: () => (header.refresh(), render()), actions: { submit, revert, setNull: () => gridEdit?.setNull?.(), reload: load, prev: () => !prev.disabled && prev.click(), next: () => !next.disabled && next.click(), viewer: () => viewerBtn.click() } });
   header.refresh();
   syncEdit();
   load();
@@ -1734,6 +1779,7 @@ commands(
   { id: "dbGoToTable", title: "Database: Go to Table (from Rails model)", run: needProject(goToTable) },
   { id: "dbSubmitEdits", title: "Database: Submit Changes", run: onTab("submit") },
   { id: "dbRevertEdits", title: "Database: Revert Changes", run: onTab("revert") },
+  { id: "dbSetNull", title: "Database: Set NULL", run: onTab("setNull") },
   { id: "dbReload", title: "Database: Reload Table", run: onTab("reload") },
   { id: "dbPrevPage", title: "Database: Previous Page", run: onTab("prev") },
   { id: "dbNextPage", title: "Database: Next Page", run: onTab("next") },

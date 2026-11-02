@@ -168,6 +168,9 @@ describe("read-only explanation, DDL and explain plan", async () => {
     expect(readOnlyReason(erb)).toMatch(/Edit Data Source… and uncheck Read-only/);
     expect(readOnlyReason(conn({ environment: "test", readOnly: true }))).toMatch(/"test" isn't a development environment/);
     expect(readOnlyReason(conn({ host: "db.internal", readOnly: true }))).toMatch(/points at db.internal/);
+    // It doesn't promise more than a read-only session gives (review 8).
+    expect(readOnlyReason(erb)).toMatch(/pg_terminate_backend, dblink/);
+    expect(readOnlyReason(erb)).toMatch(/role without those privileges/);
   });
 
   const posts = {
@@ -285,7 +288,7 @@ describe("backend confirmation tokens and query ids", async () => {
     vi.mocked(ask).mockReset();
     fake.handlers.set("db_query", (a) => {
       sent.push(a);
-      if (/drop|risky_fn/i.test(a.sql) && a.confirm !== "abc123") throw `CONFIRM:abc123:DELETE without a WHERE clause`;
+      if (/drop|risky_fn/i.test(a.sql) && a.confirm !== "abc123abc123abc1") throw `CONFIRM:abc123abc123abc1:DELETE without a WHERE clause`;
       return ok;
     });
   });
@@ -296,7 +299,7 @@ describe("backend confirmation tokens and query ids", async () => {
     const res = await runBatch(conn(), ["select risky_fn()"]);
     expect(ask).toHaveBeenCalledOnce();
     expect(String(vi.mocked(ask).mock.calls[0][0])).toContain("DELETE without a WHERE clause");
-    expect(sent.map((x) => x.confirm)).toEqual([undefined, "abc123"]);
+    expect(sent.map((x) => x.confirm)).toEqual([undefined, "abc123abc123abc1"]);
     expect(res.outcomes[0].result).toEqual(ok);
   });
 
@@ -311,8 +314,26 @@ describe("backend confirmation tokens and query ids", async () => {
     vi.mocked(ask).mockResolvedValueOnce(true);
     const res = await runBatch(conn(), ["drop table t"]);
     expect(ask).toHaveBeenCalledOnce();
-    expect(sent.map((x) => x.confirm)).toEqual([undefined, "abc123"]);
+    expect(sent.map((x) => x.confirm)).toEqual([undefined, "abc123abc123abc1"]);
     expect(res.outcomes[0].result).toEqual(ok);
+  });
+
+  it("only an exact CONFIRM error starts the handshake, and the resend keeps its query id (review 9, 10)", async () => {
+    vi.mocked(ask).mockResolvedValue(true);
+    fake.handlers.set("db_query", (a) => {
+      sent.push(a);
+      if (a.sql.includes("risky_fn") && a.confirm !== "0123456789abcdef") throw "CONFIRM:0123456789abcdef:DELETE without a WHERE clause";
+      if (a.sql.includes("echo")) throw "ERROR: relation \"CONFIRM:0123456789abcdef:x\" does not exist";
+      return ok;
+    });
+    await runBatch(conn(), ["select risky_fn()"]);
+    expect(sent.map((x) => x.confirm)).toEqual([undefined, "0123456789abcdef"]);
+    expect(sent[0].queryId).toBe(sent[1].queryId);
+    sent.length = 0;
+    const res = await runBatch(conn(), ["select echo"]);
+    expect(sent).toHaveLength(1);
+    expect(res.outcomes[0].error).toContain("does not exist");
+    vi.mocked(ask).mockReset();
   });
 
   it("gives every db_query its own query id for cancel (B49)", async () => {
@@ -350,7 +371,7 @@ describe("rejected saved password (B48)", async () => {
     (dialog.querySelector("input[type=password]") as HTMLInputElement).value = "right";
     [...dialog.querySelectorAll("button")].find((b) => b.textContent === "Connect")!.click();
     await done;
-    expect(fake.invocations.find((i) => i.cmd === "db_password_set")?.args).toEqual({ id: "/b48::env::development", password: "right" });
+    expect(fake.invocations.find((i) => i.cmd === "db_password_set")?.args).toMatchObject({ id: "/b48::env::development", password: "right", config: { host: "localhost", username: "app" } });
     expect(tries).toBe(2);
     expect(dbTesting.isLive("/b48::env::development")).toBe(true);
     state.project = null;
@@ -402,6 +423,7 @@ describe("results grid and cell editing", async () => {
     td.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     const input = td.querySelector("input")!;
     input.value = "it's me";
+    input.dispatchEvent(new Event("input"));
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     expect(staged.get(1)?.get(1)).toBe("it's me");
     expect(changes).toBe(1);
@@ -411,20 +433,44 @@ describe("results grid and cell editing", async () => {
     const seen: string[] = [];
     dbSmokeHooks.ask = async (m) => (seen.push(String(m)), true);
     fake.reset();
-    const sent: string[] = [];
-    fake.handlers.set("db_query", (a) => (sent.push(a.sql), { columns: [], rows: [], rowsAffected: 1, truncated: false, elapsedMs: 1 }));
+    const sent: any[] = [];
+    fake.handlers.set("db_update_rows", (a) => (sent.push(a), 1));
     try {
       const res = await submitEdits(conn(), "public", users, ["id", "name", "avatar"], [["1", "ann", null], ["2", "bob", null]], staged);
       expect(res).toEqual({ error: "", done: 1 });
-      expect(sent).toEqual([`UPDATE "public"."users" SET "name" = $g$it's me$g$ WHERE "id" = $g$2$g$`]);
-      expect(seen[0]).toContain("Run 1 UPDATE statement");
+      // The webview sends values, never SQL: the backend checks the schema and binds them as parameters.
+      expect(sent).toEqual([{ id: conn().id, schema: "public", table: "users", rows: [{ pk: { id: "2" }, changes: { name: "it's me" }, originals: { name: "bob" } }] }]);
+      expect(fake.calls).not.toContain("db_query");
+      expect(seen[0]).toContain("UPDATE users SET name = 'it's me' WHERE id = '2' (only if name is still 'bob')");
       dbSmokeHooks.ask = async () => false;
       sent.length = 0;
       expect((await submitEdits(conn(), "public", users, ["id", "name", "avatar"], [["1", "ann", null], ["2", "bob", null]], staged)).error).toContain("Cancelled");
       expect(sent).toEqual([]);
+      dbSmokeHooks.ask = async () => true;
+      fake.handlers.set("db_update_rows", () => Promise.reject("Row 1: matched 0 rows (it changed or was deleted since it was loaded); nothing was saved"));
+      expect((await submitEdits(conn(), "public", users, ["id", "name", "avatar"], [["1", "ann", null], ["2", "bob", null]], staged)).error).toContain("nothing was saved");
     } finally {
       dbSmokeHooks.ask = undefined;
     }
+  });
+
+  it("clicking into a NULL cell and away stages nothing; Set NULL stages NULL (review 13)", () => {
+    const staged = new Map<number, Map<number, string | null>>();
+    const edit = { staged, onChange: () => {}, blocked: () => null } as import("../db").GridEdit;
+    const g = grid(["id", "bio"], [["1", null], ["2", "x"]], { edit });
+    document.body.append(g);
+    const td = () => g.querySelectorAll("tbody tr")[0].children[1] as HTMLElement;
+    td().dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    td().querySelector("input")!.dispatchEvent(new FocusEvent("blur"));
+    expect(staged.size).toBe(0);
+    td().dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    td().querySelector("input")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    expect(staged.size).toBe(0);
+    const cell = g.querySelectorAll("tbody tr")[1].children[1] as HTMLElement;
+    cell.click();
+    edit.setNull!();
+    expect(staged.get(1)?.get(1)).toBeNull();
+    g.remove();
   });
 
   it("maps a model file to its table and documents it", () => {

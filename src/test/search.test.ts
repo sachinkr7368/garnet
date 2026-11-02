@@ -63,4 +63,26 @@ describe("find in files", () => {
     channels.at(-1)!.onmessage({ type: "done", total: 0, truncated: false });
     expect(searchView.querySelector(".results")!.textContent).toContain(".gitignore");
   });
+
+  it("never replaces with text other than what the matches were listed for (review 11)", async () => {
+    replaceInFiles();
+    const box = searchView.querySelector<HTMLInputElement>(".replace-bar input")!;
+    const all = [...searchView.querySelectorAll<HTMLButtonElement>(".replace-bar button")].find((b) => b.textContent === "Replace All")!;
+    box.value = "one";
+    run();
+    const ch = channels.at(-1)!;
+    expect(all.disabled).toBe(true);
+    ch.onmessage({ type: "file", path: "/p/a.rb", matches: [{ line: 1, text: "foo", ranges: [[0, 3]], replacements: ["one"] }] });
+    ch.onmessage({ type: "done", total: 1, truncated: false });
+    expect(all.disabled).toBe(false);
+    box.value = "two";
+    box.dispatchEvent(new Event("input"));
+    expect(all.disabled).toBe(true);
+    // Even if the button is forced, a stale list is refused before anything is written.
+    all.disabled = false;
+    all.click();
+    await new Promise((r) => setTimeout(r));
+    expect(fake.calls).not.toContain("replace_in_file");
+    expect(document.querySelector(".toast-msg")?.textContent).toContain("changed since these matches were listed");
+  });
 });

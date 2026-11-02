@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use mysql_async::prelude::Queryable;
 use serde::{Deserialize, Serialize};
 use sql::Dialect;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -127,8 +127,13 @@ struct Conn {
     cancel: Cancel,
     /// Id of the console query running now; db_cancel only interrupts that one.
     running: tokio::sync::Mutex<Option<String>>,
-    /// `(sql, token)` of the last destructive statement refused pending the user's confirmation.
-    confirm: Mutex<Option<(String, String)>>,
+    /// Per query id, `(sql, token)` of the destructive statement refused pending the user's confirmation.
+    /// An accident guard (a statement the frontend's checks missed still gets a dialog), not a security boundary:
+    /// the webview can always answer the handshake itself.
+    confirm: Mutex<HashMap<String, (String, String)>>,
+    /// Writable Postgres/MySQL connections read grids and the schema on this second, read-only session, so a
+    /// filter's side effects can't write and the console's open transaction is never touched.
+    reader: Option<Box<Conn>>,
 }
 
 #[derive(Default)]
@@ -305,7 +310,9 @@ async fn my_open(cfg: &ConnConfig, pw: Option<&str>) -> Result<(Driver, Cancel),
         .tcp_port(cfg.port.unwrap_or(3306))
         .db_name(nonempty(&cfg.database))
         .user(nonempty(&cfg.username))
-        .pass(pw);
+        .pass(pw)
+        // Affected rows = matched rows, so a grid edit that writes the same value still counts its row.
+        .client_found_rows(true);
     let ssl = SslOpts::default().with_danger_accept_invalid_certs(true).with_danger_skip_domain_validation(true);
     let attempt = |o: OptsBuilder| async move {
         let opts = Opts::from(o);
@@ -357,7 +364,8 @@ impl Conn {
             driver: tokio::sync::Mutex::new(driver),
             cancel,
             running: tokio::sync::Mutex::new(None),
-            confirm: Mutex::new(None),
+            confirm: Mutex::new(HashMap::new()),
+            reader: None,
         })
     }
 
@@ -429,6 +437,9 @@ impl Conn {
     }
 
     async fn close(&self) {
+        if let Some(r) = &self.reader {
+            Box::pin(r.close()).await;
+        }
         let _ = tokio::time::timeout(Duration::from_secs(2), self.cancel()).await;
         let Ok(mut d) = tokio::time::timeout(Duration::from_secs(2), self.driver.lock()).await else { return };
         // Every driver is dropped here, so SQLite releases its locks even if a tab still holds the Arc<Conn>.
@@ -532,10 +543,16 @@ impl Db {
             Some(p) if p.len() >= 4 => e.replace(p, "***"),
             _ => e,
         };
-        let conn = tokio::time::timeout(TIMEOUT + Duration::from_secs(1), Conn::open(cfg, pw))
-            .await
-            .map_err(|_| "Connection timed out".to_string())?
-            .map_err(scrub)?;
+        let open = |cfg: ConnConfig| async move {
+            tokio::time::timeout(TIMEOUT + Duration::from_secs(1), Conn::open(&cfg, pw))
+                .await
+                .map_err(|_| "Connection timed out".to_string())?
+                .map_err(scrub)
+        };
+        let mut conn = open(cfg.clone()).await?;
+        if !cfg.read_only && conn.dialect != Dialect::Sqlite {
+            conn.reader = Some(Box::new(open(ConnConfig { read_only: true, ..cfg.clone() }).await?));
+        }
         let q = match conn.dialect {
             Dialect::Postgres => "SHOW server_version",
             Dialect::Mysql => "SELECT VERSION()",
@@ -569,15 +586,19 @@ impl Db {
     async fn query(&self, id: &str, sql: &str, max_rows: Option<u32>, query_id: Option<&str>, confirm: Option<&str>) -> Result<QueryResult, String> {
         let conn = self.get(id)?;
         let scan = sql::check_single(sql, conn.dialect)?;
-        scan.first_keyword.as_ref().ok_or("Nothing to run")?;
+        scan.first_keyword().ok_or("Nothing to run")?;
         if conn.read_only {
             sql::check_read_only(&scan, conn.dialect)?;
         } else if let Some(reason) = scan.destructive() {
             let mut pending = conn.confirm.lock().unwrap_or_else(|p| p.into_inner());
-            let ok = matches!((pending.take(), confirm), (Some((s, t)), Some(c)) if s == sql && t == c);
+            let slot = query_id.unwrap_or_default().to_string();
+            let ok = matches!((pending.remove(&slot), confirm), (Some((s, t)), Some(c)) if s == sql && t == c);
             if !ok {
+                if pending.len() >= 32 {
+                    pending.clear();
+                }
                 let t = token();
-                *pending = Some((sql.to_string(), t.clone()));
+                pending.insert(slot, (sql.to_string(), t.clone()));
                 return Err(format!("{}{t}:{reason}", sql::CONFIRM));
             }
         }
@@ -589,7 +610,7 @@ impl Db {
         let conn = self.get(id)?;
         let q = sql::schema_queries(conn.dialect);
         let q: Vec<&str> = q.iter().map(String::as_str).collect();
-        let r = conn.run(&q, u32::MAX, true, None).await?;
+        let r = conn.reads().run(&q, u32::MAX, true, None).await?;
         Ok(build_schema(&r[0], &r[1], &r[2], &r[3]))
     }
 
@@ -608,11 +629,191 @@ impl Db {
         let conn = self.get(id)?;
         let limit = limit.clamp(1, MAX_PAGE);
         let (page, count) = sql::page_sql(conn.dialect, schema, table, filter, order_by, desc, limit, offset)?;
-        let mut r = conn.run(&[&count, &page], limit, true, None).await?;
+        let mut r = conn.reads().run(&[&count, &page], limit, true, None).await?;
         let result = r.pop().unwrap_or_default();
         let total = r.first().and_then(|c| c.rows.first()).and_then(|row| cell(row, 0).parse().ok());
         Ok(TablePage { result, total })
     }
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct RowEdit {
+    pk: BTreeMap<String, String>,
+    changes: BTreeMap<String, Option<String>>,
+    originals: BTreeMap<String, Option<String>>,
+}
+
+const BINARY: [&str; 3] = ["blob", "bytea", "binary"];
+
+type Statement = (String, Vec<Option<String>>);
+
+/// Checks the edits against the introspected table and builds one parameterized UPDATE per row: SET each changed
+/// column, WHERE the primary key matches and each changed column still holds the value the grid showed.
+fn update_statements(d: Dialect, schema: &str, t: &TableInfo, rows: &[RowEdit]) -> Result<Vec<Statement>, String> {
+    if t.kind != "table" {
+        return Err(format!("{} is a view", t.name));
+    }
+    let pk: Vec<&Column> = t.columns.iter().filter(|c| c.primary_key).collect();
+    if pk.is_empty() {
+        return Err(format!("{} has no primary key, so rows can't be addressed safely", t.name));
+    }
+    let col = |name: &str| t.columns.iter().find(|c| c.name == name).ok_or_else(|| format!("{name} isn't a column of {}", t.name));
+    let binary = |c: &Column| BINARY.iter().any(|b| c.data_type.to_ascii_lowercase().contains(b));
+    if pk.iter().any(|c| binary(c)) {
+        return Err(format!("{}'s primary key is binary", t.name));
+    }
+    let table = if d == Dialect::Sqlite { sql::quote_ident(&t.name, d) } else { format!("{}.{}", sql::quote_ident(schema, d), sql::quote_ident(&t.name, d)) };
+    let mut out = vec![];
+    for (n, r) in rows.iter().enumerate() {
+        let row = n + 1;
+        if r.changes.is_empty() || r.pk.len() != pk.len() || pk.iter().any(|c| !r.pk.contains_key(&c.name)) {
+            return Err(format!("Row {row}: the primary key ({}) and at least one change are required", pk.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")));
+        }
+        let mut params = vec![];
+        let mut arg = |v: Option<String>, c: &Column| {
+            params.push(v);
+            match d {
+                Dialect::Postgres => format!("CAST(${}::text AS {})", params.len(), c.data_type),
+                _ => "?".to_string(),
+            }
+        };
+        let mut set = vec![];
+        let mut cond = vec![];
+        for (name, v) in &r.changes {
+            let c = col(name)?;
+            if c.primary_key || binary(c) {
+                return Err(format!("Row {row}: {name} can't be edited in the grid ({})", if c.primary_key { "primary key" } else { "binary" }));
+            }
+            let Some(orig) = r.originals.get(name) else { return Err(format!("Row {row}: the original value of {name} is missing")) };
+            set.push(format!("{} = {}", sql::quote_ident(name, d), arg(v.clone(), c)));
+            let same = match d {
+                Dialect::Postgres => "IS NOT DISTINCT FROM",
+                Dialect::Mysql => "<=>",
+                Dialect::Sqlite => "IS",
+            };
+            cond.push((name, same, orig.clone(), c));
+        }
+        let mut wh: Vec<String> = pk.iter().map(|c| format!("{} = {}", sql::quote_ident(&c.name, d), arg(Some(r.pk[&c.name].clone()), c))).collect();
+        for (name, same, orig, c) in cond {
+            wh.push(format!("{} {same} {}", sql::quote_ident(name, d), arg(orig, c)));
+        }
+        out.push((format!("UPDATE {table} SET {} WHERE {}", set.join(", "), wh.join(" AND ")), params));
+    }
+    Ok(out)
+}
+
+impl Driver {
+    /// Runs one parameterized statement (driver bind parameters, never spliced text) and returns the affected rows.
+    async fn exec_params(&mut self, sql: &str, params: Vec<Option<String>>) -> Result<u64, String> {
+        match self {
+            Driver::Pg(c) => {
+                let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params.iter().map(|p| p as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+                c.execute(sql, &refs).await.map_err(pg_err)
+            }
+            Driver::My(c) => {
+                let values: Vec<mysql_async::Value> = params.into_iter().map(|p| p.map_or(mysql_async::Value::NULL, |s| mysql_async::Value::Bytes(s.into_bytes()))).collect();
+                c.exec_drop(sql, mysql_async::Params::Positional(values)).await.map_err(e2s)?;
+                Ok(c.affected_rows())
+            }
+            Driver::Lite(c) => {
+                let (c, sql) = (c.clone(), sql.to_string());
+                let run = move || {
+                    let c = c.lock().unwrap_or_else(|p| p.into_inner());
+                    c.execute(&sql, rusqlite::params_from_iter(params.iter())).map(|n| n as u64).map_err(e2s)
+                };
+                tokio::task::spawn_blocking(run).await.map_err(e2s)?
+            }
+            Driver::Closed => Err("Connection closed".into()),
+        }
+    }
+
+    /// Whether the session has a transaction open (the console ran BEGIN, or MySQL autocommit is off).
+    async fn in_transaction(&mut self) -> Result<bool, String> {
+        match self {
+            Driver::Pg(c) => {
+                // now() is the transaction's start; it equals the statement's start only outside a transaction block.
+                let rows = c.simple_query("SELECT now() = statement_timestamp()").await.map_err(pg_err)?;
+                let same = rows.iter().find_map(|m| match m {
+                    tokio_postgres::SimpleQueryMessage::Row(r) => r.get(0).map(|v| v == "t"),
+                    _ => None,
+                });
+                Ok(same != Some(true))
+            }
+            Driver::My(c) => {
+                use mysql_async::consts::StatusFlags;
+                c.query_drop("DO 0").await.map_err(e2s)?;
+                let flags = c.last_ok_packet().map(|p| p.status_flags()).unwrap_or(StatusFlags::SERVER_STATUS_IN_TRANS);
+                Ok(flags.contains(StatusFlags::SERVER_STATUS_IN_TRANS) || !flags.contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT))
+            }
+            Driver::Lite(c) => Ok(!c.lock().unwrap_or_else(|p| p.into_inner()).is_autocommit()),
+            Driver::Closed => Err("Connection closed".into()),
+        }
+    }
+}
+
+impl Conn {
+    fn reads(&self) -> &Conn {
+        self.reader.as_deref().unwrap_or(self)
+    }
+}
+
+impl Db {
+    /// Grid cell edits: checked against a fresh introspection, refused while the console has a transaction open,
+    /// then run in one transaction that is rolled back unless every UPDATE matched exactly one row.
+    async fn update_rows(&self, id: &str, schema: &str, table: &str, rows: &[RowEdit]) -> Result<u64, String> {
+        let conn = self.get(id)?;
+        if conn.read_only {
+            return Err(sql::READ_ONLY.into());
+        }
+        let s = self.schema(id).await?;
+        let t = s.schemas.iter().filter(|x| x.name == schema).flat_map(|x| &x.tables).find(|t| t.name == table).ok_or_else(|| format!("{schema}.{table} not found"))?;
+        let stmts = update_statements(conn.dialect, schema, t, rows)?;
+        let mut d = conn.driver.lock().await;
+        if d.in_transaction().await? {
+            return Err("The console has a transaction open on this connection; commit or roll it back first".into());
+        }
+        d.exec("BEGIN", 0, false).await?;
+        for (n, (sql, params)) in stmts.into_iter().enumerate() {
+            let res = d.exec_params(&sql, params).await;
+            let bad = match res {
+                Ok(1) => continue,
+                Ok(k) => format!("Row {}: matched {k} rows (it changed or was deleted since it was loaded)", n + 1),
+                Err(e) => format!("Row {}: {e}", n + 1),
+            };
+            let _ = d.exec("ROLLBACK", 0, false).await;
+            return Err(format!("{bad}; nothing was saved"));
+        }
+        d.exec("COMMIT", 0, false).await?;
+        Ok(rows.len() as u64)
+    }
+}
+
+/// The Keychain entry is bound to where the password was saved for; it is only offered to that same server.
+fn binding(cfg: &ConnConfig) -> String {
+    let host = cfg.host.trim().to_ascii_lowercase();
+    let port = cfg.port.unwrap_or(if cfg.engine == "mysql" { 3306 } else { 5432 });
+    format!("{}|{}|{port}|{}", cfg.engine, if host.is_empty() { "localhost" } else { &host }, cfg.username.trim())
+}
+
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    password: String,
+    bind: String,
+}
+
+/// The saved password for `cfg`, or None when it was saved for another host, port or user (or by an older
+/// Garnet without a binding: the connect then fails and the password is asked for and saved again).
+fn saved_password(raw: Option<String>, cfg: &ConnConfig) -> Option<String> {
+    let s: Saved = serde_json::from_str(&raw?).ok()?;
+    (s.bind == binding(cfg)).then_some(s.password)
+}
+
+async fn keychain_password(id: String, cfg: &ConnConfig) -> Result<Option<String>, String> {
+    if cfg.engine == "sqlite" {
+        return Ok(None);
+    }
+    let raw = tokio::task::spawn_blocking(move || keychain::get(&id)).await.map_err(e2s)??;
+    Ok(saved_password(raw, cfg))
 }
 
 #[cfg(target_os = "macos")]
@@ -663,11 +864,7 @@ fn redact<T>(r: Result<T, String>) -> Result<T, String> {
 pub async fn db_connect(db: State<'_, Db>, id: String, config: ConnConfig, password: Option<String>) -> Result<ServerInfo, String> {
     let password = match password {
         Some(p) => Some(p),
-        None if config.engine == "sqlite" => None,
-        None => {
-            let id = id.clone();
-            tokio::task::spawn_blocking(move || keychain::get(&id)).await.map_err(e2s)??
-        }
+        None => keychain_password(id.clone(), &config).await?,
     };
     let password = password.filter(|p| !p.is_empty());
     redact(db.connect(id, &config, password.as_deref()).await)
@@ -702,8 +899,7 @@ pub async fn db_cancel(db: State<'_, Db>, id: String, query_id: String) -> Resul
 pub async fn db_test(id: String, config: ConnConfig, password: Option<String>) -> Result<TestInfo, String> {
     let password = match password.filter(|p| !p.is_empty()) {
         Some(p) => Some(p),
-        None if config.engine == "sqlite" => None,
-        None => tokio::task::spawn_blocking(move || keychain::get(&id)).await.map_err(e2s)??,
+        None => keychain_password(id, &config).await?,
     };
     let db = Db::default();
     let t = Instant::now();
@@ -735,8 +931,14 @@ pub async fn db_table_page(
 }
 
 #[tauri::command]
-pub async fn db_password_set(id: String, password: String) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || keychain::set(&id, &password)).await.map_err(e2s)?
+pub async fn db_update_rows(db: State<'_, Db>, id: String, schema: String, table: String, rows: Vec<RowEdit>) -> Result<u64, String> {
+    redact(db.update_rows(&id, &schema, &table, &rows).await)
+}
+
+#[tauri::command]
+pub async fn db_password_set(id: String, password: String, config: ConnConfig) -> Result<(), String> {
+    let value = serde_json::to_string(&Saved { password, bind: binding(&config) }).map_err(e2s)?;
+    tokio::task::spawn_blocking(move || keychain::set(&id, &value)).await.map_err(e2s)?
 }
 
 #[tauri::command]
@@ -942,6 +1144,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn confirmation_tokens_are_kept_per_query_id() {
+        let t = fixture("slots");
+        let db = Db::default();
+        db.connect("s".into(), &cfg(&t.0, false), None).await.unwrap();
+        let tok = |e: String| e[sql::CONFIRM.len()..].split(':').next().unwrap().to_string();
+        let a = tok(db.query("s", "DELETE FROM posts", None, Some("qa"), None).await.unwrap_err());
+        let b = tok(db.query("s", "DELETE FROM authors", None, Some("qb"), None).await.unwrap_err());
+        // The second pending confirmation didn't evict the first.
+        assert!(db.query("s", "DELETE FROM posts", None, Some("qa"), Some(&a)).await.is_ok());
+        assert!(db.query("s", "DELETE FROM authors", None, Some("qb"), Some(&a)).await.unwrap_err().starts_with(sql::CONFIRM), "a token only answers its own query id");
+        let b2 = tok(db.query("s", "DELETE FROM authors", None, Some("qb"), Some(&b)).await.unwrap_err());
+        assert!(db.query("s", "DELETE FROM authors", None, Some("qb"), Some(&b2)).await.is_ok());
+    }
+
+    fn edit(pk: &str, col: &str, new: Option<&str>, old: Option<&str>) -> RowEdit {
+        RowEdit {
+            pk: [("id".to_string(), pk.to_string())].into(),
+            changes: [(col.to_string(), new.map(str::to_string))].into(),
+            originals: [(col.to_string(), old.map(str::to_string))].into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn grid_edits_run_as_one_checked_transaction() {
+        let t = fixture("edits");
+        let db = Db::default();
+        db.connect("e".into(), &cfg(&t.0, false), None).await.unwrap();
+        db.query("e", "CREATE TABLE nopk (a TEXT)", None, None, None).await.unwrap();
+        let db = &db;
+        let name = |id: u32| async move { db.query("e", &format!("SELECT name, score FROM authors WHERE id = {id}"), None, None, None).await.unwrap().rows[0].clone() };
+        let n = db.update_rows("e", "main", "authors", &[edit("1", "name", Some("it's \\ ann"), Some("ann")), edit("2", "score", None, Some("2.5"))]).await.unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(name(1).await[0].as_deref(), Some("it's \\ ann"));
+        assert_eq!(name(2).await[1], None);
+        // A row that changed since it was loaded stops the whole batch; the first row's edit is rolled back too.
+        let err = db.update_rows("e", "main", "authors", &[edit("3", "name", Some("x"), Some("cy")), edit("1", "name", Some("y"), Some("ann"))]).await.unwrap_err();
+        assert!(err.starts_with("Row 2: matched 0 rows"), "{err}");
+        assert_eq!(db.query("e", "SELECT name FROM authors WHERE id = 3", None, None, None).await.unwrap().rows[0][0].as_deref(), Some("cy"));
+        for (table, rows, why) in [
+            ("recent", vec![edit("1", "title", Some("x"), None)], "is a view"),
+            ("nopk", vec![edit("1", "a", Some("x"), None)], "no primary key"),
+            ("authors", vec![edit("1", "avatar", Some("x"), None)], "binary"),
+            ("authors", vec![edit("1", "nope", Some("x"), None)], "isn't a column"),
+            ("authors", vec![edit("1", "id", Some("9"), Some("1"))], "primary key"),
+            ("authors", vec![RowEdit { originals: BTreeMap::new(), ..edit("1", "name", Some("x"), None) }], "original value"),
+        ] {
+            let err = db.update_rows("e", "main", table, &rows).await.unwrap_err();
+            assert!(err.contains(why), "{table}: {err}");
+        }
+        db.query("e", "BEGIN", None, None, None).await.unwrap();
+        let err = db.update_rows("e", "main", "authors", &[edit("3", "name", Some("x"), Some("cy"))]).await.unwrap_err();
+        assert!(err.contains("transaction open"), "{err}");
+        db.query("e", "ROLLBACK", None, None, None).await.unwrap();
+        db.connect("ro".into(), &cfg(&t.0, true), None).await.unwrap();
+        assert_eq!(db.update_rows("ro", "main", "authors", &[edit("3", "name", Some("x"), Some("cy"))]).await.unwrap_err(), sql::READ_ONLY);
+    }
+
+    #[test]
+    fn keychain_password_is_only_offered_to_the_server_it_was_saved_for() {
+        let mut c = cfg(Path::new("/x"), false);
+        c.engine = "postgres".into();
+        c.host = "db.local".into();
+        c.username = "app".into();
+        let raw = serde_json::to_string(&Saved { password: "pw".into(), bind: binding(&c) }).unwrap();
+        assert_eq!(saved_password(Some(raw.clone()), &c).as_deref(), Some("pw"));
+        let explicit = ConnConfig { port: Some(5432), host: " DB.local ".into(), ..c.clone() };
+        assert_eq!(saved_password(Some(raw.clone()), &explicit).as_deref(), Some("pw"));
+        for other in [ConnConfig { host: "evil.example".into(), ..c.clone() }, ConnConfig { port: Some(6543), ..c.clone() }, ConnConfig { username: "root".into(), ..c.clone() }] {
+            assert_eq!(saved_password(Some(raw.clone()), &other), None);
+        }
+        assert_eq!(saved_password(Some("legacy-plain-password".into()), &c), None);
+        assert_eq!(saved_password(None, &c), None);
+    }
+
+    #[tokio::test]
     async fn cancel_only_interrupts_the_named_query() {
         let t = fixture("cancel");
         let db = Arc::new(Db::default());
@@ -1039,6 +1316,26 @@ mod tests {
         db.schema("n").await.unwrap();
         db.query("n", "ROLLBACK", None, None, None).await.unwrap();
         assert_eq!(v1().await.as_deref(), Some("b"));
+        // Grid reads run on the read-only session, so a filter can't write even on a writable connection.
+        if engine == "Postgres" {
+            db.query("n", "CREATE SEQUENCE IF NOT EXISTS garnet_seq", None, None, None).await.unwrap();
+            let err = db.table_page("n", schema, "garnet_test", 0, 10, None, false, Some("nextval('garnet_seq') > 0")).await.unwrap_err();
+            assert!(err.contains("read-only"), "{err}");
+            confirmed(&db, "n", "DROP SEQUENCE garnet_seq").await.unwrap();
+        }
+        let n = db.update_rows("n", schema, "garnet_test", &[RowEdit {
+            pk: [("id".to_string(), "1".to_string())].into(),
+            changes: [("n".to_string(), Some("2.25".to_string()))].into(),
+            originals: [("n".to_string(), Some("1.50".to_string()))].into(),
+        }]).await.unwrap();
+        assert_eq!(n, 1);
+        db.query("n", "BEGIN", None, None, None).await.unwrap();
+        assert!(db.update_rows("n", schema, "garnet_test", &[RowEdit {
+            pk: [("id".to_string(), "1".to_string())].into(),
+            changes: [("v".to_string(), Some("z".to_string()))].into(),
+            originals: [("v".to_string(), Some("b".to_string()))].into(),
+        }]).await.unwrap_err().contains("transaction open"));
+        db.query("n", "ROLLBACK", None, None, None).await.unwrap();
         c.read_only = true;
         db.connect("ro".into(), &c, pw.as_deref()).await.unwrap();
         assert_eq!(db.query("ro", "DELETE FROM garnet_test", None, None, None).await.unwrap_err(), sql::READ_ONLY);

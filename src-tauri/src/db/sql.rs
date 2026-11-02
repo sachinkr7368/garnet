@@ -16,7 +16,8 @@ pub struct Scan {
     pub has_eq: bool,
     pub depth: i32,
     pub min_depth: i32,
-    /// Unquoted words (uppercased) with their paren depth, in order.
+    /// Every significant token in order with its paren depth: unquoted words uppercased, punctuation as itself,
+    /// strings and quoted identifiers as `'`, numbers as `0`.
     pub words: Vec<(String, i32)>,
 }
 
@@ -27,7 +28,7 @@ impl Scan {
 
     /// Why the statement needs an explicit confirmation: DROP/TRUNCATE/ALTER, or UPDATE/DELETE without a WHERE
     /// at its own level. Mirrors `classify` in src/sqlsafety.ts.
-    pub fn destructive(&self) -> Option<String> {
+    fn destructive(&self) -> Option<String> {
         let first = self.first_keyword.as_deref().unwrap_or("");
         if matches!(first, "DROP" | "TRUNCATE" | "ALTER") {
             return Some(format!("{first} statement"));
@@ -36,8 +37,9 @@ impl Scan {
             if w != "UPDATE" && w != "DELETE" {
                 continue;
             }
-            let prev = k.checked_sub(1).map(|p| self.words[p].0.as_str());
-            if matches!(prev, Some("FOR" | "ON" | "KEY" | "DO" | "NO")) {
+            // FOR UPDATE, ON DELETE, NO KEY UPDATE, DO UPDATE: only when that keyword is the token right before.
+            let prev = k.checked_sub(1).map(|p| &self.words[p]);
+            if prev.is_some_and(|(p, d)| d == depth && matches!(p.as_str(), "FOR" | "ON" | "KEY" | "DO" | "NO")) {
                 continue;
             }
             let rest = self.words[k + 1..].iter().take_while(|(_, d)| d >= depth);
@@ -49,23 +51,52 @@ impl Scan {
     }
 }
 
-/// Checks `sql` is exactly one statement (trailing `;`, whitespace and comments allowed).
-/// Postgres and MySQL are scanned with and without backslash escapes in strings, since the
-/// server setting is unknown; both readings must agree there is one statement.
-pub fn check_single(sql: &str, d: Dialect) -> Result<Scan, String> {
-    let first = scan(sql, d, false)?;
-    if d != Dialect::Sqlite {
-        scan(sql, d, true)?;
+/// Every way the server might read one statement. A check passes only if it passes for each reading.
+#[derive(Debug)]
+pub struct Checked(Vec<Scan>);
+
+impl Checked {
+    pub fn first_keyword(&self) -> Option<&str> {
+        self.0.iter().find_map(|s| s.first_keyword.as_deref())
     }
-    Ok(first)
+
+    /// The first reading that needs confirmation decides.
+    pub fn destructive(&self) -> Option<String> {
+        self.0.iter().find_map(Scan::destructive)
+    }
+
+    fn balanced(&self) -> bool {
+        self.0.iter().all(|s| s.depth == 0 && s.min_depth >= 0)
+    }
 }
 
-pub fn check_read_only(s: &Scan, d: Dialect) -> Result<(), String> {
-    let ok = match s.first_keyword.as_deref().unwrap_or("") {
-        "SELECT" | "WITH" | "EXPLAIN" | "SHOW" | "VALUES" | "TABLE" | "DESCRIBE" | "DESC" => true,
-        "PRAGMA" => d == Dialect::Sqlite && !s.has_eq,
-        _ => false,
-    } && !s.has("INTO") && !s.has("OUTFILE") && !s.has("DUMPFILE");
+/// Checks `sql` is exactly one statement (trailing `;`, whitespace and comments allowed) under every reading:
+/// Postgres and MySQL with and without backslash escapes in strings (the server setting is unknown), and MySQL
+/// with version-gated comments (`/*!50700 … */`, MariaDB's `/*M! … */`) both run as code and skipped, since the
+/// server version and flavour are unknown too.
+pub fn check_single(sql: &str, d: Dialect) -> Result<Checked, String> {
+    let backslash: &[bool] = if d == Dialect::Sqlite { &[false] } else { &[false, true] };
+    let gated: &[bool] = if d == Dialect::Mysql { &[true, false] } else { &[true] };
+    let mut out = vec![];
+    for &bs in backslash {
+        for &g in gated {
+            out.push(scan(sql, d, bs, g)?);
+        }
+    }
+    Ok(Checked(out))
+}
+
+pub fn check_read_only(c: &Checked, d: Dialect) -> Result<(), String> {
+    let ok = c.0.iter().all(|s| {
+        let kw = match s.first_keyword.as_deref().unwrap_or("") {
+            "SELECT" | "WITH" | "EXPLAIN" | "SHOW" | "VALUES" | "TABLE" | "DESCRIBE" | "DESC" => true,
+            "PRAGMA" => d == Dialect::Sqlite && !s.has_eq,
+            _ => false,
+        };
+        let locks = s.words.windows(2).any(|w| matches!((w[0].0.as_str(), w[1].0.as_str()), ("FOR", "UPDATE" | "SHARE" | "NO" | "KEY") | ("LOCK", "IN")));
+        let writes = s.first_keyword.as_deref() == Some("WITH") && ["INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|w| s.has(w));
+        kw && !locks && !writes && !s.has("INTO") && !s.has("OUTFILE") && !s.has("DUMPFILE")
+    });
     ok.then_some(()).ok_or_else(|| READ_ONLY.into())
 }
 
@@ -108,7 +139,23 @@ fn mysql_dash_comment(b: &[u8], i: usize) -> bool {
     b.get(i + 2).map_or(true, |c| c.is_ascii_whitespace() || c.is_ascii_control())
 }
 
-fn scan(sql: &str, d: Dialect, backslash: bool) -> Result<Scan, String> {
+/// MySQL executable comments: `/*!` always runs; `/*!NNNNN` and MariaDB's `/*M!`/`/*M!NNNNN` run depending on the
+/// server. Returns where the body starts and whether it is gated.
+fn exec_comment_start(b: &[u8], i: usize) -> Option<(usize, bool)> {
+    let mut j = i + 2;
+    let maria = b.get(j) == Some(&b'M') && b.get(j + 1) == Some(&b'!');
+    if maria {
+        j += 2;
+    } else if b.get(j) == Some(&b'!') {
+        j += 1;
+    } else {
+        return None;
+    }
+    let digits = b[j..].iter().take_while(|c| c.is_ascii_digit()).count();
+    Some((j + digits, maria || digits > 0))
+}
+
+fn scan(sql: &str, d: Dialect, backslash: bool, gated_as_code: bool) -> Result<Scan, String> {
     let b = sql.as_bytes();
     let mut s = Scan::default();
     let (mut i, mut ended, mut exec_comment) = (0, false, false);
@@ -124,14 +171,13 @@ fn scan(sql: &str, d: Dialect, backslash: bool) -> Result<Scan, String> {
             continue;
         }
         if c == b'/' && next == Some(b'*') {
-            if d == Dialect::Mysql && b.get(i + 2) == Some(&b'!') {
-                // MySQL runs the body of /*! ... */ as SQL, so scan it as code.
-                i += 3;
-                while i < b.len() && b[i].is_ascii_digit() {
-                    i += 1;
+            if d == Dialect::Mysql && !exec_comment {
+                if let Some((body, _)) = exec_comment_start(b, i).filter(|&(_, g)| !g || gated_as_code) {
+                    // The server runs this body as SQL, so scan it as code.
+                    i = body;
+                    exec_comment = true;
+                    continue;
                 }
-                exec_comment = true;
-                continue;
             }
             let (mut depth, mut j) = (1, i + 2);
             while depth > 0 {
@@ -165,17 +211,21 @@ fn scan(sql: &str, d: Dialect, backslash: bool) -> Result<Scan, String> {
             return Err(ONE_STATEMENT.into());
         }
         match c {
-            b'\'' => i = skip_quoted(b, i, b'\'', backslash)?,
-            b'"' => i = skip_quoted(b, i, b'"', d == Dialect::Mysql && backslash)?,
-            b'`' if d != Dialect::Postgres => i = skip_quoted(b, i, b'`', false)?,
+            b'\'' | b'"' | b'`' if c != b'`' || d != Dialect::Postgres => {
+                let escapes = backslash && (c == b'\'' || d == Dialect::Mysql) && c != b'`';
+                i = skip_quoted(b, i, c, escapes)?;
+                s.words.push(("'".into(), s.depth));
+            }
             b'[' if d == Dialect::Sqlite => {
                 i = b[i..].iter().position(|&x| x == b']').map(|p| i + p + 1).ok_or("Unterminated identifier")?;
+                s.words.push(("'".into(), s.depth));
             }
             b'$' if d == Dialect::Postgres && dollar_tag(b, i).is_some() => {
                 let end = dollar_tag(b, i).unwrap_or(i + 1);
                 let tag = &b[i..end];
                 let close = b[end..].windows(tag.len()).position(|w| w == tag).ok_or("Unterminated dollar-quoted string")?;
                 i = end + close + tag.len();
+                s.words.push(("'".into(), s.depth));
             }
             c if c.is_ascii_alphabetic() || c == b'_' || c >= 0x80 => {
                 let start = i;
@@ -185,6 +235,7 @@ fn scan(sql: &str, d: Dialect, backslash: bool) -> Result<Scan, String> {
                 let word = &sql[start..i];
                 if d == Dialect::Postgres && word.eq_ignore_ascii_case("e") && b.get(i) == Some(&b'\'') {
                     i = skip_quoted(b, i, b'\'', true)?;
+                    s.words.push(("'".into(), s.depth));
                 } else {
                     let up = word.to_ascii_uppercase();
                     s.first_keyword.get_or_insert_with(|| up.clone());
@@ -201,6 +252,8 @@ fn scan(sql: &str, d: Dialect, backslash: bool) -> Result<Scan, String> {
                     b'=' => s.has_eq = true,
                     _ => {}
                 }
+                let at = if c == b'(' { s.depth - 1 } else { s.depth };
+                s.words.push(((c as char).to_string(), at));
                 i += 1;
             }
         }
@@ -235,8 +288,7 @@ pub fn page_sql(
     let filter = filter.map(str::trim).filter(|f| !f.is_empty());
     let mut cond = String::new();
     if let Some(f) = filter {
-        let s = check_single(f, d)?;
-        if s.depth != 0 || s.min_depth < 0 {
+        if !check_single(f, d)?.balanced() {
             return Err("Unbalanced parentheses in filter".into());
         }
         cond = format!(" WHERE (\n{}\n)", f.trim_end_matches(';'));
@@ -352,7 +404,7 @@ mod tests {
         assert!(one("SELECT 1 # ; DROP\n", Mysql));
         assert!(!one("SELECT 1 # x\n; DROP TABLE t", Mysql));
         assert!(!one("SELECT 1 /*!; DROP TABLE t */", Mysql));
-        assert!(check_single("/*!50000 DELETE FROM t */", Mysql).unwrap().first_keyword.as_deref() == Some("DELETE"));
+        assert_eq!(check_single("/*!50000 DELETE FROM t */", Mysql).unwrap().first_keyword(), Some("DELETE"));
     }
 
     #[test]
@@ -378,7 +430,7 @@ mod tests {
 
     #[test]
     fn first_keyword_and_read_only_rules() {
-        let kw = |s: &str| check_single(s, Postgres).unwrap().first_keyword;
+        let kw = |s: &str| check_single(s, Postgres).unwrap().first_keyword().map(str::to_string);
         assert_eq!(kw("  -- c\n /* x */ ((select 1))").as_deref(), Some("SELECT"));
         assert_eq!(kw("with x as (select 1) select * from x").as_deref(), Some("WITH"));
         assert_eq!(kw("-- nothing"), None);
@@ -434,6 +486,46 @@ mod tests {
         for sql in ["DELETE FROM t WHERE id = 1", "UPDATE t SET a = 1 WHERE id = 2", "SELECT * FROM t FOR UPDATE", "INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING", "SELECT 'drop table t'"] {
             assert_eq!(why(sql), None, "{sql}");
         }
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Attack {
+        sql: String,
+        dialect: String,
+        read_only: String,
+        writable: String,
+    }
+
+    /// The same corpus src/test/sqlsafety.test.ts runs through the frontend checks.
+    #[test]
+    fn attack_corpus_matches_the_frontend() {
+        let cases: Vec<Attack> = serde_json::from_str(include_str!("../../../src/test/fixtures/sql-attacks.json")).unwrap();
+        let mut wrong = vec![];
+        for a in &cases {
+            let d = match a.dialect.as_str() {
+                "postgres" => Postgres,
+                "mysql" => Mysql,
+                _ => Sqlite,
+            };
+            let c = check_single(&a.sql, d);
+            let refused = c.as_ref().map_or(true, |c| check_read_only(c, d).is_err());
+            let confirm = c.as_ref().map_or(true, |c| c.destructive().is_some());
+            if refused != (a.read_only == "refuse") || confirm != (a.writable == "confirm") {
+                wrong.push(format!("{} [{}]: refused={refused} confirm={confirm}", a.sql, a.dialect));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn executable_comments_are_code_in_every_reading_that_runs_them() {
+        assert_eq!(check_single("SELECT 1 /*M!; COMMIT; SET SESSION TRANSACTION READ WRITE; DELETE FROM t */", Mysql).unwrap_err(), ONE_STATEMENT);
+        let c = check_single("/*!99999 SELECT 1, */ DROP TABLE t", Mysql).unwrap();
+        assert_eq!(c.destructive().as_deref(), Some("DROP statement"));
+        assert!(check_read_only(&c, Mysql).is_err());
+        // Postgres has no executable comments.
+        assert!(check_single("SELECT 1 /*M!; DELETE FROM t */", Postgres).unwrap().destructive().is_none());
     }
 
     #[test]

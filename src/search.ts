@@ -44,7 +44,17 @@ let replaceTimer = 0;
 replaceInput.addEventListener("input", () => {
   clearTimeout(replaceTimer);
   replaceTimer = window.setTimeout(run, 250);
+  setPending(true);
 });
+query.addEventListener("input", () => setPending(true));
+
+/// The listed matches were computed for `searched`; Replace stays off while a search is pending or running.
+let searched = { query: "", replace: "" };
+let pending = false;
+function setPending(on: boolean) {
+  pending = on;
+  replaceAllBtn.disabled = replaceSelectedBtn.disabled = on;
+}
 
 const replacing = () => !replaceBar.hidden;
 interface FileResult {
@@ -203,6 +213,8 @@ export function run() {
   summary.textContent = q ? "Searching…" : "";
   summary.classList.remove("error");
   summary.title = "";
+  searched = { query: q, replace: replaceInput.value };
+  setPending(!!q);
   query.classList.remove("invalid");
   active = null;
   if (!q) return;
@@ -224,6 +236,7 @@ export function run() {
       truncated ||= ev.truncated;
       const n = ev.total;
       summary.textContent = `${n}${truncated ? "+" : ""} match${n === 1 ? "" : "es"} in ${files} file${files === 1 ? "" : "s"} · ${ms} ms${truncated && replacing() ? " · only listed matches are replaced" : ""}`;
+      setPending(false);
       if (!n && include.value.trim()) results.append(h("div", { class: "empty" }, "No matches. Files ignored by .gitignore (and .git) are skipped, even when the include pattern names them."));
     }
   };
@@ -239,6 +252,7 @@ export function run() {
     onEvent: channel,
   }).catch((e) => {
     if (channel !== active) return;
+    setPending(false);
     summary.textContent = searchError(e);
     summary.title = String(e);
     summary.classList.add("error");
@@ -267,6 +281,10 @@ export const replaceInFiles = () => findInFiles(undefined, true);
 /// Open buffers are edited through Monaco (one undo step per file); other files are rewritten on disk.
 async function replaceMatches(all: boolean) {
   if (!found.length) return;
+  if (pending || query.value !== searched.query || replaceInput.value !== searched.replace) {
+    toast("The search or replacement text changed since these matches were listed; press Enter to search again, then replace.", "error");
+    return;
+  }
   const open = new Set(allTabs().map((t) => t.model));
   let applied = 0;
   let planned = 0;

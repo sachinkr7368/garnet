@@ -709,19 +709,25 @@ async function databaseChecks(report: Report, check: Check) {
       const input = await until(() => cell()[ti]?.querySelector<HTMLInputElement>("input"), 3000);
       if (input) {
         input.value = "garnet-smoke-edited";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
         input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
       }
       let asked = "";
       dbSmokeHooks.ask = async (m) => ((asked = String(m)), true);
       click(dbPane()?.querySelector('[title^="Submit 1 change"]'));
       const saved = await until(async () => (await q(dev, `SELECT title FROM posts WHERE id = ${Number(id)}`)).rows[0]?.[0] === "garnet-smoke-edited", 10000);
-      check("db: grid edit submits one confirmed UPDATE keyed by the primary key", (!!saved && asked.includes("UPDATE") && asked.includes(`WHERE "id" = '${id}'`)) || JSON.stringify({ asked, id }));
+      check("db: grid edit submits one confirmed UPDATE keyed by the primary key", (!!saved && asked.includes("UPDATE") && asked.includes(`WHERE id = '${id}'`)) || JSON.stringify({ asked, id }));
       dbSmokeHooks.ask = undefined;
     }
 
     {
       const one = await q(dev, "SELECT 1; DROP TABLE garnet_smoke_drop").then(() => "ran", (e) => String(e));
       check("db: backend refuses two statements in one string", one.includes("one statement") || one);
+      await q(dev, "BEGIN");
+      const pk = (await q(dev, "SELECT id, title FROM posts WHERE title LIKE 'garnet-smoke-%' ORDER BY id LIMIT 1")).rows[0];
+      const inTxn = await invoke("db_update_rows", { id: dev, schema: "main", table: "posts", rows: [{ pk: { id: pk?.[0] }, changes: { title: "x" }, originals: { title: pk?.[1] } }] }).then(() => "updated", (e) => String(e));
+      await q(dev, "ROLLBACK");
+      check("db: grid edits are refused while the console has a transaction open", inTxn.includes("transaction open") || inTxn);
       const token = await q(dev, "DROP TABLE garnet_smoke_drop").then(() => "ran", (e) => String(e));
       const kept = (await q(dev, "SELECT name FROM sqlite_master WHERE name = 'garnet_smoke_drop'")).rows.length === 1;
       check("db: backend asks for a confirmation token before DROP", (token.startsWith("CONFIRM:") && token.endsWith(":DROP statement") && kept) || token);
@@ -792,7 +798,7 @@ async function databaseChecks(report: Report, check: Check) {
     const exported = await until(() => [...document.querySelectorAll(".toast-msg")].find((t) => t.textContent?.includes(exportPath))?.textContent, 10000);
     const csv = exported ? await api.runCapture(root, `cat ${shellQuote(exportPath)}`, 30) : "";
     const lines = csv.trim().split(/\r?\n/);
-    check("db: CSV export (dialog skipped in smoke mode)", (lines[0] === "id,title" && lines.length === 151 && lines[1].endsWith(",garnet-smoke-1")) || `${exported}: ${csv.slice(0, 120)}`);
+    check("db: CSV export (dialog skipped in smoke mode)", (lines[0] === "id,title" && lines.length === 151 && lines[2].endsWith(",garnet-smoke-2")) || `${exported}: ${csv.slice(0, 120)}`);
     await api.runCapture(root, `rm -f ${shellQuote(exportPath)}`, 30);
 
     let asked: { message: string; title?: string } | null = null;

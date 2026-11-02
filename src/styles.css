@@ -1556,6 +1556,84 @@ body.sidebar-right #toolstrip {
   }
 }
 .tr-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.tr-tree {
+  width: 42%;
+  min-width: 220px;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  outline: none;
+}
+.tr-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 8px;
+  line-height: 22px;
+  cursor: default;
+  white-space: nowrap;
+}
+.tr-row:hover {
+  background: var(--hover);
+}
+.tr-row.selected {
+  background: var(--selected);
+}
+.tr-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tr-time {
+  font-size: 11px;
+}
+.tr-icon.passed,
+.tr-failure-title.passed .codicon,
+.glyph-run.passed {
+  color: var(--added);
+}
+.tr-icon.failed,
+.tr-failure-title.failed .codicon,
+.glyph-run.failed {
+  color: var(--deleted);
+}
+.tr-icon.pending,
+.tr-failure-title.pending .codicon,
+.glyph-run.pending {
+  color: var(--dim);
+}
+.tr-detail {
+  flex: 1;
+  overflow: auto;
+  padding: 8px 12px;
+  user-select: text;
+}
+.tr-failure {
+  margin-bottom: 14px;
+}
+.tr-failure-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.tr-message,
+.tr-backtrace {
+  margin: 0 0 6px;
+  font: 12px/1.45 ui-monospace, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tr-message {
+  color: var(--deleted);
+}
+.tr-backtrace a {
+  color: var(--modified);
+}
 
 /* git: changes tree, log, hunks, merge */
 
@@ -1903,80 +1981,6 @@ body.sidebar-right #toolstrip {
   display: flex;
   min-height: 0;
 }
-.tr-tree {
-  width: 42%;
-  min-width: 220px;
-  overflow: auto;
-  border-right: 1px solid var(--border);
-  outline: none;
-}
-.tr-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding-right: 8px;
-  line-height: 22px;
-  cursor: default;
-  white-space: nowrap;
-}
-.tr-row:hover {
-  background: var(--hover);
-}
-.tr-row.selected {
-  background: var(--selected);
-}
-.tr-label {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.tr-time {
-  font-size: 11px;
-}
-.tr-icon.passed,
-.tr-failure-title.passed .codicon,
-.glyph-run.passed {
-  color: var(--added);
-}
-.tr-icon.failed,
-.tr-failure-title.failed .codicon,
-.glyph-run.failed {
-  color: var(--deleted);
-}
-.tr-icon.pending,
-.tr-failure-title.pending .codicon,
-.glyph-run.pending {
-  color: var(--dim);
-}
-.tr-detail {
-  flex: 1;
-  overflow: auto;
-  padding: 8px 12px;
-  user-select: text;
-}
-.tr-failure {
-  margin-bottom: 14px;
-}
-.tr-failure-title {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-weight: 600;
-  margin-bottom: 4px;
-}
-.tr-message,
-.tr-backtrace {
-  margin: 0 0 6px;
-  font: 12px/1.45 ui-monospace, Menlo, monospace;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.tr-message {
-  color: var(--deleted);
-}
-.tr-backtrace a {
-  color: var(--modified);
-
 .merge-pane {
   flex: 1;
   min-width: 0;

@@ -8,13 +8,11 @@ permissions:
   contents: write
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-          - target: x86_64-apple-darwin
+    needs: ci
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,39 +25,44 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
       - run: pnpm install --frozen-lockfile
 
-      # Signing and notarization run only when the Apple secrets are configured.
-      - name: Import signing certificate
-        id: signing
+      # Tauri treats an APPLE_CERTIFICATE variable as "sign with this", even when it is empty, so the signing
+      # variables are only exported when the secret exists. Without it the app is ad-hoc signed ("-").
+      - name: Configure signing
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [ -z "$APPLE_CERTIFICATE" ]; then
-            echo "No APPLE_CERTIFICATE secret: building an unsigned app."
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "No APPLE_CERTIFICATE secret: building an ad-hoc signed app."
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
             exit 0
           fi
-          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            value="${!v}"
+            if [ -n "$value" ]; then
+              echo "::add-mask::$value"
+              { echo "$v<<__GARNET_EOF__"; echo "$value"; echo "__GARNET_EOF__"; } >> "$GITHUB_ENV"
+            fi
+          done
 
+      # Publishes the release, or uploads to it when one already exists for the tag.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ steps.signing.outputs.enabled == 'true' && secrets.APPLE_CERTIFICATE || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ steps.signing.outputs.enabled == 'true' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-          APPLE_SIGNING_IDENTITY: ${{ steps.signing.outputs.enabled == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
-          APPLE_ID: ${{ steps.signing.outputs.enabled == 'true' && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ steps.signing.outputs.enabled == 'true' && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ steps.signing.outputs.enabled == 'true' && secrets.APPLE_TEAM_ID || '' }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Garnet ${{ github.ref_name }}
-          releaseBody: See the README for install notes. Unsigned builds need right-click > Open on first launch.
-          releaseDraft: true
+          releaseBody: See the README for install notes. Builds without a Developer ID are ad-hoc signed and need right-click > Open on first launch.
+          releaseDraft: false
           prerelease: false
-          args: --target ${{ matrix.target }} --bundles app,dmg
+          args: --target universal-apple-darwin --bundles app,dmg

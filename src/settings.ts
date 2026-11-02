@@ -66,6 +66,12 @@ export const SCHEMA: SettingDef[] = [
 
   { key: "git.path", page: "Version Control/Git", label: "Path to git", type: "string", default: "git" },
   { key: "git.autoFetchMinutes", page: "Version Control/Git", label: "Auto-fetch every N minutes (0 = off)", type: "number", min: 0, max: 240, default: 0 },
+  { key: "git.logLimit", page: "Version Control/Git", label: "Commits to load in the Git log", type: "number", min: 100, max: 100000, default: 2000 },
+  { key: "git.liveGutter", page: "Version Control/Git", label: "Update gutter change markers while typing", type: "boolean", default: true },
+  { key: "git.groupBy", page: "Version Control/Git", label: "Group changed files by", type: "enum", options: ["changelist", "directory"], default: "changelist", description: "changelist: Staged / Changes sections; directory: one tree." },
+  { key: "git.stashIncludeUntracked", page: "Version Control/Git", label: "Include untracked files when stashing", type: "boolean", default: false },
+  { key: "diff.sideBySide", page: "Version Control/Diff", label: "Side-by-side diff (off = unified)", type: "boolean", default: true },
+  { key: "diff.collapseUnchanged", page: "Version Control/Diff", label: "Collapse unchanged regions", type: "boolean", default: true },
   { key: "git.checkProblemsBeforeCommit", page: "Version Control/Git", label: "Warn before committing files with errors", type: "boolean", default: true },
 
   { key: "ruby.versionManager", page: "Languages/Ruby", label: "Default Ruby version manager for new run configurations", type: "enum", options: ["auto", "rbenv", "asdf", "chruby", "rvm", "mise", "none"], default: "auto" },

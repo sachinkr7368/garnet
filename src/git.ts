@@ -306,8 +306,14 @@ function changeRow(r: Row, depth: number, groupKey: string) {
     h("span", { class: "change-name" }, basename(r.path)),
     h("span", { class: "spacer" }),
     counts(r.counts),
-    r.code === "U" ? h("button", { class: "btn small", onclick: (e: MouseEvent) => (e.stopPropagation(), openResolver(r.path)) }, "Merge…") : stageToggle(r),
-    viewedBox(r.path, r.counts),
+    r.code === "U"
+      ? h("button", { class: "btn small", onclick: (e: MouseEvent) => (e.stopPropagation(), openResolver(r.path)) }, "Merge…")
+      : h(
+          "span",
+          { class: "row-actions" },
+          iconButton("discard", "Rollback…", (ev) => (ev.stopPropagation(), rollbackDialog([r.path])), "rollbackLines"),
+          stageToggle(r),
+        ),
   );
   if (!expandedHunks.has(hunkKey)) return el;
   const box = h("div", { class: "hunk-list" }, h("div", { class: "dim" }, "Loading hunks…"));
@@ -651,7 +657,7 @@ export async function refreshGit() {
   unstagedCounts = new Map(unstaged.map((f) => [f.path, f]));
   stagedCounts = new Map(staged.map((f) => [f.path, f]));
   branchEl.replaceChildren(icon("git-branch"), ` ${headLabel(branch, sha)}`);
-  branchHead.replaceChildren(icon("git-branch"), ` ${headLabel(branch, sha)}`);
+  branchHead.replaceChildren(icon("git-branch"), h("span", { class: "commit-branch-name" }, headLabel(branch, sha)));
   renderOpBanner();
   render();
   if (!worktreeList.hidden) refreshWorktrees();
@@ -820,7 +826,7 @@ async function refreshWorktrees() {
         dirty[i] ? h("span", { class: "dirty-dot", title: "Uncommitted changes" }, "●") : null,
       );
     }),
-    h("div", { class: "change-row dim", onclick: () => newWorktree() }, icon("add"), h("span", {}, "New Worktree from Branch…")),
+    h("div", { class: "change-row dim", onclick: () => newWorktree() }, icon("add"), h("span", { class: "change-name" }, "New Worktree from Branch…")),
   );
 }
 

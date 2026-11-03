@@ -7,7 +7,7 @@ import { setting } from "./settings";
 import { classify, defaultReadOnly, envSegment, isLocalHost, csvLine, splitStatements, statementAt, statementCount, toCsv, toJson, toMarkdown, toSqlInsert, withAutoLimit, type Dialect, type Kind } from "./sqlsafety";
 import { pluralize, underscore } from "./inflect";
 import { state } from "./state";
-import { contextMenu, h, icon, iconButton, modal, quickPick, rightbar, toast, trackDrag, type MenuItem } from "./ui";
+import { contextMenu, h, icon, iconButton, modal, quickPick, rightbar, toast, trackDrag, withOverflow, type MenuItem } from "./ui";
 
 export type Color = "none" | "red" | "orange" | "yellow" | "green" | "blue" | "purple";
 export const COLORS: Color[] = ["none", "red", "orange", "yellow", "green", "blue", "purple"];
@@ -1369,7 +1369,7 @@ function openTable(id: string, schema: string, table: string) {
     "div",
     { class: "db-pane" },
     header.el,
-    h(
+    withOverflow(
       "div",
       { class: "view-toolbar" },
       iconButton("refresh", "Reload", async () => (await discardChanges()) && load(), "dbReload"),
@@ -1573,7 +1573,7 @@ function openConsole(id: string) {
     "div",
     { class: "db-pane db-console" },
     header.el,
-    h(
+    withOverflow(
       "div",
       { class: "view-toolbar" },
       runBtn,

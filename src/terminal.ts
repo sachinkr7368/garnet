@@ -6,7 +6,7 @@ import { Channel, invoke, type PtyEvent } from "./ipc";
 import { isDarkTheme, onSettingsChange, setting } from "./settings";
 import { abs, root } from "./state";
 import { TERMINAL } from "./theme";
-import { bottom, h, icon, iconButton, toast } from "./ui";
+import { bottom, h, icon, iconButton, overflowStrip, toast } from "./ui";
 
 
 const views = new Set<PtyView>();
@@ -145,6 +145,18 @@ export class PtyTabs {
   el = h("div", { class: "pty-tabs" }, h("div", { class: "subtab-bar" }, this.tabsEl, this.toolbar), this.bodyEl);
   items: { title: string; view: PtyView; tab: HTMLElement; status: string }[] = [];
   active: PtyTabs["items"][number] | null = null;
+  overflow = overflowStrip(this.tabsEl, {
+    title: "Show Hidden Tabs",
+    label: (t) => t.querySelector("span:not(.codicon)")?.textContent ?? "",
+    pick: (t) => {
+      const item = this.items.find((i) => i.tab === t);
+      if (item) this.select(item);
+    },
+    close: (t) => {
+      const item = this.items.find((i) => i.tab === t);
+      if (item) this.close(item);
+    },
+  });
 
   add(title: string, view: PtyView) {
     const item = { title, view, tab: h("div"), status: "" };
@@ -183,7 +195,7 @@ export class PtyTabs {
   render() {
     this.tabsEl.replaceChildren(
       ...this.items.map((item) =>
-        h(
+        (item.tab = h(
           "div",
           {
             class: `subtab${item === this.active ? " active" : ""} ${item.status}`,
@@ -192,9 +204,11 @@ export class PtyTabs {
           item.status ? icon(item.status === "running" ? "loading" : item.status === "ok" ? "pass" : "error", item.status === "running" ? "codicon-modifier-spin" : "") : null,
           h("span", {}, item.title),
           h("button", { class: "tab-close", title: "Close", "aria-label": "Close", onmousedown: (e: MouseEvent) => e.stopPropagation(), onclick: () => this.close(item) }, icon("close")),
-        ),
+        )),
       ),
+      this.overflow.more,
     );
+    this.overflow.fit();
   }
 
   fitActive() {

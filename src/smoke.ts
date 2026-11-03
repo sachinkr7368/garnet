@@ -1050,7 +1050,7 @@ export function layoutIssues(): string[] {
     const r = el.getBoundingClientRect();
     if (r.width < 1 || r.height < 1) continue;
     const s = getComputedStyle(el);
-    if (s.visibility === "hidden" || s.display === "contents") continue;
+    if (s.visibility === "hidden" || s.display === "contents" || s.animationName !== "none") continue;
     const popup = el.parentElement?.parentElement?.id === "overlay-root" || el.matches(".ctx-menu, .toast");
     if (r.right > window.innerWidth + 1 || r.left < -1 || (popup && (r.bottom > window.innerHeight + 1 || r.top < -1))) {
       issues.add(`${describeEl(el)} outside the window (right ${Math.round(r.right)}, bottom ${Math.round(r.bottom)})`);

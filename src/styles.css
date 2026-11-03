@@ -870,8 +870,11 @@ mark {
 .subtabs {
   display: flex;
   flex: 1;
-  overflow-x: auto;
-  scrollbar-width: none;
+  min-width: 0;
+  overflow: hidden;
+}
+.subtabs > * {
+  flex: none;
 }
 .subtab {
   display: flex;

@@ -12,17 +12,21 @@ pub fn user_shell() -> String {
 }
 
 /// Environment of the user's interactive login shell in `cwd`, so rbenv/asdf/mise/chruby
-/// shims resolve the same way they do in Terminal. Captured once per project root.
+/// shims resolve the same way they do in Terminal. Captured once per project root, and only for a trusted project
+/// (the login shell runs the project's .envrc and version manager hooks); until then Garnet's own environment.
 pub fn shell_env(cwd: &Path) -> HashMap<String, String> {
+    let trusted = crate::git::trusted();
     let mut cache = CACHE.lock().unwrap();
-    if let Some((root, env)) = cache.as_ref() {
+    if let Some((root, env)) = cache.as_ref().filter(|_| trusted) {
         if root == cwd {
             return env.clone();
         }
     }
-    let mut env = capture(cwd).unwrap_or_else(|| std::env::vars().collect());
+    let mut env = trusted.then(|| capture(cwd)).flatten().unwrap_or_else(|| std::env::vars().collect());
     env.entry("LANG".into()).or_insert_with(|| "en_US.UTF-8".into());
-    *cache = Some((cwd.to_path_buf(), env.clone()));
+    if trusted {
+        *cache = Some((cwd.to_path_buf(), env.clone()));
+    }
     env
 }
 

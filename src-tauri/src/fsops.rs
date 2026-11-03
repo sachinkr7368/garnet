@@ -72,15 +72,19 @@ fn read_text(path: &Path, id: Option<(u64, u64)>) -> Result<String, String> {
 
 /// Where the project's Ruby keeps its standard library and gems (asked once per project from that Ruby), plus the
 /// Bundler `path:` gems from Gemfile.lock: public code that go to declaration, the debugger and backtrace links open.
+/// Nothing until the project is trusted, since asking its Ruby runs project code.
 pub fn ruby_roots(project: &Path) -> Vec<PathBuf> {
+    if !crate::git::trusted() {
+        return vec![];
+    }
     static CACHE: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, Vec<PathBuf>>>> = std::sync::Mutex::new(None);
     if let Some(hit) = CACHE.lock().unwrap().as_ref().and_then(|c| c.get(project).cloned()) {
         return hit;
     }
     let lock = fs::read_to_string(project.join("Gemfile.lock")).unwrap_or_default();
-    let mut dirs: Vec<PathBuf> = path_gems(&lock).into_iter().map(|p| project.join(p)).collect();
-    dirs.extend(ruby_lib_dirs(project));
-    let dirs: Vec<PathBuf> = dirs.into_iter().filter_map(|d| fs::canonicalize(d).ok()).filter(|d| d.parent().is_some() && d != Path::new("/")).collect();
+    let mut dirs = path_gem_roots(project, &lock);
+    dirs.extend(ruby_lib_dirs(project).into_iter().filter_map(|d| fs::canonicalize(d).ok()));
+    dirs.retain(|d| d.parent().is_some() && d != Path::new("/"));
     CACHE.lock().unwrap().get_or_insert_with(Default::default).insert(project.to_path_buf(), dirs.clone());
     dirs
 }
@@ -94,6 +98,13 @@ fn ruby_lib_dirs(project: &Path) -> Vec<PathBuf> {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.starts_with('/')).map(PathBuf::from).collect(),
         _ => vec![],
     }
+}
+
+/// Path gems that resolve inside the project; the lockfile is repo content, so `../..`, absolute paths and symlinks
+/// out of the project are dropped.
+fn path_gem_roots(project: &Path, lock: &str) -> Vec<PathBuf> {
+    let Ok(root) = fs::canonicalize(project) else { return vec![] };
+    path_gems(lock).into_iter().filter_map(|p| fs::canonicalize(root.join(p)).ok()).filter(|d| d.starts_with(&root)).collect()
 }
 
 /// `remote:` of each PATH section in Gemfile.lock (gems Bundler loads from a local directory).
@@ -385,6 +396,21 @@ mod tests {
         let lock = "GIT\n  remote: https://github.com/x/y.git\n  specs:\n\nPATH\n  remote: ../engines/billing\n  specs:\n    billing (0.1.0)\n\nPATH\n  remote: vendor/gems/z\n  specs:\n\nGEM\n  remote: https://rubygems.org/\n";
         assert_eq!(path_gems(lock), vec!["../engines/billing", "vendor/gems/z"]);
         assert!(path_gems("").is_empty());
+    }
+
+    #[test]
+    fn path_gems_outside_the_project_are_not_readable_roots() {
+        let base = std::env::temp_dir().join(format!("garnet-pathgems-{}", std::process::id()));
+        let proj = base.join("a/b/proj");
+        fs::create_dir_all(proj.join("vendor/gems/z")).unwrap();
+        std::os::unix::fs::symlink("/etc", proj.join("vendor/escape")).unwrap();
+        let lock = "PATH\n  remote: ../..\n  specs:\n\nPATH\n  remote: /etc\n  specs:\n\nPATH\n  remote: vendor/escape\n  specs:\n\nPATH\n  remote: ~/.ssh\n  specs:\n\nPATH\n  remote: vendor/gems/z\n  specs:\n";
+        assert_eq!(path_gem_roots(&proj, lock), vec![fs::canonicalize(proj.join("vendor/gems/z")).unwrap()]);
+        fs::write(proj.join("Gemfile.lock"), lock).unwrap();
+        let _g = crate::git::GLOBALS.lock().unwrap();
+        crate::git::TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(ruby_roots(&proj).is_empty(), "no extra roots (and no project Ruby run) before trust");
+        fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

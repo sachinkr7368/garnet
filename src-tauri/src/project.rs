@@ -42,7 +42,7 @@ pub async fn open_project(app: AppHandle, path: String) -> Result<ProjectInfo, S
     if !root.is_dir() {
         return Err(format!("{path} is not a folder"));
     }
-    crate::git::git_set_trusted(false);
+    crate::git::TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
     app.state::<Ptys>().kill_all();
     app.state::<Lsp>().stop();
     // A reload (project switch) loses the webview's connection list; close them so open transactions release their locks.
@@ -52,11 +52,6 @@ pub async fn open_project(app: AppHandle, path: String) -> Result<ProjectInfo, S
     *app.state::<watch::Watch>().0.lock().unwrap() = Some(watcher);
     let handle = app.clone();
     std::thread::spawn(move || index::rebuild(&handle));
-    let warm = root.clone();
-    std::thread::spawn(move || {
-        env::shell_env(&warm);
-        crate::fsops::ruby_roots(&warm);
-    });
     Ok(detect(&root))
 }
 

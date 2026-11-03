@@ -54,6 +54,11 @@ fn run_git(root: &str, args: &[&str], stdin: Option<&str>) -> Result<std::proces
     child.wait_with_output().map_err(e2s)
 }
 
+/// Runs blocking git work on the blocking pool so a slow fetch/push never stalls the async runtime (IPC).
+async fn off<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tokio::task::spawn_blocking(f).await.map_err(e2s)?
+}
+
 fn git(root: &str, args: &[&str]) -> Result<String, String> {
     git_in(root, args, None)
 }
@@ -70,6 +75,8 @@ fn git_in(root: &str, args: &[&str], stdin: Option<&str>) -> Result<String, Stri
 #[derive(Serialize)]
 pub struct StatusEntry {
     path: String,
+    /// Source path of a staged rename or copy.
+    orig: Option<String>,
     index: char,
     worktree: char,
 }
@@ -83,29 +90,32 @@ fn parse_status(out: &str) -> Vec<StatusEntry> {
         }
         let mut chars = rec.chars();
         let (index, worktree) = (chars.next().unwrap(), chars.next().unwrap());
-        if index == 'R' || index == 'C' {
-            parts.next();
-        }
-        entries.push(StatusEntry { path: rec[3..].to_string(), index, worktree });
+        let orig = if index == 'R' || index == 'C' { parts.next().map(String::from) } else { None };
+        entries.push(StatusEntry { path: rec[3..].to_string(), orig, index, worktree });
     }
     entries
 }
 
 #[tauri::command]
 pub async fn git_status(root: String) -> Result<Vec<StatusEntry>, String> {
-    git(&root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"]).map(|o| parse_status(&o))
+    off(move || status(&root)).await
+}
+
+fn status(root: &str) -> Result<Vec<StatusEntry>, String> {
+    git(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"]).map(|o| parse_status(&o))
 }
 
 #[tauri::command]
 pub async fn git_branch(root: String) -> Result<String, String> {
-    git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]).map(|s| s.trim().to_string())
+    off(move || git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]).map(|s| s.trim().to_string())).await
 }
 
 /// File content at `rev` ("HEAD" or "" for the index); empty when the file is new.
 #[tauri::command]
 pub async fn git_show(root: String, path: String, rev: String) -> Result<String, String> {
+    check_rev(&rev)?;
     let rel = rel(&root, &path);
-    Ok(git(&root, &["show", "--no-textconv", "--no-ext-diff", &format!("{rev}:{rel}")]).unwrap_or_default())
+    off(move || Ok(git(&root, &["show", "--no-textconv", "--no-ext-diff", &format!("{rev}:{rel}"), "--"]).unwrap_or_default())).await
 }
 
 fn rel(root: &str, path: &str) -> String {
@@ -117,37 +127,272 @@ fn rel(root: &str, path: &str) -> String {
 
 #[tauri::command]
 pub async fn git_stage(root: String, paths: Vec<String>) -> Result<(), String> {
-    let mut args = vec!["add", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    git(&root, &args).map(|_| ())
+    off(move || {
+        let mut args = vec!["--literal-pathspecs", "add", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        git(&root, &args).map(|_| ())
+    })
+    .await
 }
 
+fn has_head(root: &str) -> bool {
+    git(root, &["rev-parse", "--verify", "-q", "HEAD"]).is_ok()
+}
+
+fn unstage(root: &str, paths: &[String]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args = if has_head(root) { vec!["--literal-pathspecs", "reset", "-q", "HEAD", "--"] } else { vec!["--literal-pathspecs", "rm", "--cached", "-r", "-q", "--"] };
+    args.extend(paths.iter().map(String::as_str));
+    git(root, &args).map(|_| ())
+}
+
+/// Unstages paths; pass both sides of a staged rename so the deletion is unstaged too.
 #[tauri::command]
 pub async fn git_unstage(root: String, paths: Vec<String>) -> Result<(), String> {
-    let mut args = vec!["reset", "-q", "HEAD", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    git(&root, &args).or_else(|_| {
-        let mut args = vec!["rm", "--cached", "-q", "--"];
-        args.extend(paths.iter().map(String::as_str));
-        git(&root, &args)
-    }).map(|_| ())
+    off(move || unstage(&root, &paths)).await
 }
 
-/// Runs an arbitrary git subcommand in the project (branch/worktree/stash/push/pull UI).
+/// Subcommands the UI runs through git_run, each with the exact options it uses (long options may carry `=value`).
+/// Subcommands the UI runs through git_run, each with the exact options it uses (long options may carry `=value`).
+const RUN_ALLOWED: &[(&str, &[&str])] = &[
+    ("add", &[]),
+    ("branch", &["-d", "-D", "-m", "--list"]),
+    ("checkout", &["-b", "--track", "--ours", "--theirs"]),
+    ("cherry-pick", &["-m", "--abort", "--continue"]),
+    ("commit", &["--no-edit"]),
+    ("fetch", &["--all", "--prune"]),
+    ("for-each-ref", &["--sort", "--format"]),
+    ("log", &["-1", "--format"]),
+    ("merge", &["--ff-only", "--abort", "--continue"]),
+    ("merge-base", &[]),
+    ("pull", &["--ff-only"]),
+    ("push", &["--set-upstream", "--delete"]),
+    ("rebase", &["--abort", "--continue"]),
+    ("remote", &[]),
+    ("reset", &["--soft", "--mixed", "--hard"]),
+    ("revert", &["--no-edit", "-m", "--abort", "--continue"]),
+    ("rev-list", &["--count", "--left-right"]),
+    ("rev-parse", &["--abbrev-ref", "-q", "--verify"]),
+    ("rm", &["-q"]),
+    ("stash", &["-m", "--include-untracked", "--format", "--index"]),
+    ("status", &["--porcelain", "--untracked-files"]),
+    ("tag", &[]),
+    ("worktree", &["-b", "--porcelain", "--force"]),
+];
+/// Options whose next argument is a value (it may start with '-', like a `-wip` message).
+const RUN_VALUES: &[(&str, &str)] = &[("stash", "-m"), ("cherry-pick", "-m"), ("revert", "-m"), ("checkout", "-b"), ("worktree", "-b")];
+/// Subcommands whose arguments after `--` are pathspecs (git_run passes --literal-pathspecs, so any text is a path).
+const RUN_PATHSPECS: &[&str] = &["add", "rm", "checkout", "stash"];
+const NETWORK: &[&str] = &["fetch", "pull", "push"];
+
+/// git_run is reachable from the webview, so it runs only the subcommands and exact options the UI uses: no global
+/// options (`-c`, `--config-env`), no abbreviations (`--e` for `--exec`), nothing that executes code. Network
+/// subcommands only talk to a configured remote (`remotes`) with plain refs (no URL, path, `+force` or `^`), checkout
+/// only switches branches or takes a merge side, and `worktree add` only creates a new folder outside any repository.
+fn check_run_args(args: &[String], remotes: &[String]) -> Result<(), String> {
+    let sub = args.first().map(String::as_str).unwrap_or("");
+    let Some((_, opts)) = RUN_ALLOWED.iter().find(|(name, _)| *name == sub) else {
+        return Err(format!("git {sub} is not allowed here"));
+    };
+    let second = args.get(1).map(String::as_str).unwrap_or("");
+    match sub {
+        "remote" if second != "get-url" => return Err("only git remote get-url is allowed here".into()),
+        "stash" if !matches!(second, "push" | "list" | "pop" | "apply" | "drop") => return Err("only git stash push/list/pop/apply/drop are allowed here".into()),
+        "worktree" if !matches!(second, "add" | "list" | "remove" | "prune") => return Err("only git worktree add/list/remove/prune are allowed here".into()),
+        _ => {}
+    }
+    let mut positionals: Vec<&str> = Vec::new();
+    let mut options: Vec<&str> = Vec::new();
+    let mut paths: Vec<&str> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        let a = args[i].as_str();
+        i += 1;
+        if a.contains('\0') {
+            return Err("invalid argument".into());
+        }
+        if a == "--" {
+            if !RUN_PATHSPECS.contains(&sub) || (sub == "stash" && second != "push") {
+                return Err(format!("git {sub} takes no paths here"));
+            }
+            paths.extend(args[i..].iter().map(String::as_str));
+            if paths.iter().any(|p| p.contains('\0')) {
+                return Err("invalid argument".into());
+            }
+            break;
+        }
+        if !a.starts_with('-') {
+            positionals.push(a);
+            continue;
+        }
+        let name = if a.starts_with("--") { a.split('=').next().unwrap_or_default() } else { a };
+        if !opts.contains(&name) {
+            return Err(format!("git {sub} argument {a} is not allowed here"));
+        }
+        options.push(name);
+        if RUN_VALUES.contains(&(sub, name)) {
+            i += 1;
+        }
+    }
+    let has = |o: &str| options.contains(&o);
+    if NETWORK.contains(&sub) {
+        for (n, a) in positionals.iter().enumerate() {
+            let ok = if n == 0 { remotes.iter().any(|r| r == a) } else { !a.contains(':') && !a.starts_with(['/', '.', '+', '^']) };
+            if !ok {
+                return Err(format!("git {sub}: {a} is not a configured remote or a plain ref"));
+            }
+        }
+    }
+    if sub == "checkout" {
+        let side = has("--ours") || has("--theirs");
+        let ok = if side { positionals.is_empty() && !paths.is_empty() } else { paths.is_empty() && positionals.len() <= 1 && (has("-b") || positionals.len() == 1) };
+        if !ok {
+            return Err("git checkout here only switches branches or takes a merge side for paths".into());
+        }
+    }
+    if sub == "stash" && has("--index") && !matches!(second, "pop" | "apply") {
+        return Err("--index is only for stash pop/apply".into());
+    }
+    if sub == "worktree" {
+        if has("--force") && second != "remove" || has("-b") && second != "add" || has("--porcelain") && second != "list" {
+            return Err(format!("git worktree {second}: option not allowed"));
+        }
+        if second == "add" {
+            check_new_worktree_dir(positionals.get(1).copied().unwrap_or(""))?;
+        }
+    }
+    Ok(())
+}
+
+/// A new worktree goes into a folder that does not exist yet, under an existing parent, and outside any repository.
+fn check_new_worktree_dir(path: &str) -> Result<(), String> {
+    let p = Path::new(path);
+    if !p.is_absolute() || p.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err(format!("worktree folder must be an absolute path: {path}"));
+    }
+    if p.symlink_metadata().is_ok() {
+        return Err(format!("{path} already exists"));
+    }
+    let parent = p.parent().filter(|d| d.is_dir()).ok_or_else(|| format!("the parent folder of {path} does not exist"))?;
+    if let Some(repo) = parent.ancestors().find(|d| d.join(".git").symlink_metadata().is_ok()) {
+        return Err(format!("{path} is inside the repository {}; choose a folder outside it", repo.display()));
+    }
+    Ok(())
+}
+
+/// Runs a git subcommand from the allow list in the project (branch/worktree/stash/push/pull UI). The repo's own hooks
+/// (pre-commit, pre-push) still run, as in RubyMine; the project is already gated by trust, so hooksPath is left alone.
 #[tauri::command]
 pub async fn git_run(root: String, args: Vec<String>) -> Result<String, String> {
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    git(&root, &args)
+    off(move || {
+        let remotes: Vec<String> = if args.first().is_some_and(|s| NETWORK.contains(&s.as_str())) {
+            git(&root, &["remote"])?.lines().map(String::from).collect()
+        } else {
+            Vec::new()
+        };
+        check_run_args(&args, &remotes)?;
+        let mut full = vec!["-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=user", "--literal-pathspecs"];
+        full.extend(args.iter().map(String::as_str));
+        git(&root, &full)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn git_fetch(root: String) -> Result<String, String> {
-    git(&root, &["fetch", "--quiet", "--all", "--prune"])
+    off(move || git(&root, &["fetch", "--quiet", "--all", "--prune"])).await
 }
 
 #[tauri::command]
-pub async fn git_commit(root: String, message: String) -> Result<String, String> {
-    git(&root, &["commit", "-m", &message])
+/// Commits the index, or with `paths` only those files (`git commit -- <paths>`, other staged changes stay staged).
+pub async fn git_commit(root: String, message: String, amend: Option<bool>, paths: Option<Vec<String>>) -> Result<String, String> {
+    off(move || {
+        let mut args = vec!["--literal-pathspecs", "commit", "-m", &message];
+        if amend == Some(true) {
+            args.push("--amend");
+        }
+        if let Some(paths) = paths.as_ref().filter(|p| !p.is_empty()) {
+            args.push("--");
+            args.extend(paths.iter().map(String::as_str));
+        }
+        git(&root, &args)
+    })
+    .await
+}
+
+fn under(path: &str, p: &str) -> bool {
+    path == p || path.strip_prefix(p).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// RubyMine's Rollback: tracked paths return to HEAD (index and working copy), added files leave the index and their
+/// local copies are deleted only with `delete_added`, and a rename moves back to its old path. Paths may be folders.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct RollbackResult {
+    /// Files returned to HEAD or taken out of the index.
+    reverted: usize,
+    /// Local copies of added files deleted.
+    deleted: usize,
+}
+
+fn rollback(root: &str, paths: &[String], delete_added: bool) -> Result<RollbackResult, String> {
+    let matches = |e: &StatusEntry, p: &str| under(&e.path, p) || e.orig.as_deref().is_some_and(|o| under(o, p));
+    let entries = status(root)?;
+    if let Some(p) = paths.iter().find(|p| !entries.iter().any(|e| matches(e, p))) {
+        return Err(format!("{p} has no changes to roll back"));
+    }
+    let (mut restore, mut unindex, mut remove, mut moved) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut reverted = 0;
+    for e in entries.into_iter().filter(|e| paths.iter().any(|p| matches(e, p))) {
+        reverted += usize::from(e.index != '?');
+        match (e.index, e.worktree) {
+            ('?', _) => {
+                if delete_added {
+                    remove.push(e.path);
+                }
+            }
+            ('R', _) => {
+                restore.extend(e.orig);
+                unindex.push(e.path.clone());
+                moved.push(e.path);
+            }
+            ('A' | 'C', _) | (_, 'A') => {
+                unindex.push(e.path.clone());
+                if delete_added {
+                    remove.push(e.path);
+                }
+            }
+            _ => restore.push(e.path),
+        }
+    }
+    // A path that is both restored and listed again (staged deletion recreated as untracked) keeps its restored copy.
+    remove.retain(|p| !restore.contains(p));
+    remove.dedup();
+    if !unindex.is_empty() {
+        let mut args = vec!["--literal-pathspecs", "rm", "--cached", "-f", "-q", "--"];
+        args.extend(unindex.iter().map(String::as_str));
+        git(root, &args)?;
+    }
+    if !restore.is_empty() {
+        let mut args = vec!["--literal-pathspecs", "restore", "--source=HEAD", "--staged", "--worktree", "--"];
+        args.extend(restore.iter().map(String::as_str));
+        git(root, &args)?;
+    }
+    let mut deleted = 0;
+    for (p, counted) in remove.iter().map(|p| (p, true)).chain(moved.iter().map(|p| (p, false))) {
+        let file = Path::new(root).join(p);
+        if file.symlink_metadata().is_ok() {
+            std::fs::remove_file(&file).map_err(|e| format!("{p}: {e}"))?;
+            deleted += usize::from(counted);
+        }
+    }
+    Ok(RollbackResult { reverted, deleted })
+}
+
+#[tauri::command]
+pub async fn git_rollback(root: String, paths: Vec<String>, delete_added: bool) -> Result<RollbackResult, String> {
+    off(move || rollback(&root, &paths, delete_added)).await
 }
 
 const NO_EXT: [&str; 2] = ["--no-ext-diff", "--no-textconv"];
@@ -162,15 +407,18 @@ fn check_rev(rev: &str) -> Result<(), String> {
 /// File content at `rev` (a commit, `:2` for a merge stage, "" for the index); None when it does not exist there.
 #[tauri::command]
 pub async fn git_file_at(root: String, rev: String, path: String) -> Result<Option<String>, String> {
-    check_rev(&rev)?;
-    let spec = format!("{rev}:{}", rel(&root, &path));
-    let mut args = vec!["show"];
-    args.extend(NO_EXT);
-    args.push(&spec);
-    match run_git(&root, &args, None)? {
-        out if out.status.success() => Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned())),
-        _ => Ok(None),
-    }
+    off(move || {
+        check_rev(&rev)?;
+        let spec = format!("{rev}:{}", rel(&root, &path));
+        let mut args = vec!["show"];
+        args.extend(NO_EXT);
+        args.extend([spec.as_str(), "--"]);
+        match run_git(&root, &args, None)? {
+            out if out.status.success() => Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned())),
+            _ => Ok(None),
+        }
+    })
+    .await
 }
 
 #[derive(Serialize, PartialEq, Debug, Clone)]
@@ -275,37 +523,40 @@ fn layout(commits: &mut [LogCommit]) {
 
 #[tauri::command]
 pub async fn git_log(root: String, opts: LogOpts) -> Result<Vec<LogCommit>, String> {
-    let limit = format!("-n{}", opts.limit.clamp(1, 100_000));
-    let author = format!("--author={}", opts.author);
-    let grep = format!("--grep={}", opts.text);
-    let mut args = vec!["log", "--no-color", "--date-order", &limit, "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%D%x1f%s%x1e"];
-    args.extend(NO_EXT);
-    if !opts.author.is_empty() {
-        args.extend(["--regexp-ignore-case", &author]);
-    }
-    if !opts.text.is_empty() {
-        args.extend(["--regexp-ignore-case", "--fixed-strings", &grep]);
-    }
-    let path = rel(&root, &opts.path);
-    let file = !path.is_empty() && Path::new(&root).join(&path).is_file();
-    if file {
-        args.push("--follow");
-    }
-    if opts.branch.is_empty() {
-        args.extend(["--branches", "--remotes", "--tags", "HEAD"]);
-    } else {
-        check_rev(&opts.branch)?;
-        args.push(&opts.branch);
-    }
-    args.push("--");
-    if !path.is_empty() {
-        args.push(&path);
-    }
-    let mut commits = parse_log(&git(&root, &args)?);
-    if opts.author.is_empty() && opts.text.is_empty() && path.is_empty() {
-        layout(&mut commits);
-    }
-    Ok(commits)
+    off(move || {
+        let limit = format!("-n{}", opts.limit.clamp(1, 100_000));
+        let author = format!("--author={}", opts.author);
+        let grep = format!("--grep={}", opts.text);
+        let mut args = vec!["log", "--no-color", "--date-order", &limit, "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%D%x1f%s%x1e"];
+        args.extend(NO_EXT);
+        if !opts.author.is_empty() {
+            args.extend(["--regexp-ignore-case", &author]);
+        }
+        if !opts.text.is_empty() {
+            args.extend(["--regexp-ignore-case", "--fixed-strings", &grep]);
+        }
+        let path = rel(&root, &opts.path);
+        let file = !path.is_empty() && Path::new(&root).join(&path).is_file();
+        if file {
+            args.push("--follow");
+        }
+        if opts.branch.is_empty() {
+            args.extend(["--branches", "--remotes", "--tags", "HEAD"]);
+        } else {
+            check_rev(&opts.branch)?;
+            args.push(&opts.branch);
+        }
+        args.push("--");
+        if !path.is_empty() {
+            args.push(&path);
+        }
+        let mut commits = parse_log(&git(&root, &args)?);
+        if opts.author.is_empty() && opts.text.is_empty() && path.is_empty() {
+            layout(&mut commits);
+        }
+        Ok(commits)
+    })
+    .await
 }
 
 #[derive(Serialize, Debug, PartialEq, Default)]
@@ -373,8 +624,11 @@ fn diff_files(root: &str, spec: &[&str]) -> Result<Vec<ChangedFile>, String> {
 /// Changed files with line counts: `[]` = unstaged, `["--cached"]` = staged, `["main...HEAD"]` = branch.
 #[tauri::command]
 pub async fn git_diff_files(root: String, spec: Vec<String>) -> Result<Vec<ChangedFile>, String> {
-    let spec: Vec<&str> = spec.iter().map(String::as_str).collect();
-    diff_files(&root, &spec)
+    off(move || {
+        let spec: Vec<&str> = spec.iter().map(String::as_str).collect();
+        diff_files(&root, &spec)
+    })
+    .await
 }
 
 #[derive(Serialize, Debug)]
@@ -394,46 +648,49 @@ pub struct CommitDetails {
 /// A commit (or stash) with the files it changed against its first parent; a stash also lists its untracked files.
 #[tauri::command]
 pub async fn git_commit_details(root: String, rev: String) -> Result<CommitDetails, String> {
-    check_rev(&rev)?;
-    let mut args = vec!["show", "-s", "--no-color", "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ct%x1f%B"];
-    args.extend(NO_EXT);
-    args.extend([rev.as_str(), "--"]);
-    let out = git(&root, &args)?;
-    let f: Vec<&str> = out.splitn(8, '\x1f').collect();
-    if f.len() < 8 {
-        return Err(format!("cannot read {rev}"));
-    }
-    let hash = f[0].to_string();
-    let parents: Vec<String> = f[1].split_whitespace().map(String::from).collect();
-    let old = match parents.first() {
-        Some(p) => p.clone(),
-        None => git_in(&root, &["hash-object", "-t", "tree", "--stdin"], Some(""))?.trim().to_string(),
-    };
-    let mut files = diff_files(&root, &[&old, &hash])?;
-    for file in files.iter_mut() {
-        file.old_rev = old.clone();
-        file.new_rev = hash.clone();
-    }
-    if rev.starts_with("stash@") && parents.len() == 3 {
-        let empty = git_in(&root, &["hash-object", "-t", "tree", "--stdin"], Some(""))?.trim().to_string();
-        for mut file in diff_files(&root, &[&empty, &parents[2]])? {
-            file.status = "?".into();
-            file.old_rev = empty.clone();
-            file.new_rev = parents[2].clone();
-            files.push(file);
+    off(move || {
+        check_rev(&rev)?;
+        let mut args = vec!["show", "-s", "--no-color", "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ct%x1f%B"];
+        args.extend(NO_EXT);
+        args.extend([rev.as_str(), "--"]);
+        let out = git(&root, &args)?;
+        let f: Vec<&str> = out.splitn(8, '\x1f').collect();
+        if f.len() < 8 {
+            return Err(format!("cannot read {rev}"));
         }
-    }
-    Ok(CommitDetails {
-        hash,
-        parents,
-        author: f[2].into(),
-        email: f[3].into(),
-        time: f[4].parse().unwrap_or(0),
-        committer: f[5].into(),
-        commit_time: f[6].parse().unwrap_or(0),
-        body: f[7].trim_end().into(),
-        files,
+        let hash = f[0].to_string();
+        let parents: Vec<String> = f[1].split_whitespace().map(String::from).collect();
+        let old = match parents.first() {
+            Some(p) => p.clone(),
+            None => git_in(&root, &["hash-object", "-t", "tree", "--stdin"], Some(""))?.trim().to_string(),
+        };
+        let mut files = diff_files(&root, &[&old, &hash])?;
+        for file in files.iter_mut() {
+            file.old_rev = old.clone();
+            file.new_rev = hash.clone();
+        }
+        if rev.starts_with("stash@") && parents.len() == 3 {
+            let empty = git_in(&root, &["hash-object", "-t", "tree", "--stdin"], Some(""))?.trim().to_string();
+            for mut file in diff_files(&root, &[&empty, &parents[2]])? {
+                file.status = "?".into();
+                file.old_rev = empty.clone();
+                file.new_rev = parents[2].clone();
+                files.push(file);
+            }
+        }
+        Ok(CommitDetails {
+            hash,
+            parents,
+            author: f[2].into(),
+            email: f[3].into(),
+            time: f[4].parse().unwrap_or(0),
+            committer: f[5].into(),
+            commit_time: f[6].parse().unwrap_or(0),
+            body: f[7].trim_end().into(),
+            files,
+        })
     })
+    .await
 }
 
 /// The clean/smudge filter configured for `rel` in .gitattributes, if any (git-crypt, git-lfs, ...).
@@ -447,11 +704,14 @@ fn filter_of(root: &str, rel: &str) -> Result<Option<String>, String> {
 /// filter are refused so their content never reaches the index unfiltered.
 #[tauri::command]
 pub async fn git_stage_patch(root: String, path: String, patch: String) -> Result<(), String> {
-    let rel = rel(&root, &path);
-    if let Some(name) = filter_of(&root, &rel)? {
-        return Err(format!("This file uses the '{name}' filter; stage the whole file instead"));
-    }
-    git_in(&root, &["apply", "--cached", "--unidiff-zero", "--whitespace=nowarn", "-"], Some(&patch)).map(|_| ())
+    off(move || {
+        let rel = rel(&root, &path);
+        if let Some(name) = filter_of(&root, &rel)? {
+            return Err(format!("This file uses the '{name}' filter; stage the whole file instead"));
+        }
+        git_in(&root, &["apply", "--cached", "--unidiff-zero", "--whitespace=nowarn", "-"], Some(&patch)).map(|_| ())
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -463,37 +723,43 @@ pub struct OpState {
 /// The merge/rebase/cherry-pick/revert in progress (op is "" when none) and the conflicted paths.
 #[tauri::command]
 pub async fn git_op_state(root: String) -> Result<OpState, String> {
-    let names = ["rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"];
-    let mut args = vec!["rev-parse"];
-    for n in &names {
-        args.extend(["--git-path", n]);
-    }
-    let paths = git(&root, &args)?;
-    let exists: Vec<bool> = paths.lines().map(|p| Path::new(&root).join(p).exists()).collect();
-    let at = |i: usize| exists.get(i).copied().unwrap_or(false);
-    let op = if at(0) || at(1) {
-        "rebase"
-    } else if at(2) {
-        "merge"
-    } else if at(3) {
-        "cherry-pick"
-    } else if at(4) {
-        "revert"
-    } else {
-        ""
-    };
-    let conflicts = git(&root, &["diff", "--name-only", "--diff-filter=U", "-z", "--no-ext-diff"])?
-        .split('\0')
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect();
-    Ok(OpState { op, conflicts })
+    off(move || {
+        let names = ["rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"];
+        let mut args = vec!["rev-parse"];
+        for n in &names {
+            args.extend(["--git-path", n]);
+        }
+        let paths = git(&root, &args)?;
+        let exists: Vec<bool> = paths.lines().map(|p| Path::new(&root).join(p).exists()).collect();
+        let at = |i: usize| exists.get(i).copied().unwrap_or(false);
+        let op = if at(0) || at(1) {
+            "rebase"
+        } else if at(2) {
+            "merge"
+        } else if at(3) {
+            "cherry-pick"
+        } else if at(4) {
+            "revert"
+        } else {
+            ""
+        };
+        let conflicts = git(&root, &["diff", "--name-only", "--diff-filter=U", "-z", "--no-ext-diff"])?
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        Ok(OpState { op, conflicts })
+    })
+    .await
 }
 
 #[derive(Serialize)]
 pub struct MergeInput {
     /// A stage or the working path is a symlink: only whole-side resolution is safe.
     symlink: bool,
+    /// A stage is not UTF-8 (Latin-1, binary): only whole-side resolution keeps its bytes intact.
+    #[serde(rename = "nonUtf8")]
+    non_utf8: bool,
     base: Option<String>,
     ours: Option<String>,
     theirs: Option<String>,
@@ -503,40 +769,45 @@ pub struct MergeInput {
 
 #[tauri::command]
 pub async fn git_merge_input(root: String, path: String) -> Result<MergeInput, String> {
-    let rel = rel(&root, &path);
-    let stage = |n: u8| -> Result<Option<String>, String> {
-        let spec = format!(":{n}:{rel}");
-        let out = run_git(&root, &["show", "--no-ext-diff", "--no-textconv", &spec], None)?;
-        Ok(out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned()))
-    };
-    let symlink = git(&root, &["ls-files", "-u", "-s", "--", &rel])?.lines().any(|l| l.starts_with("120000"))
-        || std::fs::symlink_metadata(Path::new(&root).join(&rel)).is_ok_and(|m| m.file_type().is_symlink());
-    let (base, ours, theirs) = (stage(1)?, stage(2)?, stage(3)?);
-    let merged = match (&ours, &theirs) {
-        _ if symlink => String::new(),
-        (Some(o), Some(t)) => {
-            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-            let dir = std::env::temp_dir().join(format!("garnet-merge-{}-{nanos}", std::process::id()));
-            std::fs::create_dir_all(&dir).map_err(e2s)?;
-            let file = |name: &str, text: &str| -> Result<String, String> {
-                let p = dir.join(name);
-                std::fs::write(&p, text).map_err(e2s)?;
-                Ok(p.to_string_lossy().into_owned())
-            };
-            let result = (|| {
-                let (fo, fb, ft) = (file("ours", o)?, file("base", base.as_deref().unwrap_or(""))?, file("theirs", t)?);
-                let out = run_git(&root, &["merge-file", "-p", "--diff3", "-L", "Yours", "-L", "Base", "-L", "Theirs", &fo, &fb, &ft], None)?;
-                match out.status.code() {
-                    Some(c) if (0..128).contains(&c) => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
-                    _ => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
-                }
-            })();
-            let _ = std::fs::remove_dir_all(&dir);
-            result?
-        }
-        _ => String::new(),
-    };
-    Ok(MergeInput { symlink, base, ours, theirs, merged })
+    off(move || {
+        let rel = rel(&root, &path);
+        let stage = |n: u8| -> Result<Option<Vec<u8>>, String> {
+            let spec = format!(":{n}:{rel}");
+            let out = run_git(&root, &["show", "--no-ext-diff", "--no-textconv", &spec, "--"], None)?;
+            Ok(out.status.success().then_some(out.stdout))
+        };
+        let symlink = git(&root, &["ls-files", "-u", "-s", "--", &rel])?.lines().any(|l| l.starts_with("120000"))
+            || std::fs::symlink_metadata(Path::new(&root).join(&rel)).is_ok_and(|m| m.file_type().is_symlink());
+        let stages = [stage(1)?, stage(2)?, stage(3)?];
+        let non_utf8 = stages.iter().flatten().any(|b| std::str::from_utf8(b).is_err());
+        let [base, ours, theirs] = stages.map(|b| b.map(|b| String::from_utf8_lossy(&b).into_owned()));
+        let merged = match (&ours, &theirs) {
+            _ if symlink || non_utf8 => String::new(),
+            (Some(o), Some(t)) => {
+                let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+                let dir = std::env::temp_dir().join(format!("garnet-merge-{}-{nanos}", std::process::id()));
+                std::fs::create_dir_all(&dir).map_err(e2s)?;
+                let file = |name: &str, text: &str| -> Result<String, String> {
+                    let p = dir.join(name);
+                    std::fs::write(&p, text).map_err(e2s)?;
+                    Ok(p.to_string_lossy().into_owned())
+                };
+                let result = (|| {
+                    let (fo, fb, ft) = (file("ours", o)?, file("base", base.as_deref().unwrap_or(""))?, file("theirs", t)?);
+                    let out = run_git(&root, &["merge-file", "-p", "--diff3", "-L", "Yours", "-L", "Base", "-L", "Theirs", &fo, &fb, &ft], None)?;
+                    match out.status.code() {
+                        Some(c) if (0..128).contains(&c) => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+                        _ => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+                    }
+                })();
+                let _ = std::fs::remove_dir_all(&dir);
+                result?
+            }
+            _ => String::new(),
+        };
+        Ok(MergeInput { symlink, non_utf8, base, ours, theirs, merged })
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -549,20 +820,23 @@ pub struct Blame {
 
 #[tauri::command]
 pub async fn git_blame_line(root: String, path: String, line: u32) -> Result<Blame, String> {
-    let range = format!("{line},{line}");
-    let out = git(&root, &["blame", "--porcelain", "--no-textconv", "-L", &range, "--", &rel(&root, &path)])?;
-    let field = |key: &str| {
-        out.lines()
-            .find_map(|l| l.strip_prefix(key))
-            .unwrap_or_default()
-            .to_string()
-    };
-    Ok(Blame {
-        hash: out.split_whitespace().next().unwrap_or_default().chars().take(8).collect(),
-        author: field("author "),
-        time: field("author-time ").parse().unwrap_or(0),
-        summary: field("summary "),
+    off(move || {
+        let range = format!("{line},{line}");
+        let out = git(&root, &["blame", "--porcelain", "--no-textconv", "-L", &range, "--", &rel(&root, &path)])?;
+        let field = |key: &str| {
+            out.lines()
+                .find_map(|l| l.strip_prefix(key))
+                .unwrap_or_default()
+                .to_string()
+        };
+        Ok(Blame {
+            hash: out.split_whitespace().next().unwrap_or_default().chars().take(8).collect(),
+            author: field("author "),
+            time: field("author-time ").parse().unwrap_or(0),
+            summary: field("summary "),
+        })
     })
+    .await
 }
 
 #[cfg(test)]
@@ -728,4 +1002,179 @@ mod tests {
         assert_eq!((e[1].path.as_str(), e[1].index), ("new.rb", 'R'));
         assert_eq!((e[2].path.as_str(), e[2].worktree), ("b.rb", '?'));
     }
+
+    fn repo(name: &str) -> (std::path::PathBuf, String, impl Fn(&str)) {
+        let dir = std::env::temp_dir().join(format!("garnet-git-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_str().unwrap().to_string();
+        let d = dir.clone();
+        let sh = move |c: &str| assert!(Command::new("/bin/sh").args(["-c", c]).current_dir(&d).status().unwrap().success(), "{c}");
+        sh("git init -q -b main && git config user.email t@example.com && git config user.name t && git config commit.gpgsign false");
+        (dir, root, sh)
+    }
+
+    #[test]
+    fn rollback_handles_modified_added_deleted_renamed_and_untracked() {
+        let _g = GLOBALS.lock().unwrap();
+        let (dir, root, sh) = repo("rollback");
+        sh("printf 'one\n' > m.rb && printf 'gone\n' > d.rb && printf 'old\n' > old.rb && printf 'staged\n' > s.rb && git add . && git commit -qm init \
+            && printf 'changed\n' > m.rb && printf 'changed\n' > s.rb && git add s.rb && printf 'again\n' >> s.rb && rm d.rb \
+            && git mv old.rb new.rb && printf 'add\n' > a.rb && git add a.rb && printf 'u\n' > u.rb && printf 'keep\n' > keep.rb && mkdir -p lib && printf 'x\n' > 'lib/[g].rb'");
+        TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let all = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(block(git_rollback(root.clone(), all(&["m.rb", "nope.rb"]), false)).unwrap_err().contains("nope.rb"), "validated before acting");
+        assert_eq!(std::fs::read_to_string(dir.join("m.rb")).unwrap(), "changed\n");
+        let r = block(git_rollback(root.clone(), all(&["m.rb", "s.rb", "d.rb", "new.rb", "a.rb", "u.rb", "lib"]), false)).unwrap();
+        assert_eq!(r, RollbackResult { reverted: 5, deleted: 0 }, "untracked files are kept and not counted");
+        let read = |p: &str| std::fs::read_to_string(dir.join(p)).ok();
+        assert_eq!(read("m.rb").as_deref(), Some("one\n"));
+        assert_eq!(read("s.rb").as_deref(), Some("staged\n"), "staged and unstaged edits both go");
+        assert_eq!(read("d.rb").as_deref(), Some("gone\n"));
+        assert_eq!((read("old.rb").as_deref(), read("new.rb")), (Some("old\n"), None), "rename moves back");
+        assert_eq!(read("a.rb").as_deref(), Some("add\n"), "added file kept without the checkbox");
+        assert_eq!(read("u.rb").as_deref(), Some("u\n"));
+        let left: Vec<(String, char, char)> = status(&root).unwrap().into_iter().map(|e| (e.path, e.index, e.worktree)).collect();
+        assert_eq!(left, vec![("a.rb".into(), '?', '?'), ("keep.rb".into(), '?', '?'), ("lib/[g].rb".into(), '?', '?'), ("u.rb".into(), '?', '?')]);
+
+        sh("git add a.rb");
+        block(git_rollback(root.clone(), all(&["a.rb", "u.rb", "lib"]), true)).unwrap();
+        assert_eq!((read("a.rb"), read("u.rb"), read("lib/[g].rb")), (None, None, None), "delete local copies of added files");
+        assert_eq!(read("keep.rb").as_deref(), Some("keep\n"), "unselected files are untouched");
+        // A staged deletion recreated as an untracked file keeps the restored copy even with "delete added".
+        sh("git add keep.rb && git commit -qm keep && git rm -q --cached keep.rb && printf 'again\n' > keep.rb");
+        block(git_rollback(root.clone(), all(&["keep.rb"]), true)).unwrap();
+        assert_eq!(read("keep.rb").as_deref(), Some("keep\n"));
+        TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unstage_rename_resets_both_sides_and_unborn_head_uses_rm_cached() {
+        let _g = GLOBALS.lock().unwrap();
+        let (dir, root, sh) = repo("unstage");
+        TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        sh("printf 'a\n' > first.rb && git add first.rb");
+        block(git_unstage(root.clone(), vec!["first.rb".into()])).unwrap();
+        assert_eq!(status(&root).unwrap()[0].index, '?', "unborn HEAD unstages with rm --cached");
+        sh("git add first.rb && git commit -qm init && git mv first.rb second.rb");
+        let st = status(&root).unwrap();
+        assert_eq!((st[0].path.as_str(), st[0].orig.as_deref(), st[0].index), ("second.rb", Some("first.rb"), 'R'));
+        block(git_unstage(root.clone(), vec!["second.rb".into(), "first.rb".into()])).unwrap();
+        let left: Vec<(String, char, char)> = status(&root).unwrap().into_iter().map(|e| (e.path, e.index, e.worktree)).collect();
+        assert_eq!(left, vec![("first.rb".into(), ' ', 'D'), ("second.rb".into(), '?', '?')], "no staged deletion left behind");
+        assert!(block(git_unstage(root.clone(), vec!["nope.rb".into()])).is_ok());
+        TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn commit_amends_with_an_empty_index() {
+        let _g = GLOBALS.lock().unwrap();
+        let (dir, root, sh) = repo("amend");
+        TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        sh("printf 'a\n' > a.rb && git add a.rb");
+        block(git_commit(root.clone(), "first".into(), None, None)).unwrap();
+        block(git_commit(root.clone(), "first, reworded".into(), Some(true), None)).unwrap();
+        assert_eq!(git(&root, &["log", "--format=%s"]).unwrap(), "first, reworded\n");
+        assert!(block(git_commit(root.clone(), "nothing".into(), Some(false), None)).is_err());
+        sh("printf 'b\n' > b.rb && printf 'c\n' > c.rb && git add b.rb c.rb");
+        block(git_commit(root.clone(), "only b".into(), None, Some(vec!["b.rb".into()]))).unwrap();
+        assert_eq!(git(&root, &["show", "--name-only", "--format=", "HEAD"]).unwrap(), "b.rb\n");
+        assert_eq!(status(&root).unwrap()[0].path, "c.rb", "other staged files stay staged");
+        assert!(block(git_show(root.clone(), format!("{root}/b.rb"), "--output=/tmp/garnet-show-pwned".into())).is_err());
+        assert!(!Path::new("/tmp/garnet-show-pwned").exists());
+        assert_eq!(block(git_show(root.clone(), format!("{root}/b.rb"), "HEAD".into())).unwrap(), "b\n");
+        TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn git_run_allows_ui_subcommands_and_rejects_code_execution() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        for ok in [
+            &["status"][..], &["status", "--porcelain", "--untracked-files=no"], &["stash", "push", "--include-untracked", "-m", "x", "--", "app/a.rb", "b.rb"],
+            &["stash", "push", "-m", "garnet: before checkout x"], &["stash", "list", "--format=%gd%x1f%s"], &["stash", "pop"], &["stash", "apply", "stash@{0}"], &["stash", "drop", "stash@{1}"],
+            &["remote", "get-url", "origin"], &["rebase", "--continue"], &["rebase", "--abort"], &["merge", "--abort"], &["merge", "feature"], &["merge", "--ff-only", "FETCH_HEAD"],
+            &["log", "-1", "--format=%B"], &["branch", "-D", "x"], &["branch", "-d", "x"], &["branch", "-m", "a", "b"], &["branch", "--list", "x"], &["branch", "x", "abc"],
+            &["checkout", "-b", "x", "--track", "origin/x"], &["checkout", "--theirs", "--", "a.rb"], &["checkout", "x"], &["checkout", "-b", "x", "FETCH_HEAD"],
+            &["fetch", "--all", "--prune"], &["fetch", "origin", "pull/1/head"], &["pull", "--ff-only"], &["push"], &["push", "--set-upstream", "origin", "x"], &["push", "origin", "--delete", "x"],
+            &["for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/heads"], &["rev-parse", "--abbrev-ref", "@{upstream}"], &["rev-parse", "HEAD"],
+            &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], &["rev-list", "--count", "@{upstream}..HEAD"], &["worktree", "list", "--porcelain"],
+            &["worktree", "add", "-b", "x", "/p", "origin/x"], &["worktree", "remove", "--force", "/p"], &["merge-base", "main", "HEAD"], &["cherry-pick", "-m", "1", "abc"],
+            &["revert", "--no-edit", "abc"], &["cherry-pick", "--continue"], &["commit", "--no-edit"], &["reset", "--hard", "abc"], &["rm", "-q", "--", "a.rb"], &["add", "--", "a.rb"], &["tag", "v1", "abc"],
+            &["stash", "push", "--include-untracked", "-m", "-wip", "--", "-dash.rb", "--output=x"], &["checkout", "--ours", "--", "-x"], &["stash", "pop", "--index", "stash@{0}"],
+            &["stash", "apply", "--index", "stash@{1}"], &["rev-parse", "-q", "--verify", "refs/stash"], &["stash", "list", "--format=%H"], &["worktree", "prune"], &["worktree", "add", "/nonexistent-garnet-wt", "main"],
+        ] {
+            assert!(check_run_args(&s(ok), &s(&["origin"])).is_ok(), "{ok:?}");
+        }
+        for bad in [
+            &["-c", "core.pager=sh", "log"][..], &["-ccore.sshCommand=x", "fetch"], &["--config-env=core.sshCommand=X", "fetch"], &["fetch", "-c", "x"], &["fetch", "-ccore.x=y"],
+            &["config", "core.sshCommand", "x"], &["clone", "x"], &["clone", "--u=x"], &[], &["fetch", "--upload-pack=touch x", "."], &["fetch", "--upload-p=x"], &["fetch", "--upload-pa=x", "."],
+            &["pull", "--upload-pack", "x"], &["push", "--receive-pack=x"], &["push", "--exec", "x"], &["push", "--e=x", "."], &["push", "--ex=x"], &["rebase", "-x", "make"],
+            &["rebase", "-ix", "make"], &["rebase", "--exec=make"], &["log", "--output=/tmp/x"], &["log", "--ext-diff"], &["remote", "add", "x", "ext::sh"], &["remote"], &["commit", "-C", "HEAD"],
+            &["status", "--git-dir=/x"], &["show", "HEAD"], &["stash", "push", "-m", "x", "--pathspec-from-file=/etc/passwd"],
+            &["stash", "list", "--output=x"], &["stash", "show", "-p"], &["stash", "--output=x"], &["stash"], &["stash", "list", "--", "--output=x"],
+            &["push", "ext::sh -c touch /tmp/x"], &["fetch", "../other"], &["pull", "file:///tmp/r"], &["push", "origin", "a::b"], &["push", "origin", "src:dst"],
+            &["fetch", "upstream", "main"], &["fetch", "origin", "/tmp/x"], &["fetch", "origin", "--", "--upload-pack=x"],
+            &["push", "origin", "+main"], &["push", "origin", "+main:main"], &["fetch", "origin", "^x"], &["checkout", "HEAD", "--", "."], &["checkout", "HEAD", "."], &["checkout", "--", "."],
+            &["stash", "list", "--", "x"], &["stash", "drop", "--index"], &["stash", "push", "-x"], &["log", "--", "x"], &["worktree", "move", "/a", "/b"], &["worktree", "add", "--force", "/nonexistent-garnet-wt"],
+            &["worktree", "add", "-b", "x", "/tmp"], &["worktree", "add", "relative", "main"], &["worktree", "add", "/no-such-parent/x/y"], &["worktree", "list", "--force"],
+        ] {
+            assert!(check_run_args(&s(bad), &s(&["origin"])).is_err(), "{bad:?}");
+        }
+        let _g = GLOBALS.lock().unwrap();
+        let (dir, root, _sh) = repo("run");
+        assert!(check_new_worktree_dir(&format!("{root}/inside")).unwrap_err().contains("inside the repository"));
+        assert!(check_new_worktree_dir(&format!("{root}-sibling-wt")).is_ok());
+        TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(block(git_run(root.clone(), s(&["fetch", "--upload-pack=touch pwned", "."]))).is_err());
+        let other = dir.with_extension("other");
+        let _ = std::fs::remove_dir_all(&other);
+        assert!(Command::new("git").args(["init", "-q", "--bare", other.to_str().unwrap()]).status().unwrap().success());
+        assert!(block(git_run(root.clone(), s(&["fetch", other.to_str().unwrap()]))).is_err(), "a path is not a remote");
+        _sh(&format!("git remote add origin {}", other.display()));
+        assert!(block(git_run(root.clone(), s(&["fetch", "--all", "--prune"]))).is_ok());
+        assert!(block(git_run(root.clone(), s(&["fetch", "origin"]))).is_ok(), "configured remotes work");
+        assert!(!dir.join("pwned").exists());
+        std::fs::remove_dir_all(&other).unwrap();
+        TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn merge_input_flags_non_utf8_stages() {
+        let _g = GLOBALS.lock().unwrap();
+        let (dir, root, sh) = repo("latin1");
+        sh("printf 'caf\\351\\n' > l.txt && git add l.txt && git commit -qm init && git checkout -qb other && printf 'caf\\351 au lait\\n' > l.txt \
+            && git commit -qam other && git checkout -q main && printf 'caf\\351 noir\\n' > l.txt && git commit -qam main");
+        TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(git(&root, &["merge", "other"]).is_err());
+        let m = block(git_merge_input(root.clone(), format!("{root}/l.txt"))).unwrap();
+        assert!(m.non_utf8);
+        assert_eq!(m.merged, "", "no lossy text merge offered");
+        TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn slow_git_does_not_block_the_async_runtime() {
+        let _g = GLOBALS.lock().unwrap();
+        let (dir, root, sh) = repo("slow");
+        sh("printf '#!/bin/sh\nsleep 1\n' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit && printf 'a\n' > a.rb && git add a.rb");
+        TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let start = std::time::Instant::now();
+        let (commit, ticked) = rt.block_on(async {
+            tokio::join!(git_commit(root.clone(), "slow".into(), None, None), async {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                start.elapsed()
+            })
+        });
+        commit.unwrap();
+        assert!(ticked < std::time::Duration::from_millis(500), "timer waited {ticked:?} for git");
+        TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
 }

@@ -94,6 +94,10 @@ partial row is meant to become a GitHub issue.
 | Feature | Status | Notes |
 | --- | --- | --- |
 | Changes panel, stage/unstage (file), commit, commit checks for errors | done | |
+| Commit: include checkboxes (commit the ticked files, else the staged set; the button names the count), Amend (last message prefilled, warns when the commit is already pushed), Commit and Push (off while amending) | done | never commits the row selection |
+| Rollback (⌥⌘Z in the Commit panel): selected files, a folder or all changes, confirm dialog listing the files with "Delete local copies of added files"; modified, added, deleted and renamed files | done | open buffers reload with undo |
+| Changed-file context menu: Show Diff (⌘D), Jump to Source (F4), Rollback, Shelve Changes, Copy Path, Add to .gitignore, Delete | done | |
+| Shelve / Unshelve: shelve selected files, Shelf tab (Git tool window) with unshelve, apply, delete and preview | done | backed by git stash, so shelves are stashes; unshelve restores the staged state (falls back to a plain pop); staged renames can't be shelved |
 | Changes as a directory tree: filter, status badges, +/- counts, Viewed marks (per branch, cleared when the file changes), expand/collapse all, group by changelist or directory | done | |
 | Compare with Branch (`git diff <base>...HEAD`, PR-style review tree) | done | diffs show merge base ↔ HEAD, not uncommitted edits |
 | Diff view: side-by-side / unified, collapse unchanged regions, next/previous difference (F7 / ⇧F7), read-only revision diffs | done | |
@@ -102,9 +106,9 @@ partial row is meant to become a GitHub issue.
 | Partial staging in the Commit panel (stage/unstage single hunks) | done | hunk-level, not single lines; files with a clean filter (git-crypt, LFS) are staged whole only |
 | Git log tool window (⌘9): commit graph, filter by branch/user/path/text, commit details with changed files and diffs, file history (Project tree › Show History) | done | text filter matches commit messages, not hashes |
 | Log actions: copy revision, new branch/tag, cherry-pick, revert, reset soft/mixed/hard (confirmed) | done | |
-| Stashes: list, stash with message and untracked files, apply, pop, drop (confirmed), view a stash's changes | done | |
-| Merge conflicts (merge, rebase, cherry-pick, revert, stash pop): Conflicts list, 3-pane resolver (yours / result / theirs) with accept yours/theirs/both per chunk, mark resolved, abort/continue | done | symlink conflicts resolve by taking one side; binary files resolve with Accept Yours/Theirs |
-| Branch switcher: local/remote, checkout (stash or carry changes), new, rename, delete, fetch/pull/push, ahead/behind | done | |
+| Stashes: list, stash with message and untracked files, apply, pop, drop (confirmed), view a stash's changes | done | shown as the Shelf tab |
+| Merge conflicts (merge, rebase, cherry-pick, revert, stash pop): Conflicts list, 3-pane resolver (yours / result / theirs) with accept yours/theirs/both per chunk, mark resolved, abort/continue | done | symlink conflicts resolve by taking one side; binary and non-UTF-8 files resolve with Accept Yours/Theirs |
+| Branch switcher: local/remote, checkout (stash or carry changes), new, rename, delete, fetch/pull/push, ahead/behind | done | Stash and Checkout restores the changes on the new branch |
 | Worktrees: toolbar switcher and Commit panel section (folder, branch, dirty marker, current), open here / new window, create from branch, remove, reveal | done | toolbar shows the current worktree (main checkout: repo name + "main worktree" tag); count in the dropdown header |
 | Line-level staging, interactive rebase | planned | |
 

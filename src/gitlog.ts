@@ -28,9 +28,9 @@ const pathInput = h("input", { class: "log-filter", placeholder: "Path", spellch
 const authors = h("datalist", { id: "git-log-authors" });
 const branchSelect = h("select", { class: "run-select", title: "Branch" });
 const logTab = h("button", { class: "seg active", onclick: () => setMode("log") }, "Log");
-const stashTab = h("button", { class: "seg", onclick: () => setMode("stash") }, "Stashes");
+const stashTab = h("button", { class: "seg", title: "Shelved changes (git stash): unshelve, delete or preview", onclick: () => setMode("stash") }, "Shelf");
 const logFilters = h("div", { class: "log-filters" }, branchSelect, textInput, authorInput, pathInput, authors);
-const stashTools = h("div", { class: "log-filters" }, h("button", { class: "btn small", onclick: () => stashChanges() }, "Stash Changes…"));
+const stashTools = h("div", { class: "log-filters" }, h("button", { class: "btn small", onclick: () => stashChanges() }, "Shelve Changes…"));
 const listEl = h("div", { class: "log-list", tabIndex: 0 });
 const spacer = h("div", { class: "log-spacer" });
 const details = h("div", { class: "log-details" });
@@ -87,11 +87,12 @@ export async function reload() {
     selected = stashes.findIndex((s) => s.name === keep);
     renderList();
     if (selected >= 0) select(selected);
-    else details.replaceChildren(h("div", { class: "empty" }, stashes.length ? "Select a stash to see its changes." : "No stashes. Use Stash Changes… to shelve your local changes."));
+    else details.replaceChildren(h("div", { class: "empty" }, stashes.length ? "Select shelved changes to preview them." : "The shelf is empty. Use Shelve Changes…, or right-click files in the Commit tool window."));
     return;
   }
   if (!limit) limit = setting<number>("git.logLimit");
-  if (!branchSelect.options.length) await loadBranches();
+  await loadBranches();
+  if (mine !== loadSeq) return;
   try {
     commits = await api.gitLog(root(), { branch: branchSelect.value, text: textInput.value.trim(), author: authorInput.value.trim(), path: pathInput.value.trim() ? abs(pathInput.value.trim()) : "", limit });
   } catch (e) {
@@ -172,9 +173,9 @@ function renderRow(i: number) {
       h("span", { class: "log-subject" }, s.message),
       h("span", { class: "log-author" }, s.name),
       h("span", { class: "log-date" }, shortDate(s.time)),
-      iconButton("check", "Apply", () => applyStash(s.name, false)),
-      iconButton("arrow-up", "Pop", () => applyStash(s.name, true)),
-      iconButton("trash", "Drop…", () => dropStash(s.name)),
+      iconButton("arrow-up", "Unshelve (and remove from the shelf)", () => applyStash(s.name, true)),
+      iconButton("check", "Apply (keep on the shelf)", () => applyStash(s.name, false)),
+      iconButton("trash", "Delete…", () => dropStash(s.name)),
     );
   }
   const c = commits[i];
@@ -386,10 +387,10 @@ export async function stashChanges() {
   const box = h(
     "div",
     { class: "qp" },
-    h("div", { class: "qp-title" }, "Stash Changes"),
+    h("div", { class: "qp-title" }, "Shelve Changes"),
     input,
     h("label", { class: "dialog-check" }, untracked, " Include untracked files"),
-    h("div", { class: "dialog-actions" }, h("span", { class: "spacer" }), h("button", { class: "btn", onclick: () => done(false) }, "Cancel"), h("button", { class: "btn primary", onclick: () => done(true) }, "Create Stash")),
+    h("div", { class: "dialog-actions" }, h("span", { class: "spacer" }), h("button", { class: "btn", onclick: () => done(false) }, "Cancel"), h("button", { class: "btn primary", onclick: () => done(true) }, "Shelve")),
   );
   const backdrop = modal(box, () => done(false), { autofocus: input });
   box.addEventListener("keydown", (e) => {
@@ -399,25 +400,30 @@ export async function stashChanges() {
   input.focus();
 }
 
+/// Restores the staged state too (--index); when that can't apply, falls back to a plain pop/apply like RubyMine.
 async function applyStash(name: string, pop: boolean) {
-  await runGitOp(pop ? "Pop stash" : "Apply stash", ["stash", pop ? "pop" : "apply", name]);
+  const label = pop ? "Unshelve" : "Apply shelved changes";
+  const verb = pop ? "pop" : "apply";
+  const ok = await git("stash", verb, "--index", name).then((out) => (toast(`${label}: ${out.trim().split("\n").pop() || "done"}`), true), () => false);
+  if (!ok) await runGitOp(label, ["stash", verb, name]);
+  refresh();
   reload();
 }
 
 async function dropStash(name: string) {
   const s = stashes.find((x) => x.name === name);
-  if (!(await ask(`Drop ${name}${s ? ` "${s.message}"` : ""}? The stashed changes are deleted.`, { kind: "warning", okLabel: "Drop", cancelLabel: "Cancel" }))) return;
-  await git("stash", "drop", name).then(() => toast(`Dropped ${name}.`), (e) => toast(String(e), "error"));
+  if (!(await ask(`Delete ${name}${s ? ` "${s.message}"` : ""} from the shelf? The shelved changes are lost.`, { kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" }))) return;
+  await git("stash", "drop", name).then(() => toast(`Deleted ${name}.`), (e) => toast(String(e), "error"));
   refresh();
   reload();
 }
 
 function stashMenu(e: MouseEvent, s: { name: string }) {
   contextMenu(e, [
-    { label: "Apply", run: () => applyStash(s.name, false) },
-    { label: "Pop", run: () => applyStash(s.name, true) },
+    { label: "Unshelve", run: () => applyStash(s.name, true) },
+    { label: "Apply (keep on shelf)", run: () => applyStash(s.name, false) },
     null,
-    { label: "Drop…", run: () => dropStash(s.name) },
+    { label: "Delete…", run: () => dropStash(s.name) },
   ]);
 }
 
@@ -430,7 +436,7 @@ export async function unstashChanges() {
   });
   if (!items.length) return toast("No stashes.");
   quickPick({
-    placeholder: "Unstash: choose a stash to pop (open the Git tool window's Stashes tab to apply or view)",
+    placeholder: "Unstash: choose a stash to pop (the Git tool window's Shelf tab can also apply or preview)",
     items,
     onAccept: (item) => item && applyStash(item.data as string, true),
   });
@@ -449,6 +455,9 @@ export function showGitLog(path?: string) {
   bottom.show("gitlog");
 }
 
+window.addEventListener("garnet:git-refresh", () => {
+  if (state.project?.git && isTrusted()) loadBranches();
+});
 window.addEventListener("garnet:show-history", (e) => showGitLog((e as CustomEvent<string>).detail));
 
 /// For the smoke test.

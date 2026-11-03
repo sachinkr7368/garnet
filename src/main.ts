@@ -2,12 +2,12 @@ import "./styles.css";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
-import { allCommands, commandIcon, commands, installKeyHandler, keyLabel, runCommand, showPalette } from "./commands";
-import { attachToProcess, debugView, evaluateSelection, gotoBreakpoint, loadBreakpoints, restartDebug, resume, step, stopAllSessions, stopDebug, toggleBreakpoint, toggleBreakpointEnabled, viewBreakpoints } from "./debug";
+import { allCommands, commandIcon, commands, installKeyHandler, keyLabel, runCommand, runEditorAction, showPalette } from "./commands";
+import { attachToProcess, debugView, evaluateSelection, flushBreakpoints, gotoBreakpoint, loadBreakpoints, restartDebug, resume, step, stopAllSessions, stopDebug, toggleBreakpoint, toggleBreakpointEnabled, viewBreakpoints } from "./debug";
 import { rerunAll, rerunFailed, testResultsView } from "./testresults";
 import {
   activeTab, allTabs, closeActive, closeAll, cycleTab, diffActive, events, goToDiff, handleFsChanged, monaco, navigateBack, navigateForward, openFile,
-  focusActiveTab, recentFileList, recentLocations, saveActive, saveAll, targetEditor,
+  dirtyBuffers, focusActiveTab, recentFileList, recentLocations, restoreBuffer, saveActive, saveAll, targetEditor, unsavedTitles,
 } from "./editor";
 import {
   blameCurrentLine, commitView, compareWithBranch, diffActiveFile, gitOpState, goToChange, onGitChanged, refreshGit, rollbackLines, showChangeAtCaret, stageHunkAtCaret,
@@ -27,7 +27,9 @@ import { importJetBrainsKeymap, showKeymapReference, welcomeHints } from "./keym
 import { editConfigurations, launch, loadRunConfigs, newConfig, pickConfiguration, rakeTask, rerun, runs, runTests, selected } from "./run";
 import { findInFiles, replaceInFiles, searchView } from "./search";
 import { loadCodeStyle } from "./codestyle";
-import { addRecentProject, askTrust, checkTrust, isTrusted, loadSession, onSettingsChange, trustProject, loadSettings, recentProjects, saveSession, setting, settingsPath, toggleTheme, updateSetting } from "./settings";
+import { addRecentProject, askTrust, checkTrust, editableSettingsPath, isTrusted, loadSession, onSettingsChange, trustProject, loadSettings, recentProjects, saveSession, setting, toggleTheme, updateSetting } from "./settings";
+import { offerRestore, backupUnsaved } from "./hotexit";
+import { listenForQuit, quitFlow, type QuitHooks } from "./quit";
 import { openSettingsWindow } from "./settingsui";
 import { cloneDialog, createGist, createPullRequest, githubSignIn, openOnGitHub, refreshAccount } from "./github";
 import { openPullRequestByNumber, pullRequestsView, showPullRequests } from "./prs";
@@ -79,7 +81,7 @@ function goToFile() {
 }
 
 function editorAction(id: string) {
-  return () => targetEditor()?.getAction(id)?.run();
+  return () => runEditorAction(targetEditor(), id);
 }
 
 async function openFolder() {
@@ -203,10 +205,10 @@ function hideActiveToolWindow() {
 Dock.afterHide = focusActiveTab;
 
 async function importKeymap() {
-  const file = await open({ title: "Import JetBrains Keymap", filters: [{ name: "Keymap XML", extensions: ["xml"] }] });
-  if (typeof file !== "string") return;
   try {
-    await importJetBrainsKeymap(await api.readFile(file));
+    const xml = await invoke<string | null>("import_file", { title: "Import JetBrains Keymap", extension: "xml" });
+    if (xml === null) return;
+    await importJetBrainsKeymap(xml);
   } catch (e) {
     toast(`Import failed: ${e instanceof Error ? e.message : e}`, "error");
   }
@@ -224,8 +226,9 @@ commands(
   { id: "switcher", title: "Window: Switcher", key: "ctrl+tab", run: () => pickPaths("Switch to file", recentFileList(), 1) },
   { id: "hideAll", title: "Window: Hide All Tool Windows", key: "cmd+shift+f12", run: hideAll },
   { id: "settings", title: "Preferences: Settings…", key: "cmd+,", run: () => openSettingsWindow() },
+  { id: "quit", title: "File: Quit Garnet", run: () => quit() },
   { id: "toggleTheme", title: "View: Toggle Theme (Light/Dark)", run: toggleTheme },
-  { id: "settingsJson", title: "Preferences: Open Settings (JSON)", run: async () => openFile(await settingsPath()) },
+  { id: "settingsJson", title: "Preferences: Open Settings (JSON)", run: async () => openFile(await editableSettingsPath()) },
   { id: "keymapSettings", title: "Preferences: Keymap…", run: () => openSettingsWindow("Keymap") },
   { id: "importKeymap", title: "Preferences: Import JetBrains Keymap…", run: importKeymap },
   { id: "keymapReference", title: "Help: Keymap Reference", run: showKeymapReference },
@@ -398,11 +401,26 @@ onSettingsChange(() => void renderWelcome());
 
 /// Project lifecycle
 
-const persistSession = debounce(() => {
-  if (!state.project) return;
+async function persistNow(): Promise<boolean> {
+  if (!state.project) return true;
   const tabs = allTabs().filter((t) => t.kind === "file");
-  saveSession(state.project.root, { tabs: tabs.map((t) => t.path), active: activeTab()?.path, expanded: expandedPaths(), bottom: bottom.active });
-}, 500);
+  return saveSession(state.project.root, { tabs: tabs.map((t) => t.path), active: activeTab()?.path, expanded: expandedPaths(), bottom: bottom.active });
+}
+const persistSession = debounce(() => void persistNow(), 500);
+
+/// ⌘Q, the red close button, Dock Quit and logout: prompt for unsaved files, save the session, then tell the backend.
+const quitHooks: QuitHooks = {
+  unsaved: unsavedTitles,
+  saveAll: async () => (await saveAll()).every(Boolean),
+  persist: async () => {
+    const [session, bps] = await Promise.all([persistNow(), flushBreakpoints()]);
+    // Saved or deliberately discarded: nothing is left to restore next time.
+    if (session && bps && state.project) await backupUnsaved(state.project.root, []);
+    return session && bps;
+  },
+};
+const quit = () => quitFlow(quitHooks);
+setInterval(() => state.project && void backupUnsaved(state.project.root, dirtyBuffers()), 5000);
 
 async function openProject(path: string) {
   let info;
@@ -434,6 +452,7 @@ async function openProject(path: string) {
   if (isTrusted() && session?.bottom && setting("appearance.restoreBottomPanel")) bottom.show(session.bottom);
   for (const p of session?.tabs ?? []) await openFile(p).catch(() => {});
   if (session?.active) await openFile(session.active).catch(() => {});
+  void offerRestore(info.root, restoreBuffer);
   events.tabsChanged.on(persistSession);
   events.activated.on(persistSession);
   treeView.addEventListener("click", persistSession);
@@ -456,6 +475,9 @@ listen<{ count: number; ms: number }>("index-ready", (e) => {
   indexSlot.title = `Indexed in ${e.payload.ms} ms`;
 });
 listen<string>("menu", (e) => runCommand(e.payload));
+void listenForQuit(quitHooks);
+window.addEventListener("garnet:open-settings", (e) => openSettingsWindow((e as CustomEvent<string>).detail));
+window.addEventListener("garnet:open-file", (e) => void openFile((e as CustomEvent<string>).detail));
 window.addEventListener("garnet:trusted", () => {
   refreshToolbar();
   loadRunConfigs();

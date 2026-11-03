@@ -237,6 +237,11 @@ export function routeTargetAt(lines: string[], index: number, col: number): Rout
       stack.pop();
       continue;
     }
+    // if/unless/case/... blocks also end with `end`; they open a level that carries no namespace.
+    if (/^\s*(if|unless|case|while|until|begin|def|class|module)\b/.test(line) && !/\bend\s*$/.test(line)) {
+      stack.push({});
+      continue;
+    }
     if (!/\bdo(\s*\|[^|]*\|)?\s*$/.test(line)) continue;
     const ns = line.match(/^\s*namespace\s+[:"'](\w+)/);
     const scope = line.match(/^\s*scope\b.*\bmodule:\s*[:"'](\w+)/);

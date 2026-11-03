@@ -17,8 +17,11 @@ window.matchMedia = ((query: string) => ({
   media: query,
   addEventListener: (_: string, fn: (e: { matches: boolean }) => void) => media.listeners.add(fn),
   removeEventListener: (_: string, fn: (e: { matches: boolean }) => void) => media.listeners.delete(fn),
+  addListener: () => {},
+  removeListener: () => {},
 })) as unknown as typeof window.matchMedia;
 HTMLCanvasElement.prototype.getContext = (() => null) as never;
+Element.prototype.scrollIntoView ??= () => {};
 (globalThis as any).ResizeObserver ??= class {
   observe() {}
   unobserve() {}

@@ -32,7 +32,13 @@ describe("validateDocker", () => {
 describe("composeCommand", () => {
   it("quotes the compose file and working directory", () => {
     const t = { ...defaultDocker(), service: "web", composeFile: "docker/my compose.yml", containerRoot: "/my app" };
-    expect(composeCommand(t, "ruby x.rb", { envNames: ["A"], cwd: "./sub/" }, shellQuote)).toBe("docker compose -f 'docker/my compose.yml' run --rm -e A -w '/my app/sub' web ruby x.rb");
+    expect(composeCommand(t, "ruby x.rb", { envNames: ["A"], cwd: "./sub/" }, shellQuote)).toBe("docker compose -f 'docker/my compose.yml' run --rm -e A -w '/my app/sub' web sh -c 'ruby x.rb'");
+  });
+
+  it("never puts an invalid env name on the command line", () => {
+    const cmd = composeCommand({ ...defaultDocker(), service: "web" }, "rspec", { envNames: ["A_1", "B;touch /tmp/pwn", "$(id)", "1X"], cwd: "" }, shellQuote);
+    expect(cmd).toContain("-e A_1 ");
+    expect(cmd).not.toMatch(/pwn|\$\(id\)|1X/);
   });
 
   it("picks the debug port: a free published one for run, the configured one for exec", () => {
@@ -64,9 +70,10 @@ describe("exec debugging port check", () => {
 
 describe("rdbg listen address", () => {
   it("uses TCP on the container side by default and the shared socket when configured", () => {
-    expect(rdbgListen(defaultDocker(), 4000)).toBe("--port=4000 --host=0.0.0.0");
+    expect(rdbgListen(defaultDocker(), 4000, shellQuote)).toBe("--port=4000 --host=0.0.0.0");
     const t = { ...defaultDocker(), socketPath: "tmp/rdbg.sock" };
-    expect(rdbgListen(t, 4000)).toBe("--sock-path=/app/tmp/rdbg.sock");
+    expect(rdbgListen(t, 4000, shellQuote)).toBe("--sock-path=/app/tmp/rdbg.sock");
+    expect(rdbgListen({ ...t, containerRoot: "/my app" }, 4000, shellQuote)).toBe("--sock-path='/my app/tmp/rdbg.sock'");
     expect(hostSocket(t, "/Users/me/blog")).toBe("/Users/me/blog/tmp/rdbg.sock");
   });
 

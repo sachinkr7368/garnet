@@ -1,5 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { allCommands, commands, eventKey, formatKey, keymap, keysFor } from "../commands";
+import { allCommands, bindable, captureNextKey, commands, eventKey, formatKey, installKeyHandler, keymap, keysFor, runEditorAction } from "../commands";
 import { importJetBrainsKeymap, jetbrainsKeystroke } from "../keymapref";
 import { loadSettings, updateSetting } from "../settings";
 import { fake } from "./fakeIpc";
@@ -102,5 +102,31 @@ describe("JetBrains keymap import", () => {
   it("refuses files that are not keymaps", async () => {
     await expect(importJetBrainsKeymap("<settings/>")).rejects.toThrow(/not a JetBrains keymap/);
     await expect(importJetBrainsKeymap("<keymap")).rejects.toThrow();
+  });
+});
+
+describe("shortcut capture", () => {
+  it("rejects keys the handler can never dispatch and keeps listening", () => {
+    for (const k of ["q", "shift+q", "enter", "shift+enter"]) expect(bindable(k), k).toBe(false);
+    for (const k of ["cmd+ctrl+j", "alt+f7", "f5", "shift+f6", "ctrl+shift+g"]) expect(bindable(k), k).toBe(true);
+    installKeyHandler();
+    const got: string[] = [];
+    const bad: string[] = [];
+    captureNextKey((k) => got.push(k), (k) => bad.push(k));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "q", code: "KeyQ" }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter" }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "j", code: "KeyJ", metaKey: true, ctrlKey: true }));
+    expect(bad).toEqual(["q", "enter"]);
+    expect(got).toEqual(["cmd+ctrl+j"]);
+  });
+});
+
+describe("editor actions from outside the editor", () => {
+  it("focuses the editor before running the action", async () => {
+    const log: string[] = [];
+    const ed = { focus: () => log.push("focus"), getAction: (id: string) => ({ run: async () => void log.push(id) }) };
+    await runEditorAction(ed, "editor.action.gotoLine");
+    expect(log).toEqual(["focus", "editor.action.gotoLine"]);
+    expect(runEditorAction(null, "x")).toBeUndefined();
   });
 });

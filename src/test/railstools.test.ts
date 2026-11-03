@@ -37,6 +37,14 @@ database: storage/development_cache.sqlite3
   });
 });
 
+describe("multi-database migrations", () => {
+  it("maps a version to the migration in that database's directory", () => {
+    const files = ["db/animals_migrate/20240101000000_create_dogs.rb", "db/migrate/20240101000000_create_posts.rb"];
+    const out = "database: blog_development\n up     20240101000000  Create posts\n\ndatabase: animals_development\n up     20240101000000  Create dogs\n";
+    expect(parseMigrateStatus(out, files).map((r) => r.file)).toEqual([files[1], files[0]]);
+  });
+});
+
 describe("Rails project view", () => {
   it("groups files logically, folders first, migrations newest first", () => {
     const tree = buildRailsTree([

@@ -154,6 +154,20 @@ end`.split("\n");
   });
 });
 
+describe("routes with conditionals", () => {
+  it("does not lose the namespace when an if/end block closes inside it", () => {
+    const lines = `Rails.application.routes.draw do
+  namespace :admin do
+    if Rails.env.development?
+      resources :debug
+    end
+    resources :users
+  end
+end`.split("\n");
+    expect(routeTargetAt(lines, 5, lines[5].indexOf("users") + 1)).toEqual({ controller: "admin/users" });
+  });
+});
+
 describe("actions, associations and factories", () => {
   it("maps a controller action to its views", () => {
     const files = ["app/views/posts/index.html.erb", "app/views/posts/index.json.jbuilder", "app/views/posts/show.html.erb", "app/views/admin/posts/index.html.erb"];

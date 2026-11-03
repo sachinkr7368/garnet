@@ -1,9 +1,9 @@
 import { activeTab, editor, events, monaco, openFile } from "./editor";
 import { api, Channel, invoke, type RpcEvent } from "./ipc";
-import { dapBreakpoints, describe, deserialize, interpolate, passCountReached, serialize, trackLines, type Breakpoint, type BreakpointMap } from "./bpmodel";
+import { dapBreakpoints, describe, deserialize, interpolate, newBreakpointId, passCountReached, serialize, trackLines, type Breakpoint, type BreakpointMap } from "./bpmodel";
 import { isRunGlyph, launch, type RunConfig } from "./run";
 import { SessionList } from "./sessionlist";
-import { onSettingsChange, setting } from "./settings";
+import { modifyConfig, onSettingsChange, setting } from "./settings";
 import { abs, debounce, rel, root, state } from "./state";
 import type { PtyTabs } from "./terminal";
 import { bottom, contextMenu, h, icon, iconButton, inputBox, quickPick, modal, toast } from "./ui";
@@ -34,7 +34,7 @@ interface Session {
   paused: boolean;
   status: string;
   console: string[];
-  hits: Map<Breakpoint, number>;
+  hits: Map<number, number>;
   cfg?: RunConfig;
   item?: RunItem;
   target: string;
@@ -166,11 +166,15 @@ function setExceptionFilter(filter: string, on: boolean) {
 }
 
 renderFilters();
+let breakDefault: string | null = null;
 onSettingsChange(() => {
-  enabledFilters.clear();
   const def = setting<string>("debug.breakOnExceptions");
+  if (def === breakDefault) return;
+  breakDefault = def;
+  enabledFilters.clear();
   if (def !== "none") enabledFilters.add(def);
   renderFilters();
+  for (const s of sessions.live()) sendExceptionFilters(s);
 });
 
 evalInput.addEventListener("keydown", async (e) => {
@@ -253,23 +257,27 @@ function watchModel(model: monaco.editor.ITextModel) {
 monaco.editor.onDidCreateModel(watchModel);
 monaco.editor.getModels().forEach(watchModel);
 
-const resendSoon = new Map<string, () => void>();
+const unsent = new Set<string>();
+/// Pushes breakpoint changes not yet sent to every live session; resume and step wait for it, so a breakpoint
+/// removed just before F9 is gone before the program runs on.
+function sendPendingBreakpoints() {
+  const paths = [...unsent];
+  unsent.clear();
+  return Promise.all(sessions.live().flatMap((s) => paths.map((p) => sendBreakpoints(s, p))));
+}
+const sendSoon = debounce(() => void sendPendingBreakpoints(), 250);
 /// Persists and pushes a file's breakpoints to every live session.
 function breakpointsChanged(path: string) {
   persistSoon();
-  let fn = resendSoon.get(path);
-  if (!fn) {
-    fn = debounce(() => sessions.live().forEach((s) => sendBreakpoints(s, path)), 250);
-    resendSoon.set(path, fn);
-  }
-  fn();
+  unsent.add(path);
+  sendSoon();
   bpListeners.forEach((l) => l());
 }
 const bpListeners = new Set<() => void>();
 
 function setBreakpoint(path: string, line: number, bp: Omit<Breakpoint, "line"> | null) {
   const bps = (breakpoints.get(path) ?? []).filter((b) => b.line !== line);
-  if (bp) bps.push({ ...bp, line, decorationId: undefined });
+  if (bp) bps.push({ ...bp, line, decorationId: undefined, id: bp.id ?? newBreakpointId() });
   bps.sort((a, b) => a.line - b.line);
   if (bps.length) breakpoints.set(path, bps);
   else breakpoints.delete(path);
@@ -355,18 +363,22 @@ async function readStore(): Promise<Record<string, unknown>> {
   }
 }
 
-let saving: Promise<void> = Promise.resolve();
-async function persist() {
-  if (!projectKey || loadedFor !== projectKey) return;
+let saving: Promise<unknown> = Promise.resolve();
+/// True when the breakpoints are on disk (or there is nothing to save).
+async function persist(): Promise<boolean> {
+  if (!projectKey || loadedFor !== projectKey) return true;
   const key = projectKey;
   const files = serialize(breakpoints, rel);
-  saving = saving.then(async () => {
-    const all = await readStore();
-    if (Object.keys(files).length) all[key] = files;
-    else delete all[key];
-    await api.configWrite("breakpoints.json", JSON.stringify(all, null, 2));
-  });
-  await saving.catch((e) => toast(`Could not save breakpoints: ${e}`, "error"));
+  const write = saving.then(() =>
+    modifyConfig<Record<string, unknown>>("breakpoints.json", {}, (all) => {
+      const next = { ...all };
+      if (Object.keys(files).length) next[key] = files;
+      else delete next[key];
+      return next;
+    }),
+  );
+  saving = write.catch(() => false);
+  return write.catch((e) => (toast(`Could not save breakpoints: ${e}`, "error"), false));
 }
 const persistSoon = debounce(persist, 300);
 
@@ -386,8 +398,8 @@ export async function loadBreakpoints() {
 }
 
 /// Writes pending breakpoint changes now (smoke tests, shutdown).
-export async function flushBreakpoints() {
-  await persist();
+export async function flushBreakpoints(): Promise<boolean> {
+  return persist();
 }
 
 window.addEventListener("beforeunload", () => void persist());
@@ -458,8 +470,8 @@ async function skipStop(s: Session): Promise<boolean> {
   const f = (await request(s, "stackTrace", { threadId: s.threadId, levels: 1 }))?.stackFrames?.[0];
   const bp = f?.source?.path && findBp(f.source.path, f.line);
   if (!bp) return false;
-  const hits = (s.hits.get(bp) ?? 0) + 1;
-  s.hits.set(bp, hits);
+  const hits = (s.hits.get(bp.id!) ?? 0) + 1;
+  s.hits.set(bp.id!, hits);
   bpListeners.forEach((l) => l());
   if (passCountReached(bp, hits) && !bp.logMessage) return false;
   if (bp.logMessage && passCountReached(bp, hits)) {
@@ -728,14 +740,18 @@ export async function attachToProcess() {
   debugSession({ target: target.trim(), localfsMap: remote.trim() ? `${remote.trim()}:${root()}` : undefined, timeoutSecs: 5 });
 }
 
-export function resume() {
+export async function resume() {
   const s = sel();
-  if (s?.paused) request(s, "continue", { threadId: s.threadId });
+  if (!s?.paused) return;
+  await sendPendingBreakpoints();
+  request(s, "continue", { threadId: s.threadId });
 }
 
-export function step(kind: "next" | "stepIn" | "stepOut") {
+export async function step(kind: "next" | "stepIn" | "stepOut") {
   const s = sel();
-  if (s?.paused) request(s, kind, { threadId: s.threadId });
+  if (!s?.paused) return;
+  await sendPendingBreakpoints();
+  request(s, kind, { threadId: s.threadId });
 }
 
 /// Hooks for the end-to-end smoke script (src/smoke.ts).
@@ -752,12 +768,14 @@ export const selectDebugSession = (name: string) => {
   const s = sessions.items.find((x) => x.name === name);
   if (s) selectSession(s);
 };
-export const resumeSession = (name: string) => {
+export const resumeSession = async (name: string) => {
   const s = sessions.items.find((x) => x.name === name);
-  if (s?.paused) request(s, "continue", { threadId: s.threadId });
+  if (!s?.paused) return;
+  await sendPendingBreakpoints();
+  request(s, "continue", { threadId: s.threadId });
 };
 export const stopAllSessions = () => Promise.all(sessions.live().map((s) => stopSession(s)));
-export const breakpointsIn = (path: string) => (breakpoints.get(path) ?? []).map(({ decorationId: _, ...b }) => b);
+export const breakpointsIn = (path: string) => (breakpoints.get(path) ?? []).map(({ decorationId: _, id: __, ...b }) => b);
 export const evaluate = (expression: string) => {
   const s = sel();
   return s ? request(s, "evaluate", { expression, frameId: s.frame?.id, context: "repl" }) : Promise.reject(new Error("No debug session"));
@@ -765,7 +783,7 @@ export const evaluate = (expression: string) => {
 
 /// Breakpoints dialog (⌘⇧F8)
 
-const totalHits = (bp: Breakpoint) => sessions.items.reduce((n, s) => n + (s.hits.get(bp) ?? 0), 0);
+const totalHits = (bp: Breakpoint) => sessions.items.reduce((n, s) => n + (s.hits.get(bp.id!) ?? 0), 0);
 
 export function viewBreakpoints(focusPath?: string, focusLine?: number) {
   if (!state.project) return;

@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -15,18 +16,49 @@ use tauri::State;
 struct Server {
     id: u64,
     child: Child,
-    stdin: ChildStdin,
+    /// Messages for the server's writer thread, sent in order.
+    input: Sender<String>,
 }
 
+/// The running server, plus a counter every start and stop bumps: only the newest start may install its server.
 #[derive(Default)]
-pub struct Lsp(Arc<Mutex<Option<Server>>>);
+pub struct Lsp(Arc<Mutex<Option<Server>>>, AtomicU64);
+
+fn kill(mut s: Server) {
+    let _ = s.child.kill();
+    let _ = s.child.wait();
+}
 
 impl Lsp {
     pub fn stop(&self) {
-        if let Some(mut s) = self.0.lock().unwrap().take() {
-            let _ = s.child.kill();
-            let _ = s.child.wait();
+        self.1.fetch_add(1, Ordering::SeqCst);
+        if let Some(s) = self.0.lock().unwrap().take() {
+            kill(s);
         }
+    }
+
+    /// Called when a start begins; returns its generation.
+    fn begin(&self) -> u64 {
+        let gen = self.1.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(s) = self.0.lock().unwrap().take() {
+            kill(s);
+        }
+        gen
+    }
+
+    /// Installs a freshly started server unless a newer start or a stop came in meanwhile; then its own server is
+    /// killed instead, so overlapping restarts neither leak a server nor replace the newest one.
+    fn install(&self, gen: u64, server: Server) -> Result<(), String> {
+        let mut slot = self.0.lock().unwrap();
+        if self.1.load(Ordering::SeqCst) != gen {
+            drop(slot);
+            kill(server);
+            return Err("superseded by a newer start".into());
+        }
+        if let Some(previous) = slot.replace(server) {
+            kill(previous);
+        }
+        Ok(())
     }
 }
 
@@ -43,15 +75,7 @@ pub struct Launch {
 /// so a broken project bundle cannot stop the server; ruby-lsp composes its own bundle in `.ruby-lsp/`.
 /// `--use-launcher` keeps the server up (without the project's gems) when that bundle cannot be set up.
 fn resolve(root: &Path, manager: &str, launcher: bool) -> Result<(Vec<String>, ruby::Detection, Vec<String>), String> {
-    let shell = env::shell_env(root);
-    let mut path: Vec<PathBuf> = shell.get("PATH").map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
-    path.extend(ruby::EXTRA_PATH.iter().map(PathBuf::from));
-    let home = PathBuf::from(shell.get("HOME").cloned().unwrap_or_default());
-    let mut d = ruby::detect(root, &path, &home, manager);
-    if d.manager != "none" && d.tool.is_empty() {
-        d.manager = "none".into();
-    }
-    let prefix = ruby::exec_prefix(&d, root);
+    let (d, prefix) = project_ruby(root, manager);
     let mut argv = prefix.clone();
     if prefix.is_empty() {
         let found = env::which(root, "ruby-lsp").ok_or("ruby-lsp-missing")?;
@@ -65,6 +89,20 @@ fn resolve(root: &Path, manager: &str, launcher: bool) -> Result<(Vec<String>, r
     Ok((argv, d, prefix))
 }
 
+/// The project's Ruby version manager and the prefix that runs a command with the project's Ruby.
+pub fn project_ruby(root: &Path, manager: &str) -> (ruby::Detection, Vec<String>) {
+    let shell = env::shell_env(root);
+    let mut path: Vec<PathBuf> = shell.get("PATH").map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
+    path.extend(ruby::EXTRA_PATH.iter().map(PathBuf::from));
+    let home = PathBuf::from(shell.get("HOME").cloned().unwrap_or_default());
+    let mut d = ruby::detect(root, &path, &home, manager);
+    if d.manager != "none" && d.tool.is_empty() {
+        d.manager = "none".into();
+    }
+    let prefix = ruby::exec_prefix(&d, root);
+    (d, prefix)
+}
+
 #[tauri::command]
 pub async fn lsp_start(
     state: State<'_, Lsp>,
@@ -74,7 +112,7 @@ pub async fn lsp_start(
     launcher: Option<bool>,
     on_event: Channel<RpcEvent>,
 ) -> Result<Launch, String> {
-    state.stop();
+    let gen = state.begin();
     let root = Path::new(&root);
     let (argv, detection, prefix) = match command.filter(|c| !c.trim().is_empty()) {
         Some(c) => (
@@ -102,7 +140,7 @@ pub async fn lsp_start(
         }
     });
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-    *state.0.lock().unwrap() = Some(Server { id, child, stdin });
+    state.install(gen, Server { id, child, input: writer_thread(stdin) })?;
     let slot = state.0.clone();
     std::thread::spawn(move || {
         read_messages(BufReader::new(stdout), |body| {
@@ -118,11 +156,25 @@ pub async fn lsp_start(
     Ok(Launch { command: argv.join(" "), manager: detection.manager, reason: detection.reason, prefix })
 }
 
+/// Queues a message for the server's writer thread: never blocks the main thread, and keeps JSON-RPC order.
 #[tauri::command]
 pub fn lsp_send(state: State<'_, Lsp>, body: String) -> Result<(), String> {
-    let mut guard = state.0.lock().unwrap();
-    let server = guard.as_mut().ok_or("ruby-lsp is not running")?;
-    write_message(&mut server.stdin, &body).map_err(e2s)
+    let slot = state.0.lock().unwrap();
+    let server = slot.as_ref().ok_or("ruby-lsp is not running")?;
+    server.input.send(body).map_err(|_| "ruby-lsp is not running".to_string())
+}
+
+/// Writes the server's stdin on its own thread, so a server that stops reading blocks only that thread.
+fn writer_thread(mut stdin: ChildStdin) -> Sender<String> {
+    let (tx, rx) = channel::<String>();
+    std::thread::spawn(move || {
+        for body in rx {
+            if write_message(&mut stdin, &body).is_err() {
+                break;
+            }
+        }
+    });
+    tx
 }
 
 #[tauri::command]
@@ -133,6 +185,37 @@ pub fn lsp_stop(state: State<'_, Lsp>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spawn() -> (i32, Server) {
+        let mut child = std::process::Command::new("sleep").arg("30").stdin(Stdio::piped()).spawn().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        (child.id() as i32, Server { id: NEXT_ID.fetch_add(1, Ordering::SeqCst), child, input: writer_thread(stdin) })
+    }
+
+    fn reaped(pid: i32) -> bool {
+        let r = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+    }
+
+    #[test]
+    fn overlapping_starts_keep_the_newest_server_and_reap_the_rest() {
+        let lsp = Lsp::default();
+        let first = lsp.begin();
+        let second = lsp.begin();
+        let (old_pid, old) = spawn();
+        let (new_pid, new) = spawn();
+        assert_eq!(unsafe { libc::kill(old_pid, 0) }, 0, "the superseded server was running");
+        lsp.install(second, new).unwrap();
+        assert!(lsp.install(first, old).is_err(), "a superseded start must not install");
+        assert!(reaped(old_pid), "the superseded server is still running or unreaped");
+        assert_eq!(lsp.0.lock().unwrap().as_ref().map(|s| s.child.id() as i32), Some(new_pid), "the newest start lost");
+        let third = lsp.begin();
+        assert!(reaped(new_pid), "a new start kills the running server");
+        lsp.stop();
+        let (late_pid, late) = spawn();
+        assert!(lsp.install(third, late).is_err(), "a start that a stop overtook must not install");
+        assert!(reaped(late_pid));
+    }
 
     #[test]
     fn launches_global_ruby_lsp_with_the_launcher_never_bundle_exec() {

@@ -161,14 +161,58 @@ function notify() {
   });
 }
 
-async function readJson(read: () => Promise<string | null>, label: string): Promise<Record<string, unknown> | null> {
+const problems = new Map<string, HTMLElement>();
+
+/// A config file Garnet will not overwrite (it does not parse): one notification per file that stays until
+/// dismissed, with a button to open the file.
+export async function configProblem(label: string, why: string, path?: string) {
+  if (problems.get(label)?.isConnected) return;
+  const file = path ?? (await api.configPath(label).catch(() => null));
+  const el = toast(`${why.includes(label) ? why : `${label}: ${why}`}`, "error", file ? [{ label: `Open ${label}`, run: () => window.dispatchEvent(new CustomEvent("garnet:open-file", { detail: file })) }] : []);
+  if (el) problems.set(label, el);
+}
+
+/// Read-modify-write of a JSON file in Garnet's config dir. The write is a compare-and-swap, so a change another
+/// window made in between is re-read rather than lost; a file that does not parse is never replaced (the backend
+/// backs it up and refuses, and the notification says so).
+export async function modifyConfig<T>(name: string, fallback: T, change: (value: T) => T): Promise<boolean> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const raw = (await api.configRead(name).catch(() => null)) ?? "";
+    let value = fallback;
+    try {
+      const parsed = raw.trim() ? JSON.parse(raw) : fallback;
+      if (parsed && typeof parsed === "object" && Array.isArray(parsed) === Array.isArray(fallback)) value = parsed;
+    } catch {
+      // the write below is refused with the reason
+    }
+    try {
+      await api.configWrite(name, JSON.stringify(change(value), null, 2) + "\n", raw);
+      return true;
+    } catch (e) {
+      if (String(e).includes("changed on disk")) continue;
+      void configProblem(name, String(e));
+      return false;
+    }
+  }
+  void configProblem(name, "it kept changing on disk while Garnet tried to save it.");
+  return false;
+}
+
+let globalBroken = false;
+let projectBroken = false;
+
+async function readJson(read: () => Promise<string | null>, label: string, path?: string): Promise<Record<string, unknown> | null> {
   const raw = await read().catch(() => null);
-  if (raw === null || !raw.trim()) return {};
+  if (raw === null) return {};
+  if (!raw.trim()) {
+    void configProblem(label, `${label} is empty. Garnet keeps the previous settings and will not overwrite the file until it is fixed (delete it to start fresh).`, path);
+    return null;
+  }
   try {
     const v = JSON.parse(raw);
     return v && typeof v === "object" ? v : {};
   } catch (e) {
-    toast(`${label} is not valid JSON (${e}); keeping the previous settings.`, "error");
+    void configProblem(label, `${label} is not valid JSON (${e}). Garnet keeps the previous settings and will not overwrite the file until it is fixed.`, path);
     return null;
   }
 }
@@ -176,11 +220,20 @@ async function readJson(read: () => Promise<string | null>, label: string): Prom
 export const projectSettingsPath = () => (projectRoot ? `${projectRoot}/.garnet/settings.json` : null);
 export const settingsPath = () => api.configPath("settings.json");
 
+/// settings.json for opening in the editor; a fresh install has none until a setting changes, so it is created.
+export async function editableSettingsPath() {
+  if ((await api.configRead("settings.json").catch(() => null)) === null) await modifyConfig("settings.json", {}, (v) => v);
+  return settingsPath();
+}
+
 export async function loadSettings(root: string | null = projectRoot): Promise<void> {
   projectRoot = root;
   const global = await readJson(() => api.configRead("settings.json"), "settings.json");
+  globalBroken = !global;
   if (global) globalValues = global;
-  const project = root ? await readJson(() => api.readFile(`${root}/.garnet/settings.json`), ".garnet/settings.json") : {};
+  const projectPath = root ? `${root}/.garnet/settings.json` : undefined;
+  const project = projectPath ? await readJson(() => api.readFile(projectPath), ".garnet/settings.json", projectPath) : {};
+  projectBroken = !project;
   if (project) {
     const ignored = Object.keys(project).filter(globalOnly);
     for (const k of ignored) delete project[k];
@@ -193,15 +246,27 @@ export async function loadSettings(root: string | null = projectRoot): Promise<v
 /// Writes one key to the chosen scope; `undefined` resets it to the inherited value.
 export async function updateSetting(key: string, value: unknown, scope: "global" | "project" = "global") {
   if (globalOnly(key)) scope = "global";
-  const target = scope === "project" ? projectValues : globalValues;
-  if (value === undefined) delete target[key];
-  else target[key] = value;
-  const text = JSON.stringify(target, null, 2) + "\n";
+  const set = (target: Record<string, unknown>) => {
+    if (value === undefined) delete target[key];
+    else target[key] = value;
+    return target;
+  };
   if (scope === "project") {
     if (!projectRoot) return toast("Open a project to use project settings.", "error");
+    const path = `${projectRoot}/.garnet/settings.json`;
+    if (projectBroken) await loadSettings(projectRoot);
+    if (projectBroken) return void configProblem(".garnet/settings.json", ".garnet/settings.json is not valid JSON; fix it before changing project settings.", path);
+    const text = JSON.stringify(set({ ...projectValues }), null, 2) + "\n";
     await api.createPath(`${projectRoot}/.garnet`, true).catch(() => {});
-    await api.writeFile(`${projectRoot}/.garnet/settings.json`, text);
-  } else await api.configWrite("settings.json", text);
+    await api.writeFile(path, text);
+    set(projectValues);
+  } else {
+    // The file may have been fixed outside Garnet since it was read.
+    if (globalBroken) await loadSettings(projectRoot);
+    if (globalBroken) return void configProblem("settings.json", "settings.json is not valid JSON; fix it before changing settings.");
+    if (!(await modifyConfig<Record<string, unknown>>("settings.json", {}, (v) => set({ ...v })))) return;
+    set(globalValues);
+  }
   notify();
 }
 
@@ -217,9 +282,7 @@ async function readConfig<T>(name: string, fallback: T): Promise<T> {
 export const recentProjects = () => readConfig<string[]>("recent.json", []);
 
 export async function addRecentProject(root: string) {
-  const list = (await recentProjects()).filter((p) => p !== root);
-  list.unshift(root);
-  await api.configWrite("recent.json", JSON.stringify(list.slice(0, 15), null, 2));
+  await modifyConfig<string[]>("recent.json", [], (list) => [root, ...list.filter((p) => p !== root)].slice(0, 15));
 }
 
 export interface Session {
@@ -233,10 +296,8 @@ export async function loadSession(root: string): Promise<Session | undefined> {
   return (await readConfig<Record<string, Session>>("sessions.json", {}))[root];
 }
 
-export async function saveSession(root: string, session: Session) {
-  const all = await readConfig<Record<string, Session>>("sessions.json", {});
-  all[root] = session;
-  await api.configWrite("sessions.json", JSON.stringify(all, null, 2));
+export async function saveSession(root: string, session: Session): Promise<boolean> {
+  return modifyConfig<Record<string, Session>>("sessions.json", {}, (all) => ({ ...all, [root]: session }));
 }
 
 /// Minimal glob → RegExp for file names and relative paths (*, **, ?, {a,b}).
@@ -272,9 +333,7 @@ export async function checkTrust(root: string): Promise<boolean> {
 
 export async function trustProject(root: string, silent = false) {
   const canonical = await api.canonicalPath(root);
-  const list = (await readConfig<string[]>("trusted.json", [])).filter((p) => p !== canonical);
-  list.push(canonical);
-  await api.configWrite("trusted.json", JSON.stringify(list, null, 2));
+  await modifyConfig<string[]>("trusted.json", [], (list) => [...list.filter((p) => p !== canonical), canonical]);
   trusted = true;
   await api.gitSetTrusted(true);
   if (!silent) window.dispatchEvent(new Event("garnet:trusted"));

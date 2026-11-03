@@ -150,6 +150,7 @@ export class Dock {
     for (const t of (this.strip ?? this.head).querySelectorAll<HTMLElement>(".dock-tab"))
       t.classList.toggle("active", t.dataset.view === id);
     if (this.strip) this.head.textContent = view.title;
+    else this.head.querySelector<HTMLElement>(`.dock-tab[data-view="${id}"]`)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
     view.onShow?.();
     window.dispatchEvent(new Event("resize"));
   }
@@ -226,7 +227,25 @@ export function dragWidth(rect: { left: number; right: number }, clientX: number
   return Math.max(min, Math.min(max, edgeOnRight ? clientX - rect.left : rect.right - clientX));
 }
 
+/// Caps the bottom panel and the side panels to what the window has room for, keeping 120px for the editor and its
+/// tabs and 320px of editor width. Caps (not sizes) so a panel grows back when the window does.
+export function clampPanels() {
+  const main = document.getElementById("main")!.getBoundingClientRect().width;
+  const center = document.getElementById("center")!.getBoundingClientRect().height;
+  const side = document.getElementById("sidebar")!;
+  const right = document.getElementById("rightbar")!;
+  document.getElementById("bottom")!.style.maxHeight = `${Math.max(80, center - 120)}px`;
+  const room = main - 320;
+  const wanted = (el: HTMLElement, fallback: number) => (el.hidden ? 0 : Math.min(parseFloat(el.style.width) || fallback, room / 2));
+  side.style.maxWidth = `${Math.max(160, room - wanted(right, 340))}px`;
+  right.style.maxWidth = `${Math.max(200, room - wanted(side, 280))}px`;
+}
+
 export function setupResizers() {
+  window.addEventListener("resize", clampPanels);
+  clampPanels();
+  const tabs = document.getElementById("bottom-head")!;
+  tabs.addEventListener("wheel", (e) => e.deltaY && !e.deltaX && (tabs.scrollLeft += e.deltaY), { passive: true });
   const drag = (handle: HTMLElement, onMove: (e: PointerEvent) => void) =>
     handle.addEventListener("pointerdown", (e) =>
       trackDrag(handle, e, (ev) => {
@@ -316,6 +335,8 @@ window.addEventListener(
   true,
 );
 
+const MAX_ROWS = 200;
+
 export function quickPick(opts: QuickPickOptions) {
   closeActiveOverlay?.();
   const previousFocus = document.activeElement as HTMLElement | null;
@@ -338,7 +359,7 @@ export function quickPick(opts: QuickPickOptions) {
 
   const render = () => {
     list.replaceChildren(
-      ...items.slice(0, 200).map((item, i) =>
+      ...items.slice(0, MAX_ROWS).map((item, i) =>
         h(
           "div",
           {
@@ -373,8 +394,16 @@ export function quickPick(opts: QuickPickOptions) {
   const update = async () => {
     const mine = ++seq;
     const q = input.value;
-    const next =
-      typeof opts.items === "function" ? await opts.items(q) : fuzzyFilter(q, opts.items, (i) => `${i.label} ${i.description ?? ""}`);
+    let next: PickItem[];
+    try {
+      next = typeof opts.items === "function" ? await opts.items(q) : fuzzyFilter(q, opts.items, (i) => `${i.label} ${i.description ?? ""}`);
+    } catch (e) {
+      if (mine !== seq) return;
+      items = [];
+      render();
+      list.append(h("div", { class: "qp-item qp-error" }, icon("error"), h("span", { class: "qp-label" }, `Search failed: ${e instanceof Error ? e.message : e}`)));
+      return;
+    }
     if (mine !== seq) return;
     items = next;
     selected = first ? Math.min(opts.selected ?? 0, Math.max(0, next.length - 1)) : 0;
@@ -391,9 +420,10 @@ export function quickPick(opts: QuickPickOptions) {
 
   input.addEventListener("input", update);
   input.addEventListener("keydown", (e) => {
-    if (e.key === "ArrowDown") selected = Math.min(items.length - 1, selected + 1);
+    const last = Math.min(items.length, MAX_ROWS) - 1;
+    if (e.key === "ArrowDown") selected = Math.min(last, selected + 1);
     else if (e.key === "ArrowUp") selected = Math.max(0, selected - 1);
-    else if (e.key === "PageDown") selected = Math.min(items.length - 1, selected + 10);
+    else if (e.key === "PageDown") selected = Math.min(last, selected + 10);
     else if (e.key === "PageUp") selected = Math.max(0, selected - 10);
     else if (e.key === "Enter") return accept();
     else if (e.key === "Escape") return close();
@@ -445,6 +475,7 @@ export function toast(message: string, kind: "info" | "error" = "info", actions:
   );
   stack.append(el);
   if (!actions.length) setTimeout(() => el.remove(), kind === "error" ? 9000 : 4000);
+  return el;
 }
 
 export interface MenuItem {
@@ -536,11 +567,16 @@ export function contextMenu(e: MouseEvent, items: (MenuItem | null)[]) {
 const FOCUSABLE = 'input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])';
 const FIELD = 'input:not([disabled]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), select:not([disabled]), textarea:not([disabled])';
 
+const appRoot = () => document.getElementById("app");
+const modals = () => [...document.querySelectorAll<HTMLElement>("#overlay-root > [data-modal]")];
+
 /// Shared backdrop for every dialog: clicking a field always focuses it, Tab cycles inside the dialog,
-/// Escape and clicking outside close it, and the first field (or `autofocus`) gets focus on open.
+/// Escape and clicking outside close it, and the first field (or `autofocus`) gets focus on open. The window
+/// behind is inert while it is open, so typing and shortcuts never reach the editor behind the dialog.
 export function modal(box: HTMLElement, onClose: () => void, opts: { class?: string; autofocus?: HTMLElement | null; locked?: () => boolean } = {}) {
   const previousFocus = document.activeElement as HTMLElement | null;
   const backdrop = h("div", { class: `qp-backdrop${opts.class ? ` ${opts.class}` : ""}` }, box);
+  backdrop.dataset.modal = "";
   box.setAttribute("role", "dialog");
   box.setAttribute("aria-modal", "true");
   const close = () => {
@@ -566,16 +602,36 @@ export function modal(box: HTMLElement, onClose: () => void, opts: { class?: str
     e.preventDefault();
     all[next].focus();
   });
+  // Escape while focus is nowhere in an overlay (it was in the editor when the dialog opened): the topmost dialog closes.
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key !== "Escape" || modals().at(-1) !== backdrop || document.getElementById("overlay-root")!.contains(document.activeElement)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    close();
+  };
+  window.addEventListener("keydown", onKey, true);
   const observer = new MutationObserver(() => {
     if (backdrop.isConnected) return;
     observer.disconnect();
+    window.removeEventListener("keydown", onKey, true);
+    if (!modals().length) appRoot()?.toggleAttribute("inert", false);
     // Back to where focus was: the outer dialog's field for a nested dialog, or the editor/panel for a top-level one.
     if (previousFocus?.isConnected && (previousFocus.closest(".qp-backdrop") || !document.querySelector(".qp-backdrop"))) previousFocus.focus?.();
   });
   const root = document.getElementById("overlay-root")!;
   root.append(backdrop);
+  appRoot()?.toggleAttribute("inert", true);
   observer.observe(root, { childList: true });
-  (opts.autofocus ?? box.querySelector<HTMLElement>("[autofocus]") ?? box.querySelector<HTMLElement>(FIELD) ?? box.querySelector<HTMLElement>(FOCUSABLE))?.focus();
+  // Callers often fill the dialog right after opening it, so focus is placed once that has happened.
+  const first = () => opts.autofocus ?? box.querySelector<HTMLElement>("[autofocus]") ?? box.querySelector<HTMLElement>(FIELD) ?? box.querySelector<HTMLElement>(FOCUSABLE);
+  first()?.focus();
+  queueMicrotask(() => {
+    if (!backdrop.isConnected || (box !== document.activeElement && box.contains(document.activeElement))) return;
+    const target = first();
+    if (target) return target.focus();
+    box.tabIndex = -1;
+    box.focus();
+  });
   return backdrop;
 }
 

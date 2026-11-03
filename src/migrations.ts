@@ -24,7 +24,10 @@ export function parseMigrateStatus(out: string, files: string[]): MigrationRow[]
     if (db) database = db[1];
     const m = line.match(/^\s*(up|down)\s+(\d{3,})\s+(.*?)\s*$/);
     if (!m) continue;
-    const file = files.find((f) => /^db\/(?:\w+_)?migrate\//.test(f) && f.split("/").pop()!.startsWith(`${m[2]}_`)) ?? null;
+    // Multi-database apps keep each database's migrations in db/<name>_migrate; the same version can exist in several.
+    const candidates = files.filter((f) => /^db\/(?:\w+_)?migrate\//.test(f) && f.split("/").pop()!.startsWith(`${m[2]}_`));
+    const dir = (f: string) => f.match(/^db\/(?:(\w+)_)?migrate\//)?.[1] ?? "";
+    const file = candidates.find((f) => dir(f) && database.includes(dir(f))) ?? candidates.find((f) => !dir(f)) ?? candidates[0] ?? null;
     rows.push({ database, status: m[1] as "up" | "down", version: m[2], name: m[3], file });
   }
   return rows;

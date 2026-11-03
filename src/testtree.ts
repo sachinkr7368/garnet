@@ -126,6 +126,8 @@ export function buildTree(results: TestResult[], relPath: (p: string) => string 
   const aggregate = (n: TreeNode): void => {
     if (n.result) return;
     n.children.forEach(aggregate);
+    // Results arrive in completion order; the tree follows the source, like RubyMine.
+    n.children.sort((a, b) => (a.line ?? Infinity) - (b.line ?? Infinity));
     n.status = n.children.map((c) => c.status).reduce(worst);
     n.duration = n.children.reduce((s, c) => s + c.duration, 0);
   };

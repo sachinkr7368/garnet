@@ -3,7 +3,7 @@ import { allCommands, captureNextKey, formatKey, keymap, keysFor, runCommand } f
 import { openFile } from "./editor";
 import { api } from "./ipc";
 import { managersDetected } from "./run";
-import { globalOnly, onSettingsChange, projectSettingsPath, SCHEMA, scopeValue, setting, settingsPath, updateSetting, type SettingDef } from "./settings";
+import { editableSettingsPath, globalOnly, onSettingsChange, projectSettingsPath, SCHEMA, scopeValue, setting, updateSetting, type SettingDef } from "./settings";
 import { root, state } from "./state";
 import { fuzzyScore, h, icon, iconButton, modal, toast } from "./ui";
 
@@ -20,6 +20,7 @@ export function openSettingsWindow(initialPage = "Appearance") {
   let page = initialPage;
   let scope: Scope = "global";
   let query = "";
+  const keys: KeymapState = { filter: "", keyFilter: "" };
 
   const search = h("input", { class: "search-input", placeholder: "Search settings", spellcheck: false });
   const tree = h("div", { class: "st-tree" });
@@ -59,7 +60,7 @@ export function openSettingsWindow(initialPage = "Appearance") {
             {
               class: `st-node${page === path ? " selected" : ""}`,
               style: `padding-left:${10 + i * 14}px`,
-              onclick: () => selectable && ((page = pages.includes(path) ? path : pages.find((x) => x.startsWith(path + "/"))!), (query = ""), (search.value = ""), render()),
+              onclick: () => selectable && ((page = pages.includes(path) ? path : pages.find((x) => x.startsWith(path + "/"))!), (query = ""), (search.value = ""), (body.scrollTop = 0), render()),
             },
             icon(PAGE_ICONS[path] ?? "symbol-property", "st-icon"),
             parts[i],
@@ -70,7 +71,19 @@ export function openSettingsWindow(initialPage = "Appearance") {
     tree.replaceChildren(...rows);
   };
 
+  /// Rebuilds the page, keeping the scroll position and the focused control (by setting key), so a change does not
+  /// throw the caret out of the next field.
   const render = () => {
+    const focused = document.activeElement as HTMLElement | null;
+    const rowKey = focused && body.contains(focused) ? focused.closest<HTMLElement>(".st-row")?.title : undefined;
+    const filterFocused = !!focused?.classList.contains("st-keys-filter");
+    const scroll = body.scrollTop;
+    renderPage();
+    body.scrollTop = scroll;
+    const target = rowKey ? body.querySelector<HTMLElement>(`.st-row[title="${CSS.escape(rowKey)}"]`)?.querySelector<HTMLElement>("input, select, textarea") : filterFocused ? body.querySelector<HTMLElement>(".st-keys-filter") : null;
+    target?.focus();
+  };
+  const renderPage = () => {
     renderTree();
     if (query.trim()) {
       const hits = SCHEMA.filter((d) => !d.key.startsWith("keymap.") && fuzzyScore(query, `${d.page} ${d.label} ${d.key} ${d.description ?? ""}`) !== null);
@@ -82,11 +95,15 @@ export function openSettingsWindow(initialPage = "Appearance") {
       );
       return;
     }
-    if (page === "Keymap") return body.replaceChildren(...keymapPage(scope));
+    if (page === "Keymap") return body.replaceChildren(...keymapPage(scope, keys));
     const defs = SCHEMA.filter((d) => d.page === page);
     body.replaceChildren(h("div", { class: "st-title" }, page.replace(/\//g, " › ")), ...pageIntro(page), ...defs.map((d) => row(d, scope)));
   };
-  rerender = render;
+  // A change made by the mousedown that blurs a field must not re-render under the pointer: the click would land on
+  // a detached control. It waits until the click is done.
+  let pointerDown = false;
+  let pending = false;
+  rerender = () => (pointerDown ? (pending = true) : render());
 
   const close = () => {
     backdrop?.remove();
@@ -101,7 +118,7 @@ export function openSettingsWindow(initialPage = "Appearance") {
     h(
       "div",
       { class: "rc-actions" },
-      h("button", { class: "btn", onclick: async () => (close(), openFile(await settingsPath())) }, "Edit settings.json"),
+      h("button", { class: "btn", onclick: async () => (close(), openFile(await editableSettingsPath())) }, "Edit settings.json"),
       state.project
         ? h(
             "button",
@@ -121,6 +138,25 @@ export function openSettingsWindow(initialPage = "Appearance") {
       h("span", { class: "spacer" }),
       h("button", { class: "btn primary", onclick: close }, "Done"),
     ),
+  );
+  // On window: the pointer may be released outside the dialog, or the press cancelled.
+  const release = () => {
+    window.removeEventListener("pointerup", release, true);
+    window.removeEventListener("pointercancel", release, true);
+    setTimeout(() => {
+      pointerDown = false;
+      if (pending && backdrop) render();
+      pending = false;
+    });
+  };
+  dialog.addEventListener(
+    "pointerdown",
+    () => {
+      pointerDown = true;
+      window.addEventListener("pointerup", release, true);
+      window.addEventListener("pointercancel", release, true);
+    },
+    true,
   );
   backdrop = modal(dialog, close, { autofocus: search });
   render();
@@ -222,18 +258,24 @@ function row(d: SettingDef, scope: Scope): HTMLElement {
   );
 }
 
-function keymapPage(scope: Scope): HTMLElement[] {
-  const filter = h("input", { class: "search-input", placeholder: "Search actions or press keys in the box on the right", spellcheck: false });
+interface KeymapState {
+  filter: string;
+  keyFilter: string;
+}
+
+function keymapPage(scope: Scope, state: KeymapState): HTMLElement[] {
+  const filter = h("input", { class: "search-input st-keys-filter", placeholder: "Search actions or press keys in the box on the right", spellcheck: false, value: state.filter });
   const byKey = h("button", { class: "btn", title: "Find the action bound to a keystroke" }, "Find by shortcut");
   const list = h("div", { class: "st-keys" });
   const preset = h("select", { class: "run-select" }, h("option", { value: "rubymine", selected: setting("keymap.preset") === "rubymine" }, "RubyMine-compatible (macOS)"), h("option", { value: "vscode", selected: setting("keymap.preset") === "vscode" }, "VS Code-style"));
   preset.onchange = () => updateSetting("keymap.preset", preset.value, scope);
-  let keyFilter = "";
+  const byKeyLabel = () => (byKey.textContent = state.keyFilter ? `Shortcut: ${formatKey(state.keyFilter)} (click to change)` : "Find by shortcut");
+  byKeyLabel();
   byKey.onclick = () => {
     byKey.textContent = "Press a shortcut…";
     captureNextKey((k) => {
-      keyFilter = k;
-      byKey.textContent = k ? `Shortcut: ${formatKey(k)} (click to change)` : "Find by shortcut";
+      state.keyFilter = k;
+      byKeyLabel();
       renderList();
     });
   };
@@ -252,6 +294,7 @@ function keymapPage(scope: Scope): HTMLElement[] {
 
   const addKey = (id: string, title: string, btn: HTMLElement) => {
     btn.textContent = "Press keys…";
+    const invalid = (key: string) => (btn.textContent = `${formatKey(key)} can't be a shortcut: use ⌘, ⌃, ⌥ or an F-key (Esc cancels)`);
     captureNextKey(async (key) => {
       if (!key) return renderList();
       const existing = keymap().get(key);
@@ -261,7 +304,7 @@ function keymapPage(scope: Scope): HTMLElement[] {
       }
       await updateSetting("keymap.removed", removed().filter((k) => k !== key), scope);
       await updateSetting("keymap.bindings", { ...bindings(), [key]: id }, scope);
-    });
+    }, invalid);
   };
 
   const renderList = () => {
@@ -269,7 +312,7 @@ function keymapPage(scope: Scope): HTMLElement[] {
     const map = keymap();
     list.replaceChildren(
       ...allCommands()
-        .filter((c) => (!q || fuzzyScore(q, c.title) !== null) && (!keyFilter || map.get(keyFilter) === c.id))
+        .filter((c) => (!q || fuzzyScore(q, c.title) !== null) && (!state.keyFilter || map.get(state.keyFilter) === c.id))
         .map((c) => {
           const keys = keysFor(c.id);
           const add = h("button", { class: "btn small" }, "+ Add shortcut");
@@ -283,7 +326,7 @@ function keymapPage(scope: Scope): HTMLElement[] {
         }),
     );
   };
-  filter.oninput = renderList;
+  filter.oninput = () => ((state.filter = filter.value), renderList());
   renderList();
   return [
     h("div", { class: "st-title" }, "Keymap"),

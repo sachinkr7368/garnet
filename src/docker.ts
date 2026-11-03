@@ -65,6 +65,9 @@ export interface ComposeOptions {
   publish?: number;
 }
 
+/// Environment variable names a shell and docker accept; anything else could inject shell syntax.
+export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 export function composeCommand(t: DockerTarget, inner: string, opts: ComposeOptions, quote: (s: string) => string): string {
   const parts = ["docker", "compose"];
   if (t.composeFile.trim()) parts.push("-f", quote(t.composeFile.trim()));
@@ -73,10 +76,11 @@ export function composeCommand(t: DockerTarget, inner: string, opts: ComposeOpti
     if (t.servicePorts) parts.push("--service-ports");
     if (opts.publish) parts.push("-p", `127.0.0.1:${opts.publish}:${opts.publish}`);
   } else parts.push("exec");
-  for (const name of opts.envNames) parts.push("-e", name);
+  for (const name of opts.envNames.filter((n) => ENV_NAME.test(n))) parts.push("-e", quote(name));
   const cwd = opts.cwd.replace(/^\.\/?/, "").replace(/\/$/, "");
   parts.push("-w", quote(cwd ? `${t.containerRoot.replace(/\/$/, "")}/${cwd}` : t.containerRoot));
-  parts.push(t.service, inner);
+  // The whole command runs in the container's shell: unquoted, `a && b` would run b on the host.
+  parts.push(t.service, "sh", "-c", quote(inner));
   return parts.join(" ");
 }
 
@@ -85,7 +89,8 @@ export const debugPortFor = (t: DockerTarget, freePort: number) => (t.mode === "
 
 /// rdbg listen arguments inside the container: the shared-volume socket when configured, else TCP.
 /// TCP binds 0.0.0.0 inside the container only; the host side is published on 127.0.0.1 (run) or verified to be (exec).
-export const rdbgListen = (t: DockerTarget, port: number) => (t.socketPath ? `--sock-path=${t.containerRoot.replace(/\/$/, "")}/${t.socketPath}` : `--port=${port} --host=0.0.0.0`);
+export const rdbgListen = (t: DockerTarget, port: number, quote: (s: string) => string) =>
+  t.socketPath ? `--sock-path=${quote(`${t.containerRoot.replace(/\/$/, "")}/${t.socketPath}`)}` : `--port=${port} --host=0.0.0.0`;
 
 /// Host-side rdbg socket for a socket-path target.
 export const hostSocket = (t: DockerTarget, root: string) => `${root}/${t.socketPath}`;

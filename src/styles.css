@@ -664,10 +664,17 @@ kbd {
   padding: 3px 6px;
   border-bottom: 1px solid var(--border);
   flex: none;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+#bottom-head::-webkit-scrollbar {
+  display: none;
 }
 #bottom-head .dock-tab {
   padding: 3px 9px;
   font-size: 12px;
+  flex: none;
+  white-space: nowrap;
 }
 
 .search-bar {

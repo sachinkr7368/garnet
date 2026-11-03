@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { checkTrust, globalOnly, globToRegExp, isTrusted, loadSettings, setting, trustProject, updateSetting } from "../settings";
-import { fake } from "./fakeIpc";
+import { checkTrust, editableSettingsPath, globalOnly, globToRegExp, isTrusted, loadSettings, loadSession, modifyConfig, saveSession, setting, trustProject, updateSetting } from "../settings";
+import { api, fake } from "./fakeIpc";
 
 const ROOT = "/work/blog";
 
@@ -34,6 +34,84 @@ describe("settings merge", () => {
     expect(setting("editor.fontSize")).toBe(20);
     await updateSetting("editor.fontSize", undefined, "project");
     expect(setting("editor.fontSize")).toBe(13);
+  });
+});
+
+describe("config files Garnet writes", () => {
+  const problemToasts = () => [...document.querySelectorAll(".toast.error")].filter((t) => t.textContent!.includes("settings.json"));
+
+  it("never overwrites a settings.json that does not parse, and keeps a persistent notice with an Open action", async () => {
+    document.getElementById("overlay-root")!.replaceChildren();
+    const broken = '{"editor.fontSize":16,"terminal.env":{"A":"1"},}';
+    fake.config.set("settings.json", broken);
+    await loadSettings(ROOT);
+    await updateSetting("appearance.theme", "dark");
+    expect(fake.config.get("settings.json")).toBe(broken);
+    expect(setting("appearance.theme")).toBe("system");
+    expect(problemToasts()).toHaveLength(1);
+    const open = [...problemToasts()[0].querySelectorAll("button")].find((b) => b.textContent === "Open settings.json")!;
+    const opened: string[] = [];
+    window.addEventListener("garnet:open-file", (e) => opened.push((e as CustomEvent<string>).detail), { once: true });
+    open.click();
+    expect(opened).toEqual(["/config/settings.json"]);
+  });
+
+  it("treats an existing empty settings.json as broken, not as {}", async () => {
+    document.getElementById("overlay-root")!.replaceChildren();
+    fake.config.set("settings.json", JSON.stringify({ "editor.fontSize": 15 }));
+    await loadSettings(ROOT);
+    fake.config.set("settings.json", "");
+    await loadSettings(ROOT);
+    expect(setting("editor.fontSize")).toBe(15);
+    expect(problemToasts()[0]?.textContent).toContain("empty");
+    await updateSetting("appearance.theme", "dark");
+    expect(fake.config.get("settings.json")).toBe("");
+  });
+
+  it("saves again once a broken settings.json was fixed outside Garnet, without a reload", async () => {
+    fake.config.set("settings.json", "{ nope");
+    await loadSettings(ROOT);
+    await updateSetting("appearance.theme", "dark");
+    expect(fake.config.get("settings.json")).toBe("{ nope");
+    fake.config.set("settings.json", JSON.stringify({ "editor.fontSize": 17 }));
+    await updateSetting("appearance.theme", "dark");
+    expect(JSON.parse(fake.config.get("settings.json")!)).toEqual({ "editor.fontSize": 17, "appearance.theme": "dark" });
+    expect(setting("editor.fontSize")).toBe(17);
+  });
+
+  it("merges a key into what is on disk now, so another window's change survives", async () => {
+    await loadSettings(ROOT);
+    let first = true;
+    (api as any).configRead = async (name: string) => {
+      const v = fake.config.get(name) ?? null;
+      if (first && name === "sessions.json") {
+        first = false;
+        fake.config.set(name, JSON.stringify({ "/other": { tabs: ["x.rb"] } }));
+      }
+      return v;
+    };
+    try {
+      await saveSession(ROOT, { tabs: ["a.rb"] });
+    } finally {
+      (api as any).configRead = async (name: string) => fake.config.get(name) ?? null;
+    }
+    expect(await loadSession("/other")).toEqual({ tabs: ["x.rb"] });
+    expect(await loadSession(ROOT)).toEqual({ tabs: ["a.rb"] });
+  });
+
+  it("refuses to replace a corrupt state file instead of wiping every project's entry", async () => {
+    fake.config.set("run-configs.json", "{ truncated");
+    expect(await modifyConfig("run-configs.json", {}, (all) => ({ ...all, [ROOT]: {} }))).toBe(false);
+    expect(fake.config.get("run-configs.json")).toBe("{ truncated");
+  });
+
+  it("creates settings.json before opening it on a fresh install", async () => {
+    expect(fake.config.has("settings.json")).toBe(false);
+    expect(await editableSettingsPath()).toBe("/config/settings.json");
+    expect(fake.config.get("settings.json")).toBe("{}\n");
+    fake.config.set("settings.json", '{"a":1}');
+    await editableSettingsPath();
+    expect(fake.config.get("settings.json")).toBe('{"a":1}');
   });
 });
 

@@ -1,9 +1,9 @@
 import { debugSession, sessionFor, stopSession } from "./debug";
-import { checkPublishedPort, composeCommand, debugPortFor, defaultDocker, hostSocket, localfsMap, mapPath, rdbgListen, validateDocker, type DockerTarget } from "./docker";
+import { checkPublishedPort, composeCommand, debugPortFor, defaultDocker, ENV_NAME, hostSocket, localfsMap, mapPath, rdbgListen, validateDocker, type DockerTarget } from "./docker";
 import { activeTab, editor, events, monaco, saveAll } from "./editor";
 import { api } from "./ipc";
 import { askTrust, isTrusted, setting } from "./settings";
-import { mergeConfigs, projectFile, readLocal, splitConfigs, writeLocal } from "./runstore";
+import { mergeConfigs, projectFile, projectFileText, readLocal, splitConfigs, writeLocal } from "./runstore";
 import { abs, rel, root, shellQuote, state } from "./state";
 import { onTestStatuses, prepareTestRun, startTestRun, statusIcon, testStatusAt } from "./testresults";
 import { PtyTabs, PtyView } from "./terminal";
@@ -50,18 +50,22 @@ export const TYPE_ICONS: Record<RunType, string> = {
   custom: "terminal",
 };
 
-const MANAGER_PREFIX: Record<RubyManager, string> = {
-  auto: "",
-  none: "",
-  rbenv: "rbenv exec ",
-  asdf: "asdf exec ",
-  mise: "mise exec -- ",
-  rvm: "rvm in . do ",
-  chruby: 'chruby-exec "$(cat .ruby-version)" -- ',
-};
+const MANAGERS: RubyManager[] = ["auto", "none", "rbenv", "asdf", "mise", "rvm", "chruby"];
+
+/// Runs a command with the chosen version manager. rvm and chruby read the project root's Ruby version, not the
+/// configuration's working directory.
+function managerPrefix(m: RubyManager, root: string): string {
+  if (m === "rbenv" || m === "asdf") return `${m} exec `;
+  if (m === "mise") return "mise exec -- ";
+  if (m === "rvm") return `rvm in ${shellQuote(root)} do `;
+  if (m === "chruby") return `chruby-exec "$(cat ${shellQuote(`${root}/.ruby-version`)})" -- `;
+  return "";
+}
 
 let configs: RunConfig[] = [];
-let projectFileLoaded = false;
+/// .garnet/run.json as read (null when absent or untrusted) and the shared configurations it yielded.
+let projectRaw: Record<string, unknown> | null = null;
+let sharedLoaded: Omit<RunConfig, "shared">[] = [];
 let selectedName = "";
 let gemfileLock = "";
 let detectedManagers: string[] = [];
@@ -100,9 +104,9 @@ export function validateConfig(raw: unknown): RunConfig | null {
   const str = (v: unknown) => v === undefined || typeof v === "string";
   if (typeof c.name !== "string" || !c.name.trim() || typeof c.type !== "string" || !(c.type in TYPE_LABELS)) return null;
   if (!str(c.args) || !str(c.cwd) || !str(c.envFile)) return null;
-  if (c.rubyManager !== undefined && !(typeof c.rubyManager === "string" && c.rubyManager in MANAGER_PREFIX)) return null;
+  if (c.rubyManager !== undefined && !(typeof c.rubyManager === "string" && MANAGERS.includes(c.rubyManager as RubyManager))) return null;
   if (c.bundler !== undefined && typeof c.bundler !== "boolean") return null;
-  if (c.env !== undefined && (!c.env || typeof c.env !== "object" || Array.isArray(c.env) || Object.values(c.env).some((v) => typeof v !== "string"))) return null;
+  if (c.env !== undefined && (!c.env || typeof c.env !== "object" || Array.isArray(c.env) || Object.entries(c.env).some(([k, v]) => !ENV_NAME.test(k) || typeof v !== "string"))) return null;
   const docker = c.docker === undefined ? undefined : validateDocker(c.docker);
   if (docker === null) return null;
   const base = newConfig(c.type as RunType, c.name);
@@ -130,7 +134,7 @@ export async function loadRunConfigs() {
   const local = await readLocal(root());
   let shared: RunConfig[] = [];
   let sharedSelected = "";
-  projectFileLoaded = false;
+  projectRaw = null;
   if (isTrusted()) {
     const raw = await api.readFile(projectFile(root())).catch(() => null);
     if (raw !== null) {
@@ -138,13 +142,14 @@ export async function loadRunConfigs() {
         const parsed = JSON.parse(raw);
         shared = validList(Array.isArray(parsed?.configurations) ? parsed.configurations : [], ".garnet/run.json");
         sharedSelected = typeof parsed?.selected === "string" ? parsed.selected : "";
-        projectFileLoaded = true;
+        projectRaw = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
       } catch (e) {
         toast(`.garnet/run.json is not valid JSON (${e}); ignoring it.`, "error");
       }
     }
   }
-  if (!local && !projectFileLoaded) {
+  sharedLoaded = splitConfigs(mergeConfigs([], shared)).shared;
+  if (!local && !projectRaw) {
     configs = defaults();
     if (configs.length) await saveRunConfigs();
   } else {
@@ -164,15 +169,12 @@ export async function saveRunConfigs(list = configs) {
   const { local, shared } = splitConfigs(list);
   await writeLocal(root(), { selected: selectedName, configurations: local });
   // ponytail: an untrusted project's .garnet/run.json was never read, so it is never written either
-  if (isTrusted() && (shared.length || projectFileLoaded)) {
-    if (shared.length) {
-      await api.createPath(`${root()}/.garnet`, true).catch(() => {});
-      await api.writeFile(projectFile(root()), JSON.stringify({ configurations: shared }, null, 2) + "\n");
-      projectFileLoaded = true;
-    } else {
-      await api.deletePath(projectFile(root())).catch(() => {});
-      projectFileLoaded = false;
-    }
+  const text = isTrusted() ? projectFileText(projectRaw, sharedLoaded, shared) : null;
+  if (text !== null) {
+    await api.createPath(`${root()}/.garnet`, true).catch(() => {});
+    await api.writeFile(projectFile(root()), text);
+    projectRaw = JSON.parse(text);
+    sharedLoaded = shared;
   }
   renderWidget();
 }
@@ -202,7 +204,8 @@ export function buildCommand(cfg: RunConfig, opts: BuildOptions = {}): string {
   }
   if (testArgs) args = `${args} ${testArgs}`;
   const runner = setting<string>("testing.rspecRunner");
-  const rspec = runner !== "auto" ? runner : cfg.bundler ? "bundle exec rspec" : p.binRspec ? "bin/rspec" : "rspec";
+  // auto: the project's binstub, else the bundle's rspec when rspec-core is in Gemfile.lock, else a global rspec.
+  const rspec = runner !== "auto" ? runner : p.binRspec ? "bin/rspec" : cfg.bundler && /^\s{4}rspec-core \(/m.test(gemfileLock) ? "bundle exec rspec" : "rspec";
   const raw = {
     "rails-server": `bin/rails server ${args}`,
     "rails-console": `bin/rails console ${args}`,
@@ -216,8 +219,8 @@ export function buildCommand(cfg: RunConfig, opts: BuildOptions = {}): string {
   const base = cfg.type === "custom" ? raw.trim() : raw.replace(/\s+/g, " ").trim();
   const bundledRdbg = `${cfg.bundler && debugBundled() && !debug?.globalRdbg ? "bundle exec " : ""}rdbg`;
   const rdbg = docker ? bundledRdbg : setting<string>("debug.rdbgPath") || bundledRdbg;
-  const cmd = debug ? `${rdbg} --open ${docker ? rdbgListen(docker, debug.port) : `--port=${debug.port} --host=127.0.0.1`} --command -- ${base}` : base;
-  if (!docker) return MANAGER_PREFIX[cfg.rubyManager] + cmd;
+  const cmd = debug ? `${rdbg} --open ${docker ? rdbgListen(docker, debug.port, shellQuote) : `--port=${debug.port} --host=127.0.0.1`} --command -- ${base}` : base;
+  if (!docker) return managerPrefix(cfg.rubyManager, p.root) + cmd;
   return composeCommand(
     docker,
     cmd,
@@ -512,7 +515,7 @@ export async function rakeTask() {
   toast("Loading tasks…");
   let out: string;
   try {
-    out = await api.runCapture(root(), `${p.rails ? "bin/rails -T" : "bundle exec rake -T"} 2>/dev/null`, 180);
+    out = await api.runCapture(root(), `${p.rails ? "bin/rails -T" : "bundle exec rake -T"} 2>&1`, 180);
   } catch (e) {
     return toast(String(e), "error");
   }

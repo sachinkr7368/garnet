@@ -28,7 +28,18 @@ const missing = (path: string) => Promise.reject(new Error(`No such file: ${path
 export class Channel<T> {
   onmessage: (m: T) => void = () => {};
 }
+const searchWatchers = new Set<() => void>();
+export function onSearchSuperseded(fn: () => void) {
+  searchWatchers.add(fn);
+  return () => void searchWatchers.delete(fn);
+}
+
 export const invoke = async (cmd: string, args?: any): Promise<any> => {
+  if (cmd === "search_text") {
+    const waiting = [...searchWatchers];
+    searchWatchers.clear();
+    waiting.forEach((fn) => fn());
+  }
   fake.calls.push(cmd);
   fake.invocations.push({ cmd, args });
   const handler = fake.handlers.get(cmd);
@@ -42,7 +53,19 @@ export const api = new Proxy(
     createPath: async () => {},
     deletePath: async (path: string) => void fake.files.delete(path),
     configRead: async (name: string) => fake.config.get(name) ?? null,
-    configWrite: async (name: string, content: string) => void fake.config.set(name, content),
+    configWrite: async (name: string, content: string, expected?: string) => {
+      const current = fake.config.get(name);
+      if (name.endsWith(".json") && current !== undefined) {
+        try {
+          if (!current.trim()) throw new Error("empty");
+          JSON.parse(current);
+        } catch {
+          throw new Error(`${name} is not valid JSON, so Garnet did not overwrite it.`);
+        }
+      }
+      if (expected !== undefined && expected !== (current ?? "")) throw new Error("config file changed on disk");
+      fake.config.set(name, content);
+    },
     configPath: async (name: string) => `/config/${name}`,
     canonicalPath: async (path: string) => path.replace(/\/+$/, ""),
     gitSetTrusted: async (t: boolean) => void (fake.trustedFlag = t),

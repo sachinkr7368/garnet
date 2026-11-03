@@ -1,6 +1,6 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { api, invoke } from "./ipc";
-import { onSettingsChange, setting } from "./settings";
+import { modifyConfig, onSettingsChange, setting } from "./settings";
 import { toast } from "./ui";
 
 /// Opt-in update check (Settings › Updates): at most once a day, GitHub Releases API, never downloads anything.
@@ -36,7 +36,7 @@ async function check(now: number, current?: string): Promise<void> {
     last = undefined;
   }
   if (!dueForCheck(last, now)) return;
-  await api.configWrite(STORE, JSON.stringify({ last: now }));
+  await modifyConfig<Record<string, unknown>>(STORE, {}, () => ({ last: now }));
   let tag: string;
   let url: string;
   try {

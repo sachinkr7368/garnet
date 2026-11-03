@@ -11,7 +11,12 @@ export interface Breakpoint {
   hitCount?: number;
   /// Monaco decoration that tracks this line while the file is open (runtime only).
   decorationId?: string;
+  /// Stable identity across line shifts (runtime only): pass counts are kept per id.
+  id?: number;
 }
+
+let lastId = 0;
+export const newBreakpointId = () => ++lastId;
 
 export type BreakpointMap = Map<string, Breakpoint[]>;
 
@@ -41,6 +46,7 @@ export function deserialize(raw: unknown, abs: (p: string) => string): Breakpoin
       const { line, enabled, condition, logMessage, hitCount } = b as Record<string, unknown>;
       if (typeof line !== "number" || !Number.isInteger(line) || line < 1 || bps.some((x) => x.line === line)) continue;
       bps.push({
+        id: newBreakpointId(),
         line,
         enabled: enabled !== false,
         ...(typeof condition === "string" && condition ? { condition } : {}),
@@ -81,7 +87,10 @@ export const passCountReached = (bp: Breakpoint, hits: number) => !bp.hitCount |
 /// Fills `{expr}` placeholders of a logpoint template with evaluated values.
 export async function interpolate(template: string, evaluate: (expr: string) => Promise<string>): Promise<string> {
   let text = template;
-  for (const m of [...template.matchAll(/\{([^}]+)\}/g)]) text = text.replace(m[0], await evaluate(m[1]).catch(() => "?"));
+  for (const m of [...template.matchAll(/\{([^}]+)\}/g)]) {
+    const value = await evaluate(m[1]).catch(() => "?");
+    text = text.replace(m[0], () => value);
+  }
   return text;
 }
 

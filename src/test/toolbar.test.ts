@@ -5,7 +5,7 @@ vi.mock("../merge", () => ({ runGitOp: vi.fn(async () => true) }));
 
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import { runGitOp } from "../merge";
-import { trustProject } from "../settings";
+import { loadSettings, setting, trustProject } from "../settings";
 import { state } from "../state";
 import { checkout, currentWorktree, headLabel, newWorktree, parseWorktrees, refreshToolbar, worktreeLabel } from "../toolbar";
 import { fake } from "./fakeIpc";
@@ -153,4 +153,33 @@ describe("git actions", () => {
     expect(worktreeBtn.querySelector(".name")!.getAttribute("title")).toBe(`${long} (detached)\n/src/${long}`);
     expect(headLabel("main", "")).toBe("main");
   });
+});
+
+describe("theme menu", () => {
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  beforeEach(async () => {
+    fake.reset();
+    await loadSettings(null);
+  });
+
+  it("toolbar theme menu offers System, Light and Dark with a checkmark on the current one", async () => {
+    const btn = document.getElementById("theme-toggle")!;
+    expect(btn.title).toMatch(/^Theme: System/);
+    btn.click();
+    const items = () => [...document.querySelectorAll<HTMLElement>("#overlay-root .ctx-item")];
+    expect(items().map((i) => i.textContent)).toEqual(["System", "Light", "Dark"]);
+    expect(items().map((i) => i.getAttribute("aria-checked"))).toEqual(["true", "false", "false"]);
+    items()[2].dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    await settle();
+    await settle();
+    expect(setting("appearance.theme")).toBe("dark");
+    expect(btn.title).toBe("Theme: Dark");
+    btn.click();
+    expect(items().map((i) => i.getAttribute("aria-checked"))).toEqual(["false", "false", "true"]);
+    items()[0].dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    await settle();
+    await settle();
+    expect(setting("appearance.theme")).toBe("system");
+  });
+
 });

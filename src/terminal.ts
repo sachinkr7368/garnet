@@ -6,7 +6,7 @@ import "@xterm/xterm/css/xterm.css";
 import { openFile } from "./editor";
 import { Channel, invoke, type PtyEvent } from "./ipc";
 import { askTrust, isDarkTheme, isTrusted, onSettingsChange, setting } from "./settings";
-import { abs, root } from "./state";
+import { abs, root, shellQuote } from "./state";
 import { TERMINAL } from "./theme";
 import { bottom, h, icon, iconButton, overflowStrip, toast } from "./ui";
 
@@ -75,6 +75,8 @@ export class PtyView {
         callback(links);
       },
     });
+    // Edit › Select All targets xterm's hidden textarea, so ⌘A selects the terminal buffer here.
+    this.term.attachCustomKeyEventHandler((e) => !(e.type === "keydown" && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.code === "KeyA" && (this.term.selectAll(), true)));
     this.observer = new ResizeObserver(() => this.fitSoon());
     views.add(this);
   }
@@ -310,6 +312,17 @@ terminals.toolbar.append(iconButton("add", "New Terminal", () => newTerminal()))
 
 const TERMINAL_GATE = "Trust project to open a terminal.";
 window.addEventListener("garnet:trusted", () => bottom.active === "terminal" && !terminals.items.length && newTerminal());
+
+/// A file or folder dropped on a terminal is typed in as its quoted path. A name with control characters (ESC can
+/// end bracketed paste, a newline submits) is refused. False when the drop wasn't on a terminal.
+export function pasteIntoTerminal(at: Element, paths: string[]) {
+  const view = [...views].find((v) => v.el.contains(at));
+  if (!view) return false;
+  // eslint-disable-next-line no-control-regex
+  if (paths.some((p) => /[\x00-\x1f\x7f-\x9f]/.test(p))) toast("Path contains control characters; not inserted", "error");
+  else view.term.paste(paths.map(shellQuote).join(" "));
+  return true;
+}
 
 export function newTerminal(cwd?: string) {
   if (!isTrusted()) return terminals.showGate(TERMINAL_GATE);

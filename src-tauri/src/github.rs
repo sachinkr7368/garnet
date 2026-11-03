@@ -496,9 +496,9 @@ pub async fn open_url(url: String) -> Res<()> {
 
 /// Opens a project in a separate Garnet window (its own process, so state stays isolated).
 #[tauri::command]
-pub async fn open_new_window(path: String) -> Res<()> {
+pub async fn open_new_window(window: tauri::Window, path: String) -> Res<()> {
     let exe = std::env::current_exe().map_err(e2s)?;
-    Command::new(exe).arg(path).spawn().map(|_| ()).map_err(e2s)
+    Command::new(exe).args(crate::appmenu::cascade_arg(&window)).arg(path).spawn().map(|_| ()).map_err(e2s)
 }
 
 /// Latest published release of Garnet (tag and page URL), for the opt-in update check. Unauthenticated.

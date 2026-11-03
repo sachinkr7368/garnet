@@ -4,6 +4,23 @@ All notable changes to Garnet are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Garnet uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Zoom IDE: View › Appearance › Zoom In IDE (⌃⌥=), Zoom Out IDE (⌃⌥-) and Reset IDE Zoom (⌃⌥0), RubyMine's macOS defaults. Settings › Keymap › Standard macOS zoom keys switches ⌘= ⌘- ⌘0 to zoom instead.
+- Reset Font Size, and an opt-in ⌘ + mouse wheel / trackpad pinch to change the editor font size.
+- Code folding: Expand / Collapse (⌘+ / ⌘-), Expand / Collapse All (⇧⌘+ / ⇧⌘-), Recursively (⌥⌘+ / ⌥⌘-), and the NumPad keys.
+- Theme menu in the toolbar and View › Theme: System, Light or Dark with a checkmark on the current one.
+- Full macOS menu bar: File, Edit, View, Navigate, Code, Refactor, Run, Git, Window and Help, with shortcuts from the live keymap, Open Recent, New Window, Close Window (⇧⌘W), Bring All to Front and the window list.
+- Distraction Free Mode, Presentation Mode, and toggles for the toolbar, status bar and tool window bars.
+- Drop a folder on the window or the Dock icon to open it. The window's size and position are restored on relaunch.
+
+### Fixed
+- Zoom scaled the page with CSS zoom, which put clicks in the editor on the wrong line and column; it now uses the web view's page zoom.
+- Going back to System after pinning Light or Dark kept the old theme when macOS had changed appearance in the meantime.
+- The toolbar theme button only toggled Light and Dark, so System could only be restored from Settings.
+- Code fields (search, paths, branch names) no longer autocorrect, autocapitalize or spell check. ⌘A in a terminal selects its buffer.
+
 ## [0.2.3] - 2026-11-03
 
 ### Added

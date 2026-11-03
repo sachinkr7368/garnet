@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Main window permissions",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-set-title", "core:window:allow-set-size", "core:window:allow-theme", "core:window:allow-set-theme", "dialog:default"]
+  "permissions": ["core:default", "core:window:allow-set-title", "core:window:allow-set-size", "core:window:allow-theme", "core:window:allow-set-theme", "core:window:allow-set-fullscreen", "core:webview:allow-set-webview-zoom", "dialog:default"]
 }

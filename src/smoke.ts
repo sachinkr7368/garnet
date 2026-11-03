@@ -1,6 +1,6 @@
 // End-to-end smoke run: GARNET_SMOKE=<report.json> Garnet.app/Contents/MacOS/garnet <rails-project>
 // Exercises the real UI code paths, measures performance budgets, writes a JSON report and quits.
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { allCommands, keymap, runCommand } from "./commands";
 import { importJetBrainsKeymap, jetbrainsKeystroke } from "./keymapref";
 import { breakpointsIn, debugSessions, debugState, evaluate, flushBreakpoints, loadBreakpoints, resume, resumeSession, selectDebugSession, smokeHooks, stopAllSessions, stopDebug, toggleBreakpoint } from "./debug";
@@ -19,7 +19,7 @@ import { api, Channel, invoke, type PtyEvent } from "./ipc";
 import { cachedSymbols, goToImplementation, lspCapabilities, lspReady, request } from "./lsp";
 import { PtyView, terminals } from "./terminal";
 import { buildCommand, configList, dockerUnavailable, editConfigurations, launch, newConfig, runs, safeEnv, validateConfig, type RunConfig } from "./run";
-import { isDarkTheme, isTrusted, loadSettings, setting, toggleTheme, trustProject, updateSetting } from "./settings";
+import { appliedZoomFactor, isDarkTheme, isTrusted, loadSettings, setAppearance, setting, toggleTheme, trustProject, updateSetting } from "./settings";
 import { openSettingsWindow } from "./settingsui";
 import { refreshToolbar } from "./toolbar";
 import { monaco } from "./editor";
@@ -35,6 +35,7 @@ import { bottom, rightbar, sidebar } from "./ui";
 type Report = Record<string, unknown> & { checks: Record<string, boolean | string> };
 
 let substep = (_: string) => {};
+let log = (_: string) => {};
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(fn: () => T | Promise<T>, timeoutMs: number, everyMs = 100): Promise<T | null> {
   const end = Date.now() + timeoutMs;
@@ -46,6 +47,16 @@ async function until<T>(fn: () => T | Promise<T>, timeoutMs: number, everyMs = 1
   return null;
 }
 
+/// Screenshots, only when the smoke project has .git/garnet-shots naming the folder to save them in.
+async function shot(name: string) {
+  const dir = (await api.readFile(`${state.project!.root}/.git/garnet-shots`).catch(() => "")).trim();
+  if (!dir) return;
+  // Monaco paints on animation frames, which macOS pauses for a window behind others.
+  editor.render(true);
+  await sleep(400);
+  await invoke("smoke_snapshot", { path: `${dir}/${name}.png` }).catch((e) => log(`shot ${name}: ${e}`));
+}
+
 export async function runSmoke(project: string, withDebug: boolean, openProject: (p: string) => Promise<void>) {
   const report: Report = { checks: {} };
   let current = "startup";
@@ -53,7 +64,16 @@ export async function runSmoke(project: string, withDebug: boolean, openProject:
   const check = (name: string, ok: boolean | string) => ((report.checks[name] = ok), save(ok === true ? "" : `  FAIL ${name}`));
   const step = (name: string) => ((current = name), save(name));
   substep = (name: string) => step(`${current.split(" › ")[0]} › ${name}`);
+  log = (line: string) => save(line);
   try {
+    const restored = await invoke<{ x: number; y: number; width: number; height: number } | null>("restored_frame");
+    report.restoredFrame = restored;
+    // macOS shrinks a window taller than the screen's visible frame, so the height may come back smaller.
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    const win = getCurrentWindow();
+    const [pos, scale] = await Promise.all([win.outerPosition(), win.scaleFactor()]);
+    const frame = { x: pos.x / scale, y: pos.y / scale, width: window.innerWidth, height: window.innerHeight };
+    if (restored) check("window position and size restored from the last run", (Math.abs(frame.x - restored.x) <= 2 && Math.abs(frame.y - restored.y) <= 2 && Math.abs(frame.width - restored.width) <= 2 && frame.height <= restored.height + 2) || JSON.stringify({ frame, restored }));
     step("open project");
     let indexMs = -1;
     const indexStart = performance.now();
@@ -160,6 +180,10 @@ export async function runSmoke(project: string, withDebug: boolean, openProject:
 
     step("settings and UI");
     await uiChecks(check);
+    step("theme");
+    await themeChecks(check);
+    step("zoom");
+    await zoomChecks(report, check);
     step("editor features");
     await editorFeatureChecks(check, !!ok);
     step("rubymine basics");
@@ -228,6 +252,129 @@ async function debugRailsRequest(report: Report, controller: string, check: (n: 
   check("debug: request completed after resume (HTTP 200)", code.trim() === "200" || code.trim());
   await stopDebug();
   await sleep(1500);
+}
+
+async function themeChecks(check: Check) {
+  const prev = setting<string>("appearance.theme");
+  const monacoDark = () => !!document.querySelector(".monaco-editor")?.classList.contains("vs-dark");
+  const emulate = (t: "dark" | "light" | "keep" | null) => invoke<[string, string, number]>("smoke_appearance", { emulate: t });
+  const shows = (dark: boolean) => until(() => isDarkTheme() === dark && monacoDark() === dark, 5000, 50);
+  try {
+    await setAppearance("system");
+    await emulate(null);
+    const [forced] = await emulate("light");
+    check("System leaves the window appearance to macOS (not forced)", forced === "" || forced);
+    check("System follows macOS: light", !!(await shows(false)));
+    await shot("system-light");
+    const [, effective] = await emulate("dark");
+    check("System follows macOS live: dark, chrome and editor", (!!(await shows(true)) && effective.includes("Dark")) || `${isDarkTheme()} ${monacoDark()} ${effective}`);
+    await shot("system-dark");
+    await emulate("light");
+    check("System follows macOS live: back to light", !!(await shows(false)));
+    await setAppearance("light");
+    const [pinned] = await emulate("dark");
+    await sleep(300);
+    check("Light pins the theme and the native window", (!isDarkTheme() && pinned === "NSAppearanceNameAqua") || `${isDarkTheme()} ${pinned}`);
+    await setAppearance("system");
+    check("back to System picks up a macOS change made while pinned", !!(await shows(true)));
+    const [unforced] = await emulate("keep");
+    check("back to System hands the native window back to macOS", unforced === "" || unforced);
+    const btn = document.getElementById("theme-toggle")!;
+    btn.click();
+    const items = [...document.querySelectorAll<HTMLElement>("#overlay-root .ctx-item")];
+    check("toolbar theme menu: System, Light, Dark with System checked", JSON.stringify(items.map((i) => [i.textContent, i.getAttribute("aria-checked")])) === '[["System","true"],["Light","false"],["Dark","false"]]' || JSON.stringify(items.map((i) => i.textContent)));
+    check("toolbar theme button has a tooltip", /^Theme: System/.test(btn.title) || btn.title);
+    await shot("theme-menu");
+    items[2]?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    check("toolbar theme menu pins Dark", !!(await until(() => setting("appearance.theme") === "dark" && isDarkTheme(), 3000, 50)));
+    const menu = await until(async () => {
+      const m = await invoke<string[]>("smoke_menu");
+      return m.includes("themeDark=true") && m.includes("themeSystem=false") ? m : null;
+    }, 3000, 100);
+    check("View › Theme menu checks the current theme", !!menu);
+    const titles = (await invoke<string[]>("smoke_menu")).filter((x) => !x.includes("="));
+    check("menu bar: Garnet File Edit View Navigate Code Refactor Run Git Window Help", titles.join(" ") === "Garnet File Edit View Navigate Code Refactor Run Git Window Help" || titles.join(" "));
+    await emit("menu", "themeSystem");
+    check("View › Theme › System from the menu bar", !!(await until(() => setting("appearance.theme") === "system", 3000, 50)));
+  } finally {
+    await emulate(null).catch(() => {});
+    await updateSetting("appearance.theme", prev === "system" ? undefined : prev);
+    document.getElementById("overlay-root")!.replaceChildren();
+  }
+}
+
+async function zoomChecks(report: Report, check: Check) {
+  const root = state.project!.root;
+  await openFile(`${root}/app/controllers/posts_controller.rb`);
+  bottom.show("terminal");
+  await until(() => terminals.el.querySelector(".xterm-screen"), 10000);
+  await sleep(500);
+  const termFit = () => {
+    const el = [...document.querySelectorAll<HTMLElement>(".xterm-screen")].find((x) => x.offsetParent);
+    const host = el?.closest<HTMLElement>(".pty");
+    return el && host ? { screen: Math.round(el.getBoundingClientRect().width), host: Math.round(host.getBoundingClientRect().width) } : null;
+  };
+  const outerW = window.innerWidth * appliedZoomFactor();
+  const hits = () => {
+    const dom = editor.getDomNode()!;
+    const pos = { lineNumber: 3, column: 5 };
+    editor.revealPosition(pos);
+    editor.render(true);
+    const v = editor.getScrolledVisiblePosition(pos);
+    const r = dom.getBoundingClientRect();
+    if (!v) return "not visible";
+    const x = r.left + v.left + 2;
+    const y = r.top + v.top + v.height / 2;
+    const t = editor.getTargetAtClientPoint(x, y);
+    const rect = (sel: string) => {
+      const b = dom.querySelector(sel)?.getBoundingClientRect();
+      return b ? [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)] : null;
+    };
+    return t?.position?.lineNumber === 3 && t.position.column === 5 ? true : JSON.stringify({ x, y, v, type: t?.type ?? null, pos: t?.position ?? null, ed: [r.left, r.top, r.width, r.height], guard: rect(".overflow-guard"), lines: rect(".view-lines"), n: dom.querySelectorAll(".view-line").length, text: dom.querySelector(".view-line")?.textContent?.slice(0, 30), sx: window.scrollX, sy: window.scrollY });
+  };
+  const press = (code: string) => document.body.dispatchEvent(new KeyboardEvent("keydown", { code, ctrlKey: true, altKey: true, bubbles: true, cancelable: true }));
+  const results: Record<string, unknown> = {};
+  try {
+    const base = { width: window.innerWidth, term: termFit() };
+    for (const z of [80, 125, 150, 100]) {
+      await updateSetting("appearance.zoom", z === 100 ? undefined : z);
+      const want = Math.round(outerW / (z / 100));
+      const ok = await until(() => Math.abs(window.innerWidth - want) <= 2, 5000, 50);
+      await sleep(400);
+      const editorFits = Math.abs(editor.getLayoutInfo().width - editor.getDomNode()!.clientWidth) <= 2;
+      const r = { innerWidth: window.innerWidth, want, editorFits, hit: hits(), term: termFit() };
+      results[z] = r;
+      check(`zoom ${z}%: page scales and Monaco lays out`, (!!ok && editorFits) || JSON.stringify(r));
+      if (z === 150) check("zoom 150%: terminal refits to the narrower panel", (!!r.term && !!base.term && r.term.screen < base.term.screen && r.term.screen <= r.term.host + 1) || JSON.stringify({ base, r }));
+      if (z !== 100) await shot(`zoom-${z}`);
+    }
+    press("Equal");
+    check("⌃⌥= zooms in", !!(await until(() => setting("appearance.zoom") === 110, 3000, 50)) || String(setting("appearance.zoom")));
+    press("Minus");
+    press("Minus");
+    check("⌃⌥- zooms out", !!(await until(() => setting("appearance.zoom") === 90, 3000, 50)) || String(setting("appearance.zoom")));
+    press("Digit0");
+    check("⌃⌥0 resets IDE zoom", !!(await until(() => setting("appearance.zoom") === 100 && appliedZoomFactor() === 1, 3000, 50)) || String(setting("appearance.zoom")));
+    await emit("menu", "zoomIn");
+    check("View › Appearance › Zoom In IDE from the menu bar", !!(await until(() => setting("appearance.zoom") === 110, 3000, 50)));
+    await emit("menu", "zoomReset");
+    await until(() => setting("appearance.zoom") === 100, 3000, 50);
+    const font = setting<number>("editor.fontSize");
+    runCommand("increaseFont");
+    const bigger = await until(() => editor.getOption(monaco.editor.EditorOption.fontSize) === font + 1, 3000, 50);
+    runCommand("resetFont");
+    check("editor font size increase and reset", (!!bigger && !!(await until(() => editor.getOption(monaco.editor.EditorOption.fontSize) === font, 3000, 50))) || String(editor.getOption(monaco.editor.EditorOption.fontSize)));
+    const model = editor.getModel()!;
+    editor.setPosition({ lineNumber: 2, column: 1 });
+    runCommand("collapseAll");
+    const folded = await until(() => editor.getVisibleRanges().reduce((n, r) => n + r.endLineNumber - r.startLineNumber + 1, 0) < Math.min(model.getLineCount(), 20), 3000, 50);
+    runCommand("expandAll");
+    check("Code › Folding › Collapse All / Expand All", !!folded || "nothing folded");
+  } finally {
+    report.zoom = results;
+    await updateSetting("appearance.zoom", undefined);
+    await updateSetting("editor.fontSize", undefined);
+  }
 }
 
 async function uiChecks(check: (n: string, ok: boolean | string) => void) {
@@ -1339,6 +1486,8 @@ async function searchPopupChecks(phase: string, check: Check, lsp: boolean) {
 /// deliberate ellipsis) or squeezed to nothing, the active tabs on screen and every popup inside the window.
 /// The short 1024x600 pass also checks toolbars and dialogs for vertical clipping.
 const LAYOUT_SIZES: [number, number | null][] = [[800, null], [1024, null], [1280, null], [1440, null], [1024, 600]];
+/// Window width, height and IDE zoom: each zoomed run keeps at least the 800px layout the app supports.
+const ZOOM_LAYOUT: [number, number | null, number][] = [[800, null, 80], [1280, null, 125], [1440, null, 150]];
 const LAYOUT_SKIP = ".monaco-editor, .monaco-diff-editor, .xterm, .db-grid, .tr-detail";
 const LAYOUT_VERTICAL = ".view-toolbar, .search-bar, .subtab-bar, #bottom-head, .commit-actions, #overlay-root";
 
@@ -1450,17 +1599,19 @@ async function layoutChecks(report: Report, check: Check) {
     };
     const summary = document.querySelector<HTMLElement>(".tests-view .search-summary");
     if (summary) summary.textContent = "Smoke specs: 0 passed · no results (did the runner start? see the console for the full output of the runner)";
-    for (const [w, h] of LAYOUT_SIZES) {
+    for (const [w, h, zoom] of [...LAYOUT_SIZES.map(([w, h]): [number, number | null, number] => [w, h, 100]), ...ZOOM_LAYOUT]) {
       const height = h ?? Math.max(600, startH);
-      const width = h ? `${w}x${h}` : `${w}`;
+      const width = `${h ? `${w}x${h}` : `${w}`}${zoom === 100 ? "" : `@${zoom}%`}`;
+      const f = zoom / 100;
+      await updateSetting("appearance.zoom", zoom === 100 ? undefined : zoom);
       await win.setSize(new LogicalSize(w, height));
       // setSize includes the title bar, so the viewport ends up a little shorter than `height`.
-      if (!(await until(() => window.innerWidth === w && window.innerHeight <= height && window.innerHeight >= height - 40, 5000, 50))) {
-        failures[`${width} resize`] = [`window is ${window.innerWidth}x${window.innerHeight}, wanted ${w}x${height}`];
+      if (!(await until(() => Math.abs(window.innerWidth - w / f) <= 1 && window.innerHeight <= height / f && window.innerHeight >= (height - 40) / f, 5000, 50))) {
+        failures[`${width} resize`] = [`viewport is ${window.innerWidth}x${window.innerHeight} CSS px, wanted ${Math.round(w / f)}x${Math.round(height / f)}`];
         continue;
       }
       await settle();
-      for (const panels of ["default", "min"] as const) {
+      for (const panels of zoom === 100 ? (["default", "min"] as const) : (["default"] as const)) {
         side.style.width = panels === "min" ? "160px" : saved.side;
         right.style.width = panels === "min" ? "200px" : saved.right;
         bottomEl.style.height = panels === "min" ? "100px" : saved.bottom;
@@ -1525,13 +1676,14 @@ async function layoutChecks(report: Report, check: Check) {
       for (const [label, sel] of [["bottom tab overflow menu", "#bottom-head > .tab-overflow:not([hidden])"], ["editor tab overflow menu", "#tabs > .tab-overflow:not([hidden])"]]) {
         const more = document.querySelector<HTMLElement>(sel);
         if (more) await dialog(label, () => more.click(), () => overlay.querySelector(".ctx-item"));
-        else if (w === 800) failures[`${width} ${label}`] = ["» button missing"];
+        else if (w / f <= 800) failures[`${width} ${label}`] = ["» button missing"];
       }
     }
     report.layoutIssues = failures;
     const flat = Object.entries(failures).flatMap(([k, v]) => v.map((x) => `${k}: ${x}`));
-    check("layout: no page scroll, clipping or hidden active tab at 800/1024/1280/1440 and 1024x600", flat.length === 0 || `${flat.length} issues: ${flat.slice(0, 25).join(" | ")}`);
+    check("layout: no page scroll, clipping or hidden active tab at 800/1024/1280/1440 and 1024x600, and at 80%, 125% and 150% zoom", flat.length === 0 || `${flat.length} issues: ${flat.slice(0, 25).join(" | ")}`);
   } finally {
+    await updateSetting("appearance.zoom", undefined);
     await win.setSize(new LogicalSize(startW, startH)).catch(() => {});
     side.style.width = saved.side;
     right.style.width = saved.right;

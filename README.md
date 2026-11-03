@@ -99,7 +99,9 @@ Feature status compared with RubyMine. The full checklist lives in
 | Prompt for unsaved files on quit and logout; hot exit restores unsaved buffers after a crash or force quit | Done |
 | Responsive layout: tabs and toolbar icons that do not fit move into `»` overflow menus | Done |
 | Search Everywhere and Recent Files fixes (case-insensitive file match, results shown while ruby-lsp is busy, Recent Files kept across restarts) and trust-gated terminals (0.2.3) | Done |
-| Light / Dark / System theme (follows macOS live), Toggle Theme in the toolbar | Done |
+| Light / Dark / System theme (follows macOS live), theme menu in the toolbar and View › Theme | Done |
+| Zoom IDE (⌃⌥= / ⌃⌥- / ⌃⌥0), editor font size (⌃⇧. / ⌃⇧,, optional ⌘ + wheel or pinch), Distraction Free and Presentation Mode, toolbar / status bar / tool window bar toggles | Done |
+| macOS menu bar (File, Edit, View, Navigate, Code, Refactor, Run, Git, Window, Help) with live shortcuts, Open Recent, window size and position restored | Done |
 | Refactorings beyond rename, spell checking | Planned |
 
 ## Install
@@ -122,7 +124,8 @@ chruby or rvm. Install the language server and debugger gems for your Ruby:
 gem install ruby-lsp debug
 ```
 
-Open a project from the welcome screen, with ⌘O, or from a terminal:
+Open a project from the welcome screen, File › Open, by dropping a folder on the
+window or the Dock icon, or from a terminal:
 
 ```sh
 open -a Garnet --args /path/to/your/rails/app

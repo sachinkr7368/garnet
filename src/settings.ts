@@ -1,6 +1,7 @@
 import { ask } from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api } from "./ipc";
-import { applyWindowTheme, resolveTheme, systemPrefersDark, toggledAppearance, watchSystemTheme } from "./theme";
+import { applyWindowTheme, resolveTheme, systemPrefersDark, toggledAppearance, watchSystemTheme, type Appearance } from "./theme";
 import { toast } from "./ui";
 
 export type SettingType = "boolean" | "number" | "string" | "enum" | "map" | "list";
@@ -23,13 +24,18 @@ const LANGS = ["ruby", "erb", "haml", "slim", "yaml", "javascript", "typescript"
 export const SCHEMA: SettingDef[] = [
   { key: "appearance.theme", page: "Appearance", label: "Theme", type: "enum", options: ["system", "light", "dark"], default: "system", description: "system follows macOS (System Settings › Appearance) live." },
   { key: "appearance.uiFontSize", page: "Appearance", label: "UI font size", type: "number", min: 10, max: 20, default: 13 },
-  { key: "appearance.zoom", page: "Appearance", label: "Zoom (%)", type: "number", min: 70, max: 200, default: 100, description: "Scales the whole window." },
+  { key: "appearance.zoom", page: "Appearance", label: "Zoom IDE (%)", type: "number", min: 50, max: 200, default: 100, description: "Scales the whole window. Also View › Appearance › Zoom In IDE / Zoom Out IDE." },
+  { key: "appearance.showToolbar", page: "Appearance", label: "Show the toolbar", type: "boolean", default: true },
+  { key: "appearance.showToolWindowBars", page: "Appearance", label: "Show tool window bars", type: "boolean", default: true },
+  { key: "appearance.showStatusBar", page: "Appearance", label: "Show the status bar", type: "boolean", default: true },
+  { key: "appearance.presentationFontSize", page: "Appearance", label: "Presentation mode font size", type: "number", min: 12, max: 48, default: 24 },
   { key: "appearance.sidebarPosition", page: "Appearance", label: "Tool window bar position", type: "enum", options: ["left", "right"], default: "left" },
   { key: "appearance.restoreBottomPanel", page: "Appearance", label: "Restore the bottom panel on project open", type: "boolean", default: true },
 
   { key: "keymap.preset", page: "Keymap", label: "Keymap preset", type: "enum", options: ["rubymine", "vscode"], default: "rubymine", description: "RubyMine-compatible (macOS) or VS Code-style shortcuts." },
   { key: "keymap.bindings", page: "Keymap", label: "Custom bindings", type: "map", default: {}, description: "keystroke → command id; edited from the Keymap page." },
   { key: "keymap.removed", page: "Keymap", label: "Removed bindings", type: "list", default: [] },
+  { key: "keymap.macZoomKeys", page: "Keymap", label: "Standard macOS zoom keys (⌘= ⌘- ⌘0)", type: "boolean", default: false, description: "Browser-style IDE zoom. Takes ⌘= and ⌘- from code folding and ⌘0 from the Commit window." },
 
   { key: "editor.cursorStyle", page: "Editor/General", label: "Caret style", type: "enum", options: ["line", "block", "underline", "line-thin"], default: "line" },
   { key: "editor.cursorBlinking", page: "Editor/General", label: "Caret blinking", type: "enum", options: ["smooth", "blink", "phase", "expand", "solid"], default: "smooth" },
@@ -53,6 +59,7 @@ export const SCHEMA: SettingDef[] = [
 
   { key: "editor.fontFamily", page: "Editor/Font", label: "Font family", type: "string", default: "'JetBrains Mono', 'SF Mono', Menlo, Monaco, monospace" },
   { key: "editor.fontSize", page: "Editor/Font", label: "Font size", type: "number", min: 8, max: 32, default: 13 },
+  { key: "editor.mouseWheelZoom", page: "Editor/Font", label: "Change font size with ⌘ + mouse wheel or trackpad pinch", type: "boolean", default: false },
   { key: "editor.lineHeight", page: "Editor/Font", label: "Line height (px, 0 = automatic)", type: "number", min: 0, max: 48, default: 20 },
   { key: "editor.fontLigatures", page: "Editor/Font", label: "Enable font ligatures", type: "boolean", default: false },
 
@@ -124,7 +131,11 @@ let projectValues: Record<string, unknown> = {};
 let projectRoot: string | null = null;
 const listeners: (() => void)[] = [];
 
+/// Values a mode sets for as long as it is on (Presentation Mode's font size), never written to settings.json.
+const transient: Record<string, unknown> = {};
+
 export function setting<T = any>(key: string): T {
+  if (key in transient) return transient[key] as T;
   if (key in projectValues) return projectValues[key] as T;
   if (key in globalValues) return globalValues[key] as T;
   return DEFAULTS[key] as T;
@@ -136,18 +147,73 @@ export function onSettingsChange(fn: () => void) {
   listeners.push(fn);
 }
 
+export function setTransient(key: string, value: unknown) {
+  if (value === undefined) delete transient[key];
+  else transient[key] = value;
+  notify();
+}
+
+export type ViewMode = "" | "distractionFree" | "presentation";
+let viewMode: ViewMode = "";
+export const currentViewMode = () => viewMode;
+export function setViewMode(mode: ViewMode) {
+  viewMode = mode;
+  setTransient("editor.fontSize", mode === "presentation" ? setting("appearance.presentationFontSize") : undefined);
+}
+/// Font size commands: in Presentation Mode they change the presentation size only, so leaving it restores the
+/// saved size untouched. `undefined` resets.
+export const setEditorFontSize = (size: number | undefined) =>
+  viewMode === "presentation" ? setTransient("editor.fontSize", size ?? setting("appearance.presentationFontSize")) : updateSetting("editor.fontSize", size);
+
+export const ZOOM_STEPS = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200];
+export const nextZoom = (current: number, dir: 1 | -1): number =>
+  Number.isNaN(current) ? nextZoom(100, dir) : dir > 0 ? (ZOOM_STEPS.find((z) => z > current) ?? ZOOM_STEPS.at(-1)!) : ([...ZOOM_STEPS].reverse().find((z) => z < current) ?? ZOOM_STEPS[0]);
+/// Zoom In / Zoom Out IDE (0 resets to 100%).
+let zoomTarget: number | null = null;
+export const zoomIDE = async (dir: 1 | -1 | 0) => {
+  // Key repeat outruns the settings write, so steps build on the pending value.
+  const z = (zoomTarget = dir === 0 ? 100 : nextZoom(zoomTarget ?? setting<number>("appearance.zoom"), dir));
+  await updateSetting("appearance.zoom", z === 100 ? undefined : z);
+  if (zoomTarget === z) zoomTarget = null;
+};
+
+/// The web view's own page zoom (WKWebView pageZoom), so Monaco and xterm measure in real pixels; CSS zoom only
+/// outside Tauri.
+let appliedZoom = 1;
+function applyZoom(z: number) {
+  if (z === appliedZoom) return;
+  appliedZoom = z;
+  const done = () => window.dispatchEvent(new Event("garnet:zoom"));
+  try {
+    getCurrentWebview().setZoom(z).then(done, () => ((document.body.style.zoom = `${z}`), done()));
+  } catch {
+    document.body.style.zoom = `${z}`;
+    done();
+  }
+}
+export const appliedZoomFactor = () => appliedZoom;
+
 let windowTheme = "";
 function applyChrome() {
   const pref = setting<string>("appearance.theme");
   if (pref !== windowTheme) applyWindowTheme((windowTheme = pref));
-  document.documentElement.dataset.theme = resolveTheme(pref, systemPrefersDark());
-  document.documentElement.style.setProperty("--ui-font-size", `${setting("appearance.uiFontSize")}px`);
-  document.body.style.zoom = `${setting<number>("appearance.zoom") / 100}`;
-  document.body.classList.toggle("sidebar-right", setting("appearance.sidebarPosition") === "right");
+  const root = document.documentElement;
+  root.dataset.theme = resolveTheme(pref, systemPrefersDark());
+  root.style.setProperty("--ui-font-size", `${setting("appearance.uiFontSize")}px`);
+  applyZoom(Math.min(200, Math.max(50, Number(setting("appearance.zoom")) || 100)) / 100);
+  const body = document.body.classList;
+  body.toggle("sidebar-right", setting("appearance.sidebarPosition") === "right");
+  body.toggle("no-toolbar", !!viewMode || !setting("appearance.showToolbar"));
+  body.toggle("no-statusbar", !!viewMode || !setting("appearance.showStatusBar"));
+  body.toggle("no-toolstrips", !!viewMode || !setting("appearance.showToolWindowBars"));
+  body.toggle("distraction-free", !!viewMode);
 }
 
 export const isDarkTheme = () => document.documentElement.dataset.theme !== "light";
 watchSystemTheme(() => setting("appearance.theme") === "system", () => notify());
+
+/// Appearance › Theme: System follows macOS live, Light and Dark pin it.
+export const setAppearance = (pref: Appearance) => updateSetting("appearance.theme", pref === "system" ? undefined : pref);
 
 /// Switches to the opposite of the theme on screen and pins it (Appearance › Theme).
 export const toggleTheme = () => updateSetting("appearance.theme", toggledAppearance(isDarkTheme() ? "dark" : "light"));

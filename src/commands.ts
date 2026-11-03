@@ -35,7 +35,16 @@ const VSCODE_PRESET: Record<string, string> = {
   f11: "stepInto",
   "shift+f11": "stepOut",
   "ctrl+shift+g": "commitView",
+  "cmd+=": "zoomIn",
+  "cmd+shift+=": "zoomIn",
+  "cmd+-": "zoomOut",
+  "cmd+numpad0": "zoomReset",
+  "cmd+alt+[": "collapseRegion",
+  "cmd+alt+]": "expandRegion",
 };
+
+/// Browser-style IDE zoom (Keymap › Standard macOS zoom keys), applied over either preset.
+export const MAC_ZOOM_KEYS: Record<string, string> = { "cmd+=": "zoomIn", "cmd+shift+=": "zoomIn", "cmd+-": "zoomOut", "cmd+0": "zoomReset" };
 
 /// Runs a Monaco editor action. Actions with a quick input (Go to Line) need the editor focused, which it is not
 /// when the command comes from the tree, a tool window or Find Action.
@@ -87,11 +96,13 @@ export function keymap(): Map<string, string> {
   const map = new Map<string, string>();
   for (const c of registry.values()) for (const k of c.key?.split(" ") ?? []) map.set(k, c.id);
   if (setting("keymap.preset") === "vscode") {
+    const preset = new Set([...Object.keys(VSCODE_PRESET), "cmd+shift+p"]);
     for (const [k, id] of Object.entries(VSCODE_PRESET)) {
-      for (const [key, existing] of map) if (existing === id && !key.startsWith("cmd+shift+p")) map.delete(key);
+      for (const [key, existing] of map) if (existing === id && !preset.has(key)) map.delete(key);
       map.set(k, id);
     }
   }
+  if (setting("keymap.macZoomKeys")) for (const [k, id] of Object.entries(MAC_ZOOM_KEYS)) map.set(k, id);
   for (const k of setting<string[]>("keymap.removed") ?? []) map.delete(k);
   for (const [k, id] of Object.entries(setting<Record<string, string>>("keymap.bindings") ?? {})) map.set(k, id);
   return map;
@@ -101,7 +112,7 @@ export function keysFor(id: string): string[] {
   return [...keymap()].filter(([, cmd]) => cmd === id).map(([k]) => k);
 }
 
-const SYMBOLS: Record<string, string> = { cmd: "⌘", ctrl: "⌃", alt: "⌥", shift: "⇧", up: "↑", down: "↓", left: "←", right: "→", enter: "↩", escape: "⎋", backspace: "⌫" };
+const SYMBOLS: Record<string, string> = { cmd: "⌘", ctrl: "⌃", alt: "⌥", shift: "⇧", up: "↑", down: "↓", left: "←", right: "→", enter: "↩", escape: "⎋", backspace: "⌫", numpadadd: "NumPad+", numpadsubtract: "NumPad-", numpad0: "NumPad0" };
 export const formatKey = (key: string) =>
   key
     .split("+")
@@ -124,6 +135,10 @@ export function bindable(key: string): boolean {
   const parts = key.split("+");
   return parts.some((p) => p === "cmd" || p === "ctrl" || p === "alt") || /^f\d+$/.test(parts[parts.length - 1]) || key === "shift+f6" || key === "shift+escape";
 }
+
+let lastKey = { id: "", at: -Infinity };
+/// The command the key handler ran last and when (performance.now()).
+export const lastKeyCommand = () => lastKey;
 
 let capturing: { fn: (key: string) => void; invalid?: (key: string) => void } | null = null;
 /// Next keystroke for the Keymap page: "" for a bare Escape (cancel); a key that can never fire goes to `invalid`
@@ -177,6 +192,7 @@ export function installKeyHandler() {
       if (registry.get(id)?.editor && !editorHasFocus(e.target as HTMLElement)) return;
       e.preventDefault();
       e.stopPropagation();
+      lastKey = { id, at: performance.now() };
       runCommand(id);
     },
     true,

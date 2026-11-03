@@ -11,6 +11,7 @@ Element.prototype.scrollIntoView ??= () => {};
 import { allCommands, eventKey, keymap } from "../commands";
 import { MONACO_CONFLICTS } from "../editor";
 import { welcomeHints } from "../keymapref";
+import { updateSetting } from "../settings";
 import { state } from "../state";
 import { bottom } from "../ui";
 
@@ -110,6 +111,22 @@ const RUBYMINE_MACOS: [string, string, string][] = [
   ["Push", "push", "cmd+shift+k"],
   ["Next Change", "nextChange", "ctrl+alt+shift+down"],
   ["Previous Change", "prevChange", "ctrl+alt+shift+up"],
+  // View | Appearance | Zoom IDE, https://www.jetbrains.com/help/ruby/ide-zoom-level.html (macOS keymap)
+  ["Zoom In IDE", "zoomIn", "ctrl+alt+="],
+  ["Zoom Out IDE", "zoomOut", "ctrl+alt+-"],
+  ["Reset IDE Zoom", "zoomReset", "ctrl+alt+0"],
+  ["Expand", "expandRegion", "cmd+numpadadd"],
+  ["Collapse", "collapseRegion", "cmd+numpadsubtract"],
+  ["Expand Recursively", "expandRecursively", "cmd+alt+numpadadd"],
+  ["Collapse Recursively", "collapseRecursively", "cmd+alt+numpadsubtract"],
+  ["Expand All", "expandAll", "cmd+shift+numpadadd"],
+  ["Collapse All", "collapseAll", "cmd+shift+numpadsubtract"],
+  // The macOS reference card lists the main-keyboard keys too:
+  // https://resources.jetbrains.com/storage/products/rubymine/docs/RubyMine_ReferenceCard_mac.pdf
+  ["Expand code block", "expandRegion", "cmd+="],
+  ["Collapse code block", "collapseRegion", "cmd+-"],
+  ["Expand all", "expandAll", "cmd+shift+="],
+  ["Collapse all", "collapseAll", "cmd+shift+-"],
   ["Last Edit Location", "lastEditLocation", "cmd+shift+backspace"],
   ["Run To Cursor", "runToCursor", "alt+f9"],
   ["Introduce Variable", "extractVariable", "cmd+alt+v"],
@@ -140,6 +157,56 @@ describe("RubyMine macOS default keymap", () => {
     expect(km.has("cmd+alt+s")).toBe(false);
     expect(km.get("cmd+s")).toBe("saveAll");
     expect(km.has("cmd+shift+l")).toBe(false);
+  });
+
+  it("leaves the keys macOS owns to the menu bar and the system", () => {
+    const km = keymap();
+    const taken = ["cmd+h", "cmd+alt+h", "cmd+m", "cmd+q", "cmd+ctrl+f", "cmd+ctrl+space", "cmd+`", "cmd+tab", "cmd+space", "cmd+c", "cmd+v", "cmd+x", "cmd+z", "cmd+shift+z", "cmd+a", "alt+backspace"].filter((k) => km.has(k));
+    expect(taken).toEqual([]);
+  });
+
+  it("standard macOS zoom keys are opt-in and take ⌘= ⌘- ⌘0 from folding and Commit", async () => {
+    expect(keymap().get("cmd+0")).toBe("commitView");
+    await updateSetting("keymap.macZoomKeys", true);
+    const km = keymap();
+    expect([km.get("cmd+="), km.get("cmd+shift+="), km.get("cmd+-"), km.get("cmd+0")]).toEqual(["zoomIn", "zoomIn", "zoomOut", "zoomReset"]);
+    expect(km.get("ctrl+alt+=")).toBe("zoomIn");
+    expect(km.get("cmd+numpadadd")).toBe("expandRegion");
+    await updateSetting("keymap.macZoomKeys", undefined);
+  });
+
+  it("menu bar shows app shortcuts and find, but not other editor actions", async () => {
+    const { menuAccelerators } = await import("../main");
+    const accels = menuAccelerators();
+    expect(accels.zoomIn).toBe("ctrl+alt+=");
+    expect(accels.saveAll).toBe("cmd+s");
+    expect(accels.closeTab).toBe("cmd+w");
+    expect(accels.find).toBe("cmd+f");
+    expect(accels.deleteLine).toBeNull();
+    expect(accels.expandRegion).toBeNull();
+    expect("quit" in accels).toBe(false);
+  });
+
+  it("a menu shortcut for an editor action is ignored while a text field outside the editor has focus", async () => {
+    const { menuBlockedByFocus } = await import("../main");
+    const input = document.createElement("input");
+    const term = document.createElement("div");
+    term.className = "xterm";
+    const termInput = document.createElement("textarea");
+    term.append(termInput);
+    const monacoEl = document.createElement("div");
+    monacoEl.className = "monaco-editor";
+    const monacoInput = document.createElement("textarea");
+    monacoEl.append(monacoInput);
+    expect(menuBlockedByFocus("find", input)).toBe(true);
+    expect(menuBlockedByFocus("findNext", termInput)).toBe(true);
+    expect(menuBlockedByFocus("find", monacoInput)).toBe(false);
+    expect(menuBlockedByFocus("find", document.body)).toBe(false);
+    expect(menuBlockedByFocus("saveAll", input)).toBe(false);
+    const tree = document.createElement("div");
+    tree.id = "tree";
+    tree.tabIndex = 0;
+    expect(menuBlockedByFocus("find", tree)).toBe(true);
   });
 
   it("only unbinds Monaco defaults on keys Garnet owns", () => {

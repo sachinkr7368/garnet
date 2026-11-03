@@ -1,8 +1,9 @@
 import "./styles.css";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
-import { allCommands, commandIcon, commands, installKeyHandler, keyLabel, runCommand, runEditorAction, showPalette } from "./commands";
+import { allCommands, commandIcon, commands, editorHasFocus, installKeyHandler, keyLabel, keysFor, lastKeyCommand, runCommand, runEditorAction, showPalette } from "./commands";
 import { attachToProcess, debugView, evaluateSelection, flushBreakpoints, gotoBreakpoint, loadBreakpoints, restartDebug, resume, step, stopAllSessions, stopDebug, toggleBreakpoint, toggleBreakpointEnabled, viewBreakpoints } from "./debug";
 import { rerunAll, rerunFailed, testResultsView } from "./testresults";
 import {
@@ -29,15 +30,18 @@ import { importJetBrainsKeymap, showKeymapReference, welcomeHints } from "./keym
 import { editConfigurations, launch, loadRunConfigs, newConfig, pickConfiguration, rakeTask, rerun, runs, runTests, selected } from "./run";
 import { findInFiles, replaceInFiles, searchView } from "./search";
 import { loadCodeStyle } from "./codestyle";
-import { addRecentProject, askTrust, checkTrust, editableSettingsPath, isTrusted, loadSession, onSettingsChange, loadSettings, recentProjects, saveSession, setting, toggleTheme, updateSetting } from "./settings";
+import {
+  addRecentProject, askTrust, checkTrust, currentViewMode, editableSettingsPath, isTrusted, loadSession, modifyConfig, onSettingsChange, loadSettings, recentProjects, saveSession, setAppearance, setting, setViewMode,
+  setEditorFontSize, toggleTheme, updateSetting, zoomIDE, type ViewMode,
+} from "./settings";
 import { offerRestore, backupUnsaved } from "./hotexit";
 import { listenForQuit, quitFlow, type QuitHooks } from "./quit";
 import { openSettingsWindow } from "./settingsui";
 import { cloneDialog, createGist, createPullRequest, githubSignIn, openOnGitHub, refreshAccount } from "./github";
 import { openPullRequestByNumber, pullRequestsView, showPullRequests } from "./prs";
-import { initToolbar, pullCurrent, pushCurrent, refreshToolbar, showBranches, showProjects, showWorktrees } from "./toolbar";
+import { initToolbar, pullCurrent, pushCurrent, refreshToolbar, showBranches, showProjects, showThemeMenu, showWorktrees } from "./toolbar";
 import { abs, debounce, rel, state } from "./state";
-import { newTerminal, showTerminalPanel, terminals } from "./terminal";
+import { newTerminal, pasteIntoTerminal, showTerminalPanel, terminals } from "./terminal";
 import { expandedPaths, initTree, refreshTree, revealInTree, toggleRailsView, treeView } from "./tree";
 import { bottom, Dock, fileIconName, fuzzyScore, h, type PickItem, quickPick, rightbar, setupResizers, sidebar, statusSlot, toast } from "./ui";
 
@@ -221,6 +225,34 @@ function hideActiveToolWindow() {
 }
 Dock.afterHide = focusActiveTab;
 
+/// Distraction Free and Presentation Mode: tool windows, bars and tabs hidden; Presentation also goes full screen
+/// with a larger editor font (Settings › Appearance). Toggling the same mode again restores the layout.
+let beforeMode: { side: string | null; right: string | null; bottom: string | null; fullscreen: boolean } | null = null;
+async function toggleViewMode(mode: Exclude<ViewMode, "">) {
+  const win = getCurrentWindow();
+  const leaving = currentViewMode() === mode;
+  if (!beforeMode) {
+    beforeMode = { side: sidebar.active, right: rightbar.active, bottom: bottom.active, fullscreen: await win.isFullscreen().catch(() => false) };
+  }
+  const saved = beforeMode;
+  setViewMode(leaving ? "" : mode);
+  if (leaving) {
+    beforeMode = null;
+    if (saved.side) sidebar.show(saved.side);
+    if (saved.right) rightbar.show(saved.right);
+    if (saved.bottom) bottom.show(saved.bottom);
+  } else {
+    sidebar.hide();
+    rightbar.hide();
+    bottom.hide();
+  }
+  await win.setFullscreen(leaving ? saved.fullscreen : mode === "presentation" || saved.fullscreen).catch(() => {});
+  focusActiveTab();
+}
+
+const toggleSetting = (key: string) => () => updateSetting(key, setting(key) ? false : undefined);
+const GARNET_DOCS = "https://github.com/sachinkr7368/garnet#readme";
+
 async function importKeymap() {
   try {
     const xml = await invoke<string | null>("import_file", { title: "Import JetBrains Keymap", extension: "xml" });
@@ -245,6 +277,23 @@ commands(
   { id: "settings", title: "Preferences: Settings…", key: "cmd+,", run: () => openSettingsWindow() },
   { id: "quit", title: "File: Quit Garnet", run: () => quit() },
   { id: "toggleTheme", title: "View: Toggle Theme (Light/Dark)", run: toggleTheme },
+  { id: "themeMenu", title: "View: Theme…", run: showThemeMenu },
+  { id: "themeSystem", title: "View: Theme: System (follow macOS)", run: () => setAppearance("system") },
+  { id: "themeLight", title: "View: Theme: Light", run: () => setAppearance("light") },
+  { id: "themeDark", title: "View: Theme: Dark", run: () => setAppearance("dark") },
+  { id: "zoomIn", title: "View: Zoom In IDE", key: "ctrl+alt+=", run: () => zoomIDE(1) },
+  { id: "zoomOut", title: "View: Zoom Out IDE", key: "ctrl+alt+-", run: () => zoomIDE(-1) },
+  { id: "zoomReset", title: "View: Reset IDE Zoom", key: "ctrl+alt+0", run: () => zoomIDE(0) },
+  { id: "toggleToolbar", title: "View: Toggle Toolbar", run: toggleSetting("appearance.showToolbar") },
+  { id: "toggleToolWindowBars", title: "View: Toggle Tool Window Bars", run: toggleSetting("appearance.showToolWindowBars") },
+  { id: "toggleStatusBar", title: "View: Toggle Status Bar", run: toggleSetting("appearance.showStatusBar") },
+  { id: "distractionFree", title: "View: Toggle Distraction Free Mode", run: () => toggleViewMode("distractionFree") },
+  { id: "presentationMode", title: "View: Toggle Presentation Mode", run: () => toggleViewMode("presentation") },
+  { id: "toggleFullScreen", title: "View: Toggle Full Screen", run: async () => { const w = getCurrentWindow(); await w.setFullscreen(!(await w.isFullscreen())); } },
+  { id: "newWindow", title: "File: New Window", run: () => invoke("open_new_window", { path: "" }) },
+  { id: "closeWindow", title: "Window: Close Window", key: "cmd+shift+w", run: () => invoke("close_window") },
+  { id: "help", title: "Help: Garnet Help", run: () => invoke("open_url", { url: GARNET_DOCS }) },
+  { id: "reportIssue", title: "Help: Report an Issue…", run: () => invoke("open_url", { url: "https://github.com/sachinkr7368/garnet/issues/new" }) },
   { id: "settingsJson", title: "Preferences: Open Settings (JSON)", run: async () => openFile(await editableSettingsPath()) },
   { id: "keymapSettings", title: "Preferences: Keymap…", run: () => openSettingsWindow("Keymap") },
   { id: "importKeymap", title: "Preferences: Import JetBrains Keymap…", run: importKeymap },
@@ -298,8 +347,15 @@ commands(
   E("prevError", "Navigate: Previous Highlighted Error", "shift+f2", "editor.action.marker.prevInFiles"),
   E("refactorThis", "Refactor: Refactor This…", "ctrl+t", "editor.action.refactor"),
   E("highlightUsages", "Navigate: Highlight Usages in File", "cmd+shift+f7", "editor.action.wordHighlight.trigger"),
-  { id: "increaseFont", title: "View: Increase Font Size in All Editors", key: "ctrl+shift+.", run: () => updateSetting("editor.fontSize", Math.min(32, setting<number>("editor.fontSize") + 1)) },
-  { id: "decreaseFont", title: "View: Decrease Font Size in All Editors", key: "ctrl+shift+,", run: () => updateSetting("editor.fontSize", Math.max(8, setting<number>("editor.fontSize") - 1)) },
+  { id: "increaseFont", title: "View: Increase Font Size in All Editors", key: "ctrl+shift+.", run: () => setEditorFontSize(Math.min(32, setting<number>("editor.fontSize") + 1)) },
+  { id: "decreaseFont", title: "View: Decrease Font Size in All Editors", key: "ctrl+shift+,", run: () => setEditorFontSize(Math.max(8, setting<number>("editor.fontSize") - 1)) },
+  { id: "resetFont", title: "View: Reset Font Size", run: () => setEditorFontSize(undefined) },
+  E("expandRegion", "Code: Expand", "cmd+= cmd+numpadadd", "editor.unfold"),
+  E("collapseRegion", "Code: Collapse", "cmd+- cmd+numpadsubtract", "editor.fold"),
+  E("expandRecursively", "Code: Expand Recursively", "cmd+alt+= cmd+alt+numpadadd", "editor.unfoldRecursively"),
+  E("collapseRecursively", "Code: Collapse Recursively", "cmd+alt+- cmd+alt+numpadsubtract", "editor.foldRecursively"),
+  E("expandAll", "Code: Expand All", "cmd+shift+= cmd+shift+numpadadd", "editor.unfoldAll"),
+  E("collapseAll", "Code: Collapse All", "cmd+shift+- cmd+shift+numpadsubtract", "editor.foldAll"),
   { id: "projectView", title: "View: Project", key: "cmd+1", run: () => sidebar.activate("project") },
   { id: "findView", title: "View: Find", key: "cmd+3", run: () => bottom.activate("find") },
   { id: "runView", title: "View: Run", key: "cmd+4", run: () => bottom.activate("run") },
@@ -452,7 +508,7 @@ async function openProject(path: string) {
   await Promise.all([loadSettings(info.root), loadCodeStyle(info.root), checkTrust(info.root)]);
   document.body.classList.add("has-project");
   getCurrentWindow().setTitle(`${info.name} — Garnet`).catch(() => {});
-  addRecentProject(info.root);
+  void addRecentProject(info.root).then(() => syncMenu());
   sidebar.show("project");
   await loadBreakpoints();
   const session = await loadSession(info.root);
@@ -491,7 +547,71 @@ listen<{ count: number; ms: number }>("index-ready", (e) => {
   indexSlot.textContent = `${e.payload.count.toLocaleString()} files indexed`;
   indexSlot.title = `Indexed in ${e.payload.ms} ms`;
 });
-listen<string>("menu", (e) => runCommand(e.payload));
+/// Esc leaves Distraction Free and Presentation Mode unless something else (a widget, a dialog) used it.
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.defaultPrevented || !currentViewMode() || document.querySelector("#overlay-root > [data-modal]")) return;
+  void toggleViewMode(currentViewMode() as Exclude<ViewMode, "">);
+});
+
+/// Editor actions from the menu follow the key handler's focus rule: with focus in a field, the terminal or the
+/// Project tree, ⌘F/⌘G stay there instead of reaching the editor behind it.
+export const menuBlockedByFocus = (id: string, el = document.activeElement) =>
+  !!allCommands().find((c) => c.id === id)?.editor && !editorHasFocus(el as HTMLElement | null);
+
+/// Native menu bar: items are command ids, plus "recent:<path>". A shortcut the key handler already ran also
+/// reaches the menu when the web view passes it on, so that echo is dropped; dialogs block the menu like they
+/// block shortcuts.
+listen<string>("menu", (e) => {
+  const id = e.payload;
+  if (id === "recent:clear") return void modifyConfig<string[]>("recent.json", [], () => []).then(() => syncMenu());
+  if (id.startsWith("recent:")) return void switchProject(id.slice(7));
+  const last = lastKeyCommand();
+  if (last.id === id && performance.now() - last.at < 500) return;
+  if (document.querySelector("#overlay-root > [data-modal]") || menuBlockedByFocus(id)) return;
+  runCommand(id);
+});
+
+/// Editor actions whose shortcut the menu shows; the rest stay off the menu so text fields keep keys like ⌘⌫.
+const MENU_EDITOR_KEYS = new Set(["find", "replace", "findNext", "findPrevious"]);
+const CHECKS: Record<string, () => boolean> = {
+  themeSystem: () => setting("appearance.theme") === "system",
+  themeLight: () => setting("appearance.theme") === "light",
+  themeDark: () => setting("appearance.theme") === "dark",
+  toggleToolbar: () => !!setting("appearance.showToolbar"),
+  toggleToolWindowBars: () => !!setting("appearance.showToolWindowBars"),
+  toggleStatusBar: () => !!setting("appearance.showStatusBar"),
+  toggleBreadcrumbs: () => !!setting("editor.breadcrumbs"),
+  distractionFree: () => currentViewMode() === "distractionFree",
+  presentationMode: () => currentViewMode() === "presentation",
+};
+export const menuAccelerators = () =>
+  Object.fromEntries(allCommands().filter((c) => c.id !== "quit").map((c) => [c.id, !c.editor || MENU_EDITOR_KEYS.has(c.id) ? (keysFor(c.id)[0] ?? null) : null]));
+async function syncMenu() {
+  const checked = Object.fromEntries(Object.entries(CHECKS).map(([id, on]) => [id, on()]));
+  await invoke("set_menu_state", { state: { accelerators: menuAccelerators(), checked, recent: await recentProjects() } }).catch(() => {});
+}
+onSettingsChange(debounce(() => void syncMenu(), 50));
+
+/// A folder dropped on the window or the Dock icon opens like File › Open; with a project open it gets its own window.
+async function openDropped(paths: string[]) {
+  const dirs: string[] = [];
+  for (const p of paths) if (await api.listDir(p).then(() => true, () => false)) dirs.push(p);
+  if (!dirs.length) return;
+  if (!state.project) return switchProject(dirs[0]);
+  for (const d of dirs) await invoke("open_new_window", { path: d }).catch((e) => toast(`Cannot open ${d}: ${e}`, "error"));
+}
+// Until boot has taken the launch paths, it opens them itself.
+let launchPathsTaken = false;
+listen<string[]>("open-paths", () => launchPathsTaken && void invoke<string[]>("take_opened_paths").then(openDropped));
+try {
+  void getCurrentWebview().onDragDropEvent((e) => {
+    if (e.payload.type !== "drop") return;
+    const at = document.elementFromPoint(e.payload.position.x / devicePixelRatio, e.payload.position.y / devicePixelRatio);
+    if (!(at && pasteIntoTerminal(at, e.payload.paths))) void openDropped(e.payload.paths);
+  });
+} catch {
+  // no Tauri webview (tests)
+}
 void listenForQuit(quitHooks);
 window.addEventListener("garnet:open-settings", (e) => openSettingsWindow((e as CustomEvent<string>).detail));
 window.addEventListener("garnet:open-file", (e) => void openFile((e as CustomEvent<string>).detail));
@@ -510,8 +630,11 @@ async function boot() {
   await loadSettings();
   initUpdateCheck().catch(() => {});
   const smoke = await invoke<[string, boolean] | null>("smoke_target");
+  void syncMenu();
   const pending = smoke ? null : new URLSearchParams(location.search).get(PENDING_ROOT);
-  const initial = pending ?? (await api.initialPath());
+  const dropped = smoke ? [] : await invoke<string[]>("take_opened_paths").catch(() => [] as string[]);
+  launchPathsTaken = true;
+  const initial = pending ?? dropped?.[0] ?? (await api.initialPath());
   if (smoke && initial) {
     const { runSmoke } = await import("./smoke");
     return runSmoke(initial, smoke[1], openProject);

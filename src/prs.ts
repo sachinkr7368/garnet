@@ -606,7 +606,7 @@ function threadEl(p: PrDetail, t: Thread): HTMLElement {
       p.state === "OPEN" || t.isResolved ? h("button", { class: "btn small", onclick: () => resolveThread(p, t, !t.isResolved) }, t.isResolved ? "Unresolve" : "Resolve") : null,
     );
     if (t.isResolved && !expanded) return el.replaceChildren(head);
-    const reply = h("textarea", { class: "gh-textarea small", placeholder: "Reply…", rows: 1 });
+    const reply = h("textarea", { class: "gh-textarea small", placeholder: "Reply…", rows: 1, spellcheck: true });
     const send = h("button", { class: "btn small primary", hidden: true }, "Reply");
     reply.addEventListener("focus", () => ((reply.rows = 3), (send.hidden = false)));
     send.onclick = async () => {
@@ -643,7 +643,7 @@ function pendingEl(p: PrDetail, c: PendingComment, rerender: () => void) {
 }
 
 function composerEl(p: PrDetail, f: PrFile, at: { side: Side; start: number; end: number }, close: () => void) {
-  const text = h("textarea", { class: "gh-textarea", placeholder: "Leave a comment (Markdown)", rows: 4 });
+  const text = h("textarea", { class: "gh-textarea", placeholder: "Leave a comment (Markdown)", rows: 4, spellcheck: true });
   const error = h("div", { class: "gh-error" });
   const comment = (): PendingComment => ({ path: f.filename, side: at.side, line: at.end, ...(at.start !== at.end ? { startLine: at.start } : {}), body: text.value });
   const single = async () => {

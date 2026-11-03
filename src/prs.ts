@@ -7,7 +7,7 @@ import {
   type PrSummary, type ReviewEvent, type Side, type Thread,
 } from "./ghmodel";
 import { createPullRequest, currentLogin, ensureSignedIn, gh, gql, markdownEditor, modal, onAccountChange, onPullRequestCreated, refreshAccount, remoteRepo, renderHtml, signIn } from "./github";
-import { invoke } from "./ipc";
+import { api, invoke } from "./ipc";
 import { isTrusted } from "./settings";
 import { root, state } from "./state";
 import { fileIcon, h, icon, iconButton, quickPick, toast } from "./ui";
@@ -796,7 +796,7 @@ async function checkout(p: PrDetail) {
   if (!isTrusted()) return toast("Trust the project to use Git.", "error");
   const repo = await remoteRepo();
   if (!repo || `${repo.owner}/${repo.repo}`.toLowerCase() !== p.slug.toLowerCase()) return toast(`This project's origin is not ${p.slug}. Open a clone of ${p.slug} to check out the pull request.`, "error");
-  const git = (...args: string[]) => invoke<string>("git_run", { root: root(), args });
+  const git = (...args: string[]) => api.git(root(), ...args);
   await saveAll();
   if ((await git("status", "--porcelain", "--untracked-files=no")).trim()) return toast("You have uncommitted changes. Commit or stash them before checking out the pull request.", "error");
   const local = (await git("for-each-ref", "--format=%(refname:short)", "refs/heads")).split("\n").filter(Boolean);

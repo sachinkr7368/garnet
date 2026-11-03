@@ -3,7 +3,7 @@ vi.mock("../editor", async () => await import("./fakeEditor"));
 vi.mock("../debug", () => ({ debugSession: vi.fn(), sessionFor: () => null, stopSession: vi.fn() }));
 
 import { monaco } from "./fakeEditor";
-import { cachedSymbols, pullDiagnostics, request, startLsp, stopLsp } from "../lsp";
+import { cachedSymbols, lspBusy, pullDiagnostics, request, startLsp, stopLsp } from "../lsp";
 import { loadSettings, trustProject, updateSetting } from "../settings";
 import { state } from "../state";
 import { fake } from "./fakeIpc";
@@ -44,6 +44,22 @@ beforeEach(async () => {
 });
 
 describe("Ruby LSP lifecycle", () => {
+  it("a stop, exit or restart mid-index leaves no stale indexing progress", async () => {
+    const indexing = () => channels.at(-1)!.onmessage({ type: "message", body: JSON.stringify({ jsonrpc: "2.0", method: "$/progress", params: { token: "idx", value: { kind: "begin", title: "Indexing" } } }) });
+    await startLsp();
+    indexing();
+    expect(lspBusy()).toBe(true);
+    await startLsp();
+    expect(lspBusy()).toBe(false);
+    indexing();
+    channels.at(-1)!.onmessage({ type: "exit", code: 1 });
+    expect(lspBusy()).toBe(false);
+    await startLsp();
+    indexing();
+    await stopLsp();
+    expect(lspBusy()).toBe(false);
+  });
+
   it("ignores the previous server's exit after a restart", async () => {
     await startLsp();
     await startLsp();

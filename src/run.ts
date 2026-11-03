@@ -157,19 +157,22 @@ export async function loadRunConfigs() {
     selectedName = local?.selected || sharedSelected;
   }
   if (!configs.some((c) => c.name === selectedName)) selectedName = configs[0]?.name ?? "";
-  api
-    .runCapture(root(), "for m in rbenv asdf chruby-exec rvm mise; do command -v $m >/dev/null 2>&1 && echo $m; done", 20)
-    .then((out) => (detectedManagers = out.split("\n").filter(Boolean).map((m) => m.replace("-exec", ""))))
-    .catch(() => {});
+  if (isTrusted())
+    api
+      .runCapture(root(), "for m in rbenv asdf chruby-exec rvm mise; do command -v $m >/dev/null 2>&1 && echo $m; done", 20)
+      .then((out) => (detectedManagers = out.split("\n").filter(Boolean).map((m) => m.replace("-exec", ""))))
+      .catch(() => {});
   renderWidget();
 }
 
+/// Safe Mode keeps selections and edits in memory: .garnet/run.json was not read, so anything stored now (the defaults
+/// included) would shadow its configurations once the project is trusted.
 export async function saveRunConfigs(list = configs) {
   configs = list;
+  if (!isTrusted()) return renderWidget();
   const { local, shared } = splitConfigs(list);
   await writeLocal(root(), { selected: selectedName, configurations: local });
-  // ponytail: an untrusted project's .garnet/run.json was never read, so it is never written either
-  const text = isTrusted() ? projectFileText(projectRaw, sharedLoaded, shared) : null;
+  const text = projectFileText(projectRaw, sharedLoaded, shared);
   if (text !== null) {
     await api.createPath(`${root()}/.garnet`, true).catch(() => {});
     await api.writeFile(projectFile(root()), text);
@@ -376,6 +379,8 @@ let dockerCheck: Promise<string> | null = null;
 
 /// Empty when `docker compose` works; otherwise why Docker run targets are unavailable.
 export function dockerUnavailable(): Promise<string> {
+  // Every caller asks for Trust first; Safe Mode refusing to run commands says nothing about Docker.
+  if (!isTrusted()) return Promise.resolve("");
   dockerCheck ??= api
     .runCapture(root(), "command -v docker >/dev/null 2>&1 || { echo 'docker is not installed (not found on PATH)'; exit 0; }; docker compose version >/dev/null 2>&1 || { echo 'the docker compose plugin is not installed'; exit 0; }; docker info >/dev/null 2>&1 || echo 'the Docker daemon is not running'", 30)
     .then((out) => out.trim())
@@ -553,8 +558,9 @@ export function pickConfiguration(mode: "run" | "debug") {
 
 /// Configuration editor dialog
 
-export function editConfigurations() {
-  if (!state.project) return;
+/// Edits are written to the project's run configuration files, so editing waits for Trust.
+export async function editConfigurations() {
+  if (!state.project || !(await askTrust())) return;
   renderWidget();
   let draft: RunConfig[] = structuredClone(configs);
   let current = Math.max(0, draft.findIndex((c) => c.name === selectedName));

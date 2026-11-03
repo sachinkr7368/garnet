@@ -433,8 +433,11 @@ interface QuickPickOptions {
   value?: string;
   onAccept: (item: PickItem | undefined, query: string) => void;
   onChange?: (item: PickItem | undefined) => void;
+  onClose?: () => void;
   selected?: number;
 }
+
+const pickKey = (i: PickItem | undefined) => (i ? `${i.label}\0${i.description ?? ""}\0${JSON.stringify(i.data ?? null)}` : "");
 
 let closeActiveOverlay: (() => void) | null = null;
 
@@ -465,10 +468,12 @@ export function quickPick(opts: QuickPickOptions) {
   let selected = 0;
   let seq = 0;
   let first = true;
+  let shown: string | null = null;
 
   const close = () => {
     backdrop.remove();
     closeActiveOverlay = null;
+    opts.onClose?.();
     previousFocus?.focus?.();
   };
   closeActiveOverlay = close;
@@ -521,9 +526,13 @@ export function quickPick(opts: QuickPickOptions) {
       return;
     }
     if (mine !== seq) return;
+    // A refresh of the same query (late results) keeps the selected item; a new query starts at the top.
+    const keep = q === shown ? next.findIndex((i) => pickKey(i) === pickKey(items[selected])) : -1;
     items = next;
-    selected = first ? Math.min(opts.selected ?? 0, Math.max(0, next.length - 1)) : 0;
+    selected = keep >= 0 ? keep : first ? Math.min(opts.selected ?? 0, Math.max(0, next.length - 1)) : 0;
     first = false;
+    shown = q;
+    list.dataset.query = q;
     render();
   };
 
@@ -550,7 +559,7 @@ export function quickPick(opts: QuickPickOptions) {
   input.focus();
   input.select();
   update();
-  return { close, refresh: update };
+  return { close, refresh: update, query: () => input.value };
 }
 
 export function inputBox(placeholder: string, value = "", selectUntil?: number): Promise<string | null> {

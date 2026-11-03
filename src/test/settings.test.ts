@@ -154,6 +154,20 @@ describe("trust", () => {
     expect(fake.trustedFlag).toBe(false);
   });
 
+  it("Trust Project tells the backend before announcing it, and a saved trust is restored on the next launch", async () => {
+    await loadSettings(ROOT);
+    expect(await checkTrust(ROOT)).toBe(false);
+    let flagWhenAnnounced: boolean | null = null;
+    const onTrusted = () => (flagWhenAnnounced = fake.trustedFlag);
+    window.addEventListener("garnet:trusted", onTrusted);
+    await trustProject(ROOT);
+    window.removeEventListener("garnet:trusted", onTrusted);
+    expect(flagWhenAnnounced).toBe(true);
+    fake.trustedFlag = false;
+    expect(await checkTrust(ROOT)).toBe(true);
+    expect(fake.trustedFlag).toBe(true);
+  });
+
   it("never stores trust in the project", async () => {
     await loadSettings(ROOT);
     await trustProject(ROOT, true);

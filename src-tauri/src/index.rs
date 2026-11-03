@@ -92,7 +92,7 @@ fn rank(files: &[String], query: &str, limit: usize) -> Vec<String> {
         return files.iter().take(limit).cloned().collect();
     }
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
     let mut hits = pattern.match_list(files.iter(), &mut matcher);
     hits.truncate(limit);
     hits.into_iter().map(|(p, _)| p.clone()).collect()
@@ -124,15 +124,17 @@ mod tests {
     }
 
     #[test]
-    fn rank_is_fuzzy_smart_case_and_limited() {
+    fn rank_is_fuzzy_case_insensitive_and_limited() {
         let files: Vec<String> = ["app/controllers/posts_controller.rb", "app/models/post.rb", "app/views/posts/index.html.erb", "config/routes.rb"]
             .map(String::from)
             .to_vec();
         assert_eq!(rank(&files, "", 2), files[..2].to_vec());
         assert_eq!(rank(&files, "models/post", 10), vec!["app/models/post.rb"]);
         assert_eq!(rank(&files, "pc", 10)[0], "app/controllers/posts_controller.rb");
-        assert!(rank(&files, "Routes", 10).is_empty());
+        assert_eq!(rank(&files, "Routes", 10), vec!["config/routes.rb"]);
         assert_eq!(rank(&files, "routes", 10), vec!["config/routes.rb"]);
+        assert!(rank(&files, "Post", 10).contains(&"app/models/post.rb".to_string()));
+        assert_eq!(rank(&files, "PostsController", 10)[0], "app/controllers/posts_controller.rb");
         assert_eq!(rank(&files, "rb", 1).len(), 1);
         assert!(rank(&files, "zzz", 10).is_empty());
     }

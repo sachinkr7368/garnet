@@ -13,7 +13,8 @@ pub fn user_shell() -> String {
 
 /// Environment of the user's interactive login shell in `cwd`, so rbenv/asdf/mise/chruby
 /// shims resolve the same way they do in Terminal. Captured once per project root, and only for a trusted project
-/// (the login shell runs the project's .envrc and version manager hooks); until then Garnet's own environment.
+/// (version managers in the login shell read the project's version files, and mise can run its config); until then
+/// Garnet's own environment.
 pub fn shell_env(cwd: &Path) -> HashMap<String, String> {
     let trusted = crate::git::trusted();
     let mut cache = CACHE.lock().unwrap();
@@ -22,7 +23,7 @@ pub fn shell_env(cwd: &Path) -> HashMap<String, String> {
             return env.clone();
         }
     }
-    let mut env = trusted.then(|| capture(cwd)).flatten().unwrap_or_else(|| std::env::vars().collect());
+    let mut env = trusted.then(|| capture(cwd)).flatten().unwrap_or_else(|| inherited(parent_env()).into_iter().collect());
     env.entry("LANG".into()).or_insert_with(|| "en_US.UTF-8".into());
     if trusted {
         *cache = Some((cwd.to_path_buf(), env.clone()));
@@ -30,11 +31,41 @@ pub fn shell_env(cwd: &Path) -> HashMap<String, String> {
     env
 }
 
+/// Drops when trust is revoked or another project opens, so a trusted capture is never served afterwards.
+pub fn clear_cache() {
+    *CACHE.lock().unwrap() = None;
+}
+
+/// Ruby and version-manager state of the shell that launched Garnet: mise's `__MISE_*` record of its PATH changes
+/// (a login shell that inherits it skips mise and leaves the system Ruby first), direnv's record of the directory it
+/// loaded, and another project's Bundler/Ruby selection.
+fn is_parent_shell_state(key: &str) -> bool {
+    key.starts_with("__MISE_")
+        || matches!(
+            key,
+            "DIRENV_DIFF" | "DIRENV_DIR" | "DIRENV_FILE" | "DIRENV_WATCHES" | "BUNDLE_GEMFILE" | "BUNDLE_BIN_PATH" | "RUBYOPT" | "RBENV_VERSION" | "ASDF_RUBY_VERSION" | "RUBY_AUTO_VERSION"
+        )
+}
+
+/// The environment a login shell or terminal inherits from Garnet: Garnet's own, minus the launching shell's state.
+/// Garnet's own environment; std::env::vars() panics on a non-UTF-8 entry, so those are skipped.
+pub fn parent_env() -> impl Iterator<Item = (String, String)> {
+    std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+}
+
+pub fn inherited(parent: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
+    parent.into_iter().filter(|(k, _)| !is_parent_shell_state(k)).collect()
+}
+
+fn login_shell(cwd: &Path, script: &str, parent: impl IntoIterator<Item = (String, String)>) -> Command {
+    let mut cmd = Command::new(user_shell());
+    cmd.args(["-ilc", script]).current_dir(cwd).env_clear().envs(inherited(parent));
+    cmd
+}
+
 fn capture(cwd: &Path) -> Option<HashMap<String, String>> {
     const MARK: &str = "__GARNET_ENV__";
-    let mut child = Command::new(user_shell())
-        .args(["-ilc", &format!("printf '{MARK}'; env -0")])
-        .current_dir(cwd)
+    let mut child = login_shell(cwd, &format!("printf '{MARK}'; env -0"), parent_env())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -99,6 +130,31 @@ mod tests {
         assert!(which(&dir, "definitely-not-a-program-xyz").is_none());
         let out = command(&dir, "/bin/sh").args(["-c", "pwd -P"]).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), std::fs::canonicalize(&dir).unwrap().to_string_lossy());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn login_shell_runs_only_after_trust_and_drops_the_parent_shells_mise_state() {
+        let _g = crate::git::GLOBALS.lock().unwrap();
+        let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("garnet-env-trust-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let in_dir = |env: &HashMap<String, String>| env.get("PWD").and_then(|p| std::fs::canonicalize(p).ok()).as_deref() == Some(dir.as_path());
+        crate::git::TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(!in_dir(&shell_env(&dir)), "no login shell before trust");
+        crate::git::TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(in_dir(&shell_env(&dir)), "trusting refreshes the environment from the login shell");
+        crate::git::TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(!in_dir(&shell_env(&dir)), "the trusted capture is not served after trust is revoked");
+        let parent = ["PATH", "HOME", "__MISE_DIFF", "__MISE_ORIG_PATH", "DIRENV_DIFF", "DIRENV_DIR", "BUNDLE_GEMFILE", "RUBYOPT", "RBENV_VERSION", "ASDF_RUBY_VERSION", "RUBY_AUTO_VERSION", "MISE_SHELL"]
+            .map(|k| (k.to_string(), "x".to_string()));
+        let mut passed: Vec<String> = login_shell(&dir, "true", parent).get_envs().map(|(k, _)| k.to_string_lossy().into_owned()).collect();
+        passed.sort();
+        assert_eq!(passed, ["HOME", "MISE_SHELL", "PATH"]);
+        crate::git::TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        shell_env(&dir);
+        clear_cache();
+        assert!(CACHE.lock().unwrap().is_none());
+        crate::git::TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

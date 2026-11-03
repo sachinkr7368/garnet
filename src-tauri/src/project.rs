@@ -43,6 +43,7 @@ pub async fn open_project(app: AppHandle, path: String) -> Result<ProjectInfo, S
         return Err(format!("{path} is not a folder"));
     }
     crate::git::TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+    env::clear_cache();
     app.state::<Ptys>().kill_all();
     app.state::<Lsp>().stop();
     // A reload (project switch) loses the webview's connection list; close them so open transactions release their locks.
@@ -58,6 +59,9 @@ pub async fn open_project(app: AppHandle, path: String) -> Result<ProjectInfo, S
 /// Runs a shell command in the project's login-shell environment and returns stdout.
 #[tauri::command]
 pub async fn run_capture(root: String, command: String, timeout_secs: Option<u64>) -> Result<String, String> {
+    if !crate::git::trusted() {
+        return Err("Trust project to run commands".into());
+    }
     let root_path = PathBuf::from(&root);
     let mut cmd = tokio::task::spawn_blocking(move || env::tokio_command(&root_path, "/bin/sh"))
         .await
@@ -283,6 +287,19 @@ pub fn smoke_export_path(ext: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_capture_refuses_until_the_project_is_trusted() {
+        let _g = crate::git::GLOBALS.lock().unwrap();
+        let root = std::env::temp_dir().to_string_lossy().into_owned();
+        crate::git::TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let refused = tauri::async_runtime::block_on(run_capture(root.clone(), "echo ran".into(), Some(5)));
+        assert_eq!(refused, Err("Trust project to run commands".to_string()));
+        crate::git::TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let ran = tauri::async_runtime::block_on(run_capture(root, "echo ran".into(), Some(30)));
+        crate::git::TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(ran.unwrap().trim(), "ran");
+    }
 
     #[test]
     fn timed_out_report_keeps_checks_and_names_the_step() {

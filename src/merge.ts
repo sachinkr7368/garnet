@@ -27,17 +27,21 @@ export async function runGitOp(label: string, args: string[]): Promise<boolean> 
   }
 }
 
+type Op = Exclude<OpState["op"], "">;
+const ABORT: Record<Op, string[]> = { merge: ["merge", "--abort"], rebase: ["rebase", "--abort"], "cherry-pick": ["cherry-pick", "--abort"], revert: ["revert", "--abort"] };
+const CONTINUE: Record<Op, string[]> = { merge: ["commit", "--no-edit"], rebase: ["rebase", "--continue"], "cherry-pick": ["cherry-pick", "--continue"], revert: ["revert", "--continue"] };
+
 export async function abortOperation(op: OpState["op"]) {
   if (!op) return;
   if (!(await ask(`Abort the ${op}? Changes made by it are discarded and the branch returns to where it was.`, { kind: "warning", okLabel: "Abort", cancelLabel: "Cancel" }))) return;
   closeList();
-  await runGitOp(`Abort ${op}`, [op, "--abort"]);
+  await runGitOp(`Abort ${op}`, ABORT[op]);
 }
 
 export async function continueOperation(op: OpState["op"]) {
   if (!op) return;
   closeList();
-  const ok = await runGitOp(`Continue ${op}`, op === "merge" ? ["commit", "--no-edit"] : [op, "--continue"]);
+  const ok = await runGitOp(`Continue ${op}`, CONTINUE[op]);
   if (ok) {
     const st = await api.gitOpState(root()).catch(() => null);
     if (st?.conflicts.length) showConflicts();
@@ -50,7 +54,7 @@ export async function acceptSide(path: string, side: "ours" | "theirs") {
     const exists = await api.gitFileAt(root(), side === "ours" ? ":2" : ":3", path);
     if (exists === null) await git("rm", "-q", "--", path);
     else {
-      await git("checkout", `--${side}`, "--", path);
+      await git("checkout", side === "ours" ? "--ours" : "--theirs", "--", path);
       await git("add", "--", path);
     }
     toast(`${basename(path)}: accepted ${side === "ours" ? "yours" : "theirs"}.`);

@@ -104,6 +104,8 @@ async function onServerRequest(msg: Json) {
 const progress = new Map<string | number, { title: string; pct?: number }>();
 /// "indexing files 39%" from a $/progress title like "Ruby LSP: Indexing files", without repeating the server name.
 export const progressLabel = (title: string, pct?: number) => `${title.replace(/^Ruby LSP:?\s*/i, "")}${pct !== undefined ? ` ${pct}%` : ""}`.trim();
+/// ruby-lsp reports work in progress (indexing): an empty workspace/symbol reply may only mean "not indexed yet".
+export const lspBusy = () => progress.size > 0;
 
 function onNotification(msg: Json) {
   const p = msg.params;
@@ -147,6 +149,7 @@ function onEvent(ev: RpcEvent) {
   if (ev.type === "exit") {
     ready = false;
     running = false;
+    progress.clear();
     for (const p of pending.values()) p.reject(new Error("Ruby LSP exited"));
     pending.clear();
     setStatus("Ruby LSP stopped", "off");
@@ -194,6 +197,7 @@ export async function startLsp(opts: { launcher?: boolean } = {}) {
   if (gen !== generation) return;
   stopping = false;
   stderr.length = 0;
+  progress.clear();
   setStatus("Ruby LSP: starting", "busy");
   const channel = new Channel<RpcEvent>();
   channel.onmessage = (ev) => gen === generation && onEvent(ev);
@@ -256,6 +260,7 @@ export async function stopLsp() {
   notify("exit", null);
   ready = false;
   running = false;
+  progress.clear();
   await invoke("lsp_stop");
 }
 
@@ -709,11 +714,15 @@ export async function fileStructurePopup() {
 
 export function workspaceSymbolsPopup(kinds?: number[]) {
   if (!ready) return toast("Ruby LSP is not running.");
+  let inflight: monaco.CancellationTokenSource | null = null;
   quickPick({
     placeholder: kinds ? "Go to class or module" : "Go to symbol in project (classes, modules, methods)",
+    onClose: () => inflight?.cancel(),
     items: async (query): Promise<PickItem[]> => {
+      inflight?.cancel();
       if (!query.trim()) return [];
-      const res: Json[] | null = await request("workspace/symbol", { query }).catch(() => null);
+      inflight = new monaco.CancellationTokenSource();
+      const res: Json[] | null = await request("workspace/symbol", { query }, inflight.token).catch(() => null);
       return (res ?? []).filter((s) => !kinds || kinds.includes(s.kind)).slice(0, 200).map((s) => ({
         label: s.name,
         description: s.containerName ?? "",

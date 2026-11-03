@@ -15,11 +15,14 @@ pub fn trusted() -> bool {
     TRUSTED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// The project's shell environment and Ruby run project code (rbenv/asdf/mise, .envrc, bundler), so they are only
-/// captured once the project is trusted.
+/// The project's shell environment and Ruby run project code (version managers, bundler), so they are only captured
+/// once the project is trusted, and forgotten when trust is revoked.
 #[tauri::command]
 pub fn git_set_trusted(index: tauri::State<'_, crate::index::Index>, trusted: bool) {
     TRUSTED.store(trusted, std::sync::atomic::Ordering::SeqCst);
+    if !trusted {
+        crate::env::clear_cache();
+    }
     if let (true, Ok(root)) = (trusted, index.root()) {
         std::thread::spawn(move || {
             crate::env::shell_env(&root);
@@ -1183,6 +1186,62 @@ mod tests {
         assert!(block(git_run(root.clone(), s(&["fetch", "origin"]))).is_ok(), "configured remotes work");
         assert!(!dir.join("pwned").exists());
         std::fs::remove_dir_all(&other).unwrap();
+        TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// src/test/gitrunargv.test.ts extracts every argv the UI sends through git_run into this fixture ("<v>" marks a
+    /// runtime value); each must pass the allowlist, with its option values glued to their flags.
+    #[test]
+    fn every_ui_git_run_argv_passes_the_allowlist() {
+        let wt = std::env::temp_dir().join(format!("garnet-argv-wt-{}", std::process::id()));
+        let fixture: Vec<Vec<String>> = serde_json::from_str(include_str!("../../src/test/fixtures/git-run-argv.json")).unwrap();
+        assert!(fixture.len() > 50);
+        for shape in fixture {
+            let (sub, action) = (shape[0].as_str(), shape.get(1).map(String::as_str).unwrap_or(""));
+            let (mut positional, mut paths) = (0, false);
+            let argv: Vec<String> = shape
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    paths |= a == "--";
+                    let value = i > 0 && takes_value(sub, action, &shape[i - 1]);
+                    if i > 0 && !paths && !value && !a.starts_with('-') {
+                        positional += 1;
+                    }
+                    match a.as_str() {
+                        "<v>" if paths => "a.rb".into(),
+                        "<v>" if value => "1".into(),
+                        "<v>" if NETWORK.contains(&sub) && positional == 1 => "origin".into(),
+                        "<v>" if sub == "worktree" && action == "add" && positional == 2 => wt.to_string_lossy().into_owned(),
+                        "<v>" => "main".into(),
+                        _ => a.clone(),
+                    }
+                })
+                .collect();
+            assert_eq!(check_run_args(&argv, &["origin".to_string()]), Ok(()), "{argv:?}");
+            let stuck = stuck_values(&argv);
+            let end = argv.iter().position(|a| a == "--").unwrap_or(argv.len());
+            let glued: Vec<String> = (1..end).filter(|&i| takes_value(sub, action, &argv[i - 1])).map(|i| format!("{}{}", argv[i - 1], argv[i])).collect();
+            assert_eq!(stuck.len(), argv.len() - glued.len(), "{argv:?} -> {stuck:?}");
+            assert!(glued.iter().all(|g| stuck.contains(g)), "{argv:?} -> {stuck:?}");
+        }
+    }
+
+    #[test]
+    fn shelve_and_unshelve_through_git_run() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let _g = GLOBALS.lock().unwrap();
+        let (dir, root, sh) = repo("shelve");
+        sh("echo a > a.rb && echo b > b.rb && git add . && git commit -qm init && echo a2 > a.rb && echo b2 > b.rb && git add a.rb");
+        TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let run = |v: &[&str]| block(git_run(root.clone(), s(v)));
+        run(&["stash", "push", "--include-untracked", "-m", "-m shelf", "--", "a.rb"]).unwrap();
+        assert_eq!(run(&["stash", "list", "--format=%gd%x1f%s"]).unwrap().trim(), "stash@{0}\x1fOn main: -m shelf");
+        assert_eq!(std::fs::read_to_string(dir.join("b.rb")).unwrap(), "b2\n", "only the selected path is shelved");
+        run(&["stash", "pop", "--index", "stash@{0}"]).unwrap();
+        assert_eq!(run(&["stash", "list"]).unwrap(), "");
+        assert_eq!(run(&["status", "--porcelain", "--untracked-files=no"]).unwrap(), "M  a.rb\n M b.rb\n");
         TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
         std::fs::remove_dir_all(&dir).unwrap();
     }

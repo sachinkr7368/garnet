@@ -17,7 +17,7 @@ import { abortOperation, continueOperation, showConflicts } from "./merge";
 import { api, invoke } from "./ipc";
 import { fileStructurePopup, findUsages, goToImplementation, goToTypeDefinition, lspLogView, lspReady, request, outlineView, problemsView, startLsp, stopLsp, workspaceSymbolsPopup } from "./lsp";
 import { goToTest, loadRoutes, routesView, showRelated } from "./rails";
-import "./db";
+import { dbProjectOpened } from "./db";
 import "./railsprovider";
 import { runRailsGenerator } from "./generators";
 import { loadMigrations, migrationsView } from "./migrations";
@@ -426,6 +426,7 @@ async function openProject(path: string) {
   renderWelcome();
   refreshGit();
   refreshToolbar();
+  void dbProjectOpened();
   if (isTrusted()) {
     loadRunConfigs();
     if (setting("ruby.lspEnabled")) startLsp();

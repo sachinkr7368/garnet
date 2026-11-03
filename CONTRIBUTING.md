@@ -97,7 +97,10 @@ smoke run proves breakpoints survive a restart).
 The database checks use the app's `config/database.yml` (SQLite `development`
 and `test`, with a `posts` table): they connect, page through 150 temporary rows,
 run console queries, check that `test` blocks writes and that `DROP` asks first
-(answered with Cancel), export CSV, and delete what they added. The Rails tools
+(answered with Cancel), export CSV, and delete what they added. They also edit a
+cell on one of those rows and submit it, and check the backend's own guards:
+two statements in one string are refused, `DROP` needs a confirmation token,
+and cancel ignores a query id that isn't running. The Rails tools
 checks list generators, preview `scaffold --pretend` (nothing is created), read
 `db:migrate:status`, open the Rails project view and Cmd+click a partial and an
 i18n key (temporary files, removed afterwards). GitHub checks are read-only: gh

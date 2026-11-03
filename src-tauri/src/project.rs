@@ -45,6 +45,8 @@ pub async fn open_project(app: AppHandle, path: String) -> Result<ProjectInfo, S
     crate::git::git_set_trusted(false);
     app.state::<Ptys>().kill_all();
     app.state::<Lsp>().stop();
+    // A reload (project switch) loses the webview's connection list; close them so open transactions release their locks.
+    app.state::<crate::db::Db>().close_all().await;
     app.state::<Index>().set_root(root.clone());
     let watcher = watch::start(app.clone(), root.clone()).map_err(e2s)?;
     *app.state::<watch::Watch>().0.lock().unwrap() = Some(watcher);

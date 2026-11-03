@@ -403,9 +403,8 @@ export async function stashChanges() {
 /// Restores the staged state too (--index); when that can't apply, falls back to a plain pop/apply like RubyMine.
 async function applyStash(name: string, pop: boolean) {
   const label = pop ? "Unshelve" : "Apply shelved changes";
-  const verb = pop ? "pop" : "apply";
-  const ok = await git("stash", verb, "--index", name).then((out) => (toast(`${label}: ${out.trim().split("\n").pop() || "done"}`), true), () => false);
-  if (!ok) await runGitOp(label, ["stash", verb, name]);
+  const ok = await git(...(pop ? ["stash", "pop", "--index", name] : ["stash", "apply", "--index", name])).then((out) => (toast(`${label}: ${out.trim().split("\n").pop() || "done"}`), true), () => false);
+  if (!ok) await runGitOp(label, pop ? ["stash", "pop", name] : ["stash", "apply", name]);
   refresh();
   reload();
 }

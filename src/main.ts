@@ -7,7 +7,7 @@ import { attachToProcess, debugView, evaluateSelection, flushBreakpoints, gotoBr
 import { rerunAll, rerunFailed, testResultsView } from "./testresults";
 import {
   activeTab, allTabs, closeActive, closeAll, cycleTab, diffActive, events, goToDiff, handleFsChanged, monaco, navigateBack, navigateForward, openFile,
-  dirtyBuffers, focusActiveTab, recentFileList, recentLocations, restoreBuffer, restoreRecentFiles, saveActive, saveAll, targetEditor, unsavedTitles,
+  dirtyBuffers, focusActiveTab, forgetRecentFile, recentFileList, recentLocations, restoreBuffer, restoreRecentFiles, saveActive, saveAll, targetEditor, unsavedTitles,
 } from "./editor";
 import {
   blameCurrentLine, commitView, compareWithBranch, diffActiveFile, gitOpState, goToChange, onGitChanged, refreshGit, rollbackLines, showChangeAtCaret, stageHunkAtCaret,
@@ -15,7 +15,7 @@ import {
 import { gitLogView, reload as reloadGitLog, showGitLog, stashChanges, unstashChanges } from "./gitlog";
 import { abortOperation, continueOperation, showConflicts } from "./merge";
 import { api, invoke } from "./ipc";
-import { fileStructurePopup, findUsages, goToImplementation, goToTypeDefinition, lspLogView, lspReady, request, outlineView, problemsView, startLsp, stopLsp, workspaceSymbolsPopup } from "./lsp";
+import { fileStructurePopup, findUsages, goToImplementation, goToTypeDefinition, lspBusy, lspLogView, lspReady, request, outlineView, problemsView, startLsp, stopLsp, workspaceSymbolsPopup } from "./lsp";
 import { goToTest, loadRoutes, routesView, showRelated } from "./rails";
 import { dbProjectOpened } from "./db";
 import "./railsprovider";
@@ -50,7 +50,7 @@ sidebar.add({ id: "structure", title: "Structure", icon: "symbol-structure", com
 sidebar.add({ id: "pullRequests", title: "Pull Requests", icon: "git-pull-request", command: "githubPullRequests", el: pullRequestsView, onShow: () => showPullRequests() });
 
 bottom.add({ id: "terminal", title: "Terminal", icon: "terminal", command: "terminalView", el: terminals.el, onShow: showTerminalPanel });
-bottom.add({ id: "run", title: "Run", icon: "play", command: "runView", el: runs.el, onShow: () => runs.fitActive() });
+bottom.add({ id: "run", title: "Run", icon: "play", command: "runView", el: runs.el, onShow: () => (isTrusted() || runs.items.length ? runs.fitActive() : runs.showGate("Trust project to run configurations.")) });
 bottom.add({ id: "tests", title: "Test Results", icon: "beaker", command: "testResultsView", el: testResultsView });
 bottom.add({ id: "find", title: "Find", icon: "search", command: "findView", el: searchView });
 bottom.add({ id: "problems", title: "Problems", icon: "warning", command: "problemsView", el: problemsView });
@@ -112,7 +112,8 @@ function pickPaths(placeholder: string, paths: string[], selectedIndex = 0) {
     placeholder,
     selected: selectedIndex,
     items: paths.map((p) => ({ label: p.split("/").pop()!, description: rel(p), icon: fileIconName(p), data: p })),
-    onAccept: (item) => item && openFile(item.data as string),
+    // A file that no longer opens (deleted, moved) leaves the list.
+    onAccept: (item) => item && openFile(item.data as string).then(() => activeTab()?.path !== item.data && forgetRecentFile(item.data as string)),
   });
 }
 
@@ -131,24 +132,32 @@ function searchEverywhere() {
   if (!state.project) return showPalette();
   // Files and actions render at once; workspace symbols are added when ruby-lsp answers (it can be busy indexing).
   const symbols = new Map<string, Json[]>();
-  let inflight: monaco.CancellationTokenSource | null = null;
+  let inflight: { q: string; cts: monaco.CancellationTokenSource } | null = null;
+  const refreshIf = (q: string) => picker.query() === q && void picker.refresh();
+  const fetchSymbols = (q: string) => {
+    inflight?.cts.cancel();
+    const mine = (inflight = { q, cts: new monaco.CancellationTokenSource() });
+    request<Json[] | null>("workspace/symbol", { query: q }, mine.cts.token).then(
+      (res) => {
+        if (inflight === mine) inflight = null;
+        // ponytail: an empty reply while ruby-lsp is indexing is retried once a second for as long as the query is shown
+        if (!res?.length && lspBusy()) return void setTimeout(() => picker.query() === q && !symbols.has(q) && inflight?.q !== q && fetchSymbols(q), 1000);
+        symbols.set(q, res ?? []);
+        refreshIf(q);
+      },
+      () => {
+        if (inflight === mine) inflight = null;
+        if (!mine.cts.token.isCancellationRequested) symbols.set(q, []);
+        refreshIf(q);
+      },
+    );
+  };
   const picker = quickPick({
     placeholder: "Search everywhere: files, actions, symbols",
+    onClose: () => inflight?.cts.cancel(),
     items: async (q): Promise<PickItem[]> => {
       if (!q.trim()) return recentFileList().slice(0, 20).map((p) => ({ label: p.split("/").pop()!, description: rel(p), icon: fileIconName(p), data: { file: p } }));
-      if (lspReady() && !symbols.has(q)) {
-        symbols.set(q, []);
-        inflight?.cancel();
-        inflight = new monaco.CancellationTokenSource();
-        request<Json[] | null>("workspace/symbol", { query: q }, inflight.token).then(
-          (res) => {
-            if (!res?.length) return;
-            symbols.set(q, res);
-            void picker.refresh();
-          },
-          () => symbols.delete(q),
-        );
-      }
+      if (lspReady() && !symbols.has(q) && inflight?.q !== q) fetchSymbols(q);
       const files = await api.findFiles(q, 30);
       const actions = allCommands()
         .map((c) => ({ c, s: fuzzyScore(q, c.title) }))
@@ -464,7 +473,7 @@ async function openProject(path: string) {
   if (isTrusted() && session?.bottom && setting("appearance.restoreBottomPanel")) bottom.show(session.bottom);
   for (const p of session?.tabs ?? []) await openFile(p).catch(() => {});
   if (session?.active) await openFile(session.active).catch(() => {});
-  if (session?.recent?.length) restoreRecentFiles(session.recent);
+  if (session?.recent?.length) restoreRecentFiles((await Promise.all(session.recent.map((p) => api.canonicalPath(p).then(() => p, () => "")))).filter(Boolean));
   void offerRestore(info.root, restoreBuffer);
   events.tabsChanged.on(persistSession);
   events.activated.on(persistSession);

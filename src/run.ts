@@ -151,26 +151,28 @@ export async function loadRunConfigs() {
   sharedLoaded = splitConfigs(mergeConfigs([], shared)).shared;
   if (!local && !projectRaw) {
     configs = defaults();
-    // Untrusted, .garnet/run.json was not read: storing defaults now would shadow its configurations once trusted.
-    if (configs.length && isTrusted()) await saveRunConfigs();
+    if (configs.length) await saveRunConfigs();
   } else {
     configs = mergeConfigs(local ? validList(local.configurations, "Run configurations") : [], shared);
     selectedName = local?.selected || sharedSelected;
   }
   if (!configs.some((c) => c.name === selectedName)) selectedName = configs[0]?.name ?? "";
-  api
-    .runCapture(root(), "for m in rbenv asdf chruby-exec rvm mise; do command -v $m >/dev/null 2>&1 && echo $m; done", 20)
-    .then((out) => (detectedManagers = out.split("\n").filter(Boolean).map((m) => m.replace("-exec", ""))))
-    .catch(() => {});
+  if (isTrusted())
+    api
+      .runCapture(root(), "for m in rbenv asdf chruby-exec rvm mise; do command -v $m >/dev/null 2>&1 && echo $m; done", 20)
+      .then((out) => (detectedManagers = out.split("\n").filter(Boolean).map((m) => m.replace("-exec", ""))))
+      .catch(() => {});
   renderWidget();
 }
 
+/// Safe Mode keeps selections and edits in memory: .garnet/run.json was not read, so anything stored now (the defaults
+/// included) would shadow its configurations once the project is trusted.
 export async function saveRunConfigs(list = configs) {
   configs = list;
+  if (!isTrusted()) return renderWidget();
   const { local, shared } = splitConfigs(list);
   await writeLocal(root(), { selected: selectedName, configurations: local });
-  // ponytail: an untrusted project's .garnet/run.json was never read, so it is never written either
-  const text = isTrusted() ? projectFileText(projectRaw, sharedLoaded, shared) : null;
+  const text = projectFileText(projectRaw, sharedLoaded, shared);
   if (text !== null) {
     await api.createPath(`${root()}/.garnet`, true).catch(() => {});
     await api.writeFile(projectFile(root()), text);

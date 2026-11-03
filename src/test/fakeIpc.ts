@@ -69,6 +69,7 @@ export const api = new Proxy(
     configPath: async (name: string) => `/config/${name}`,
     canonicalPath: async (path: string) => path.replace(/\/+$/, ""),
     gitSetTrusted: async (t: boolean) => void (fake.trustedFlag = t),
+    git: (root: string, ...args: string[]) => invoke("git_run", { root, args }),
     runCapture: async (_root: string, command: string) => fake.capture(command),
     indexFiles: async () => [...fake.files.keys()],
   } as Record<string, (...a: any[]) => Promise<any>>,

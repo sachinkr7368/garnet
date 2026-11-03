@@ -3,7 +3,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { openFile } from "./editor";
 import { Channel, invoke, type PtyEvent } from "./ipc";
-import { isDarkTheme, onSettingsChange, setting } from "./settings";
+import { askTrust, isDarkTheme, isTrusted, onSettingsChange, setting } from "./settings";
 import { abs, root } from "./state";
 import { TERMINAL } from "./theme";
 import { bottom, h, icon, iconButton, toast } from "./ui";
@@ -142,9 +142,20 @@ export class PtyTabs {
   tabsEl = h("div", { class: "subtabs" });
   bodyEl = h("div", { class: "subtab-body" });
   toolbar = h("div", { class: "subtab-tools" });
-  el = h("div", { class: "pty-tabs" }, h("div", { class: "subtab-bar" }, this.tabsEl, this.toolbar), this.bodyEl);
+  /// Safe Mode: what this window would run needs trust (the backend refuses terminals and commands until then).
+  gate = h("div", { class: "empty pty-gate", hidden: true });
+  el = h("div", { class: "pty-tabs" }, h("div", { class: "subtab-bar" }, this.tabsEl, this.toolbar), this.gate, this.bodyEl);
   items: { title: string; view: PtyView; tab: HTMLElement; status: string }[] = [];
   active: PtyTabs["items"][number] | null = null;
+
+  constructor() {
+    window.addEventListener("garnet:trusted", () => (this.gate.hidden = true));
+  }
+
+  showGate(message: string) {
+    this.gate.replaceChildren(h("span", {}, message), " ", h("button", { class: "btn primary", onclick: () => void askTrust() }, "Trust Project"));
+    this.gate.hidden = false;
+  }
 
   add(title: string, view: PtyView) {
     const item = { title, view, tab: h("div"), status: "" };
@@ -206,7 +217,11 @@ export const terminals = new PtyTabs();
 let termCount = 0;
 terminals.toolbar.append(iconButton("add", "New Terminal", () => newTerminal()));
 
+const TERMINAL_GATE = "Trust project to open a terminal.";
+window.addEventListener("garnet:trusted", () => bottom.active === "terminal" && !terminals.items.length && newTerminal());
+
 export function newTerminal() {
+  if (!isTrusted()) return terminals.showGate(TERMINAL_GATE);
   // Like RubyMine, a shell that exits (exit, ⌃D) closes its tab; one Garnet killed or could not start stays.
   const item = terminals.add(`Local${++termCount > 1 ? ` (${termCount})` : ""}`, new PtyView({ onExit: (code) => code === 0 && terminals.close(item) }));
 }
@@ -219,7 +234,8 @@ export function runInTerminal(title: string, command: string, onExit?: (code: nu
 }
 
 export function showTerminalPanel() {
-  if (!terminals.items.length) newTerminal();
+  if (!isTrusted()) terminals.showGate(TERMINAL_GATE);
+  else if (!terminals.items.length) newTerminal();
   else terminals.active?.view.term.focus();
   terminals.fitActive();
 }

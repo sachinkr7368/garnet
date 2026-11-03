@@ -121,6 +121,21 @@ describe("trust gating", () => {
     expect(fake.config.has("run-configs.json")).toBe(false);
   });
 
+  it("keeps Safe Mode selections and edits in memory and runs no shell probe", async () => {
+    const captured: string[] = [];
+    fake.capture = (c) => (captured.push(c), "");
+    await loadRunConfigs();
+    const select = document.querySelector<HTMLSelectElement>("#run-widget .run-select")!;
+    select.value = "Rails console";
+    select.dispatchEvent(new Event("change"));
+    await saveRunConfigs([...configList(), newConfig("rspec", "Mine", "spec")]);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(configList().map((c) => c.name)).toContain("Mine");
+    expect(fake.config.has("run-configs.json")).toBe(false);
+    expect(fake.calls).not.toContain("api.writeFile");
+    expect(captured).toEqual([]);
+  });
+
   it("reads a trusted project's run.json and skips invalid entries", async () => {
     await trustProject(ROOT, true);
     fake.files.set(`${ROOT}/.garnet/run.json`, JSON.stringify({ selected: "Web", configurations: [{ name: "Web", type: "rails-server" }, { name: 3 }] }));

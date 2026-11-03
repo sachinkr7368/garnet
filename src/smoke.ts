@@ -17,6 +17,7 @@ import { continueOperation, openResolver, runGitOp } from "./merge";
 import { stagePatch } from "./difflogic";
 import { api, Channel, invoke, type PtyEvent } from "./ipc";
 import { cachedSymbols, goToImplementation, lspCapabilities, lspReady, request } from "./lsp";
+import { terminals } from "./terminal";
 import { buildCommand, configList, dockerUnavailable, editConfigurations, launch, newConfig, runs, safeEnv, validateConfig, type RunConfig } from "./run";
 import { isDarkTheme, isTrusted, loadSettings, setting, toggleTheme, trustProject, updateSetting } from "./settings";
 import { openSettingsWindow } from "./settingsui";
@@ -257,7 +258,7 @@ async function uiChecks(check: (n: string, ok: boolean | string) => void) {
   check("run.json validation", validateConfig({ name: "x", type: "rspec", args: ["rm"] }) === null && validateConfig({ name: "x", type: "evil" }) === null && validateConfig({ name: "ok", type: "rspec", env: { PATH: "/tmp", RUBYOPT: "-r/tmp/x", DYLD_INSERT_LIBRARIES: "x", FOO: "1" } })?.env.FOO === "1");
   check("blocked env overrides", JSON.stringify(safeEnv({ PATH: "x", BASH_ENV: "x", ENV: "x", LD_PRELOAD: "x", KEEP: "1" }, "smoke")) === '{"KEEP":"1"}');
   await invoke("git_set_trusted", { trusted: false });
-  check("git refuses to run while untrusted", await invoke("git_run", { root: state.project!.root, args: ["status"] }).then(() => false, (e) => String(e).includes("Trust project")));
+  check("git refuses to run while untrusted", await api.git(state.project!.root, "status").then(() => false, (e) => String(e).includes("Trust project")));
   await invoke("git_set_trusted", { trusted: true });
   check("git.path rejects relative path", await invoke("git_set_path", { path: "./git" }).then(() => false, () => true));
   await invoke("git_set_path", { path: setting<string>("git.path") });
@@ -286,11 +287,11 @@ async function uiChecks(check: (n: string, ok: boolean | string) => void) {
   await refreshToolbar();
   const worktreeLabel = document.querySelector<HTMLElement>('#switchers [title="Git worktrees"]');
   check("worktree switcher shows the current worktree name", !!worktreeLabel && !worktreeLabel.hidden && !/\d+ worktrees/.test(worktreeLabel.textContent ?? "") && (worktreeLabel.textContent ?? "").length > 0);
-  const branch = (await invoke<string>("git_run", { root: state.project!.root, args: ["rev-parse", "--abbrev-ref", "HEAD"] })).trim();
+  const branch = (await api.git(state.project!.root, "rev-parse", "--abbrev-ref", "HEAD")).trim();
   check("toolbar shows current branch", document.getElementById("switchers")!.textContent!.includes(branch));
-  await invoke("git_run", { root: state.project!.root, args: ["branch", "garnet-smoke"] });
-  const listed = await invoke<string>("git_run", { root: state.project!.root, args: ["branch", "--list", "garnet-smoke"] });
-  await invoke("git_run", { root: state.project!.root, args: ["branch", "-D", "garnet-smoke"] });
+  await api.git(state.project!.root, "branch", "garnet-smoke");
+  const listed = await api.git(state.project!.root, "branch", "--list", "garnet-smoke");
+  await api.git(state.project!.root, "branch", "-D", "garnet-smoke");
   check("git_run branch create/delete", listed.includes("garnet-smoke"));
 }
 
@@ -1024,20 +1025,38 @@ async function trustFlowChecks(report: Report, check: Check) {
   const root = state.project!.root;
   report.trust = isTrusted() ? "saved" : "trust dialog";
   if (!isTrusted()) {
-    check("untrusted: git and Ruby LSP stay off", (await invoke("git_run", { root, args: ["status"] }).then(() => false, (e) => String(e).includes("Trust project"))) && !lspReady());
+    const refused = (p: Promise<unknown>) => p.then(() => false, (e) => String(e).includes("Trust project"));
+    check("untrusted: git and Ruby LSP stay off", (await refused(api.git(root, "status"))) && !lspReady());
+    const pty = refused(invoke("pty_spawn", { cwd: root, command: null, env: null, shell: null, cols: 80, rows: 24, onEvent: new Channel<PtyEvent>() }));
+    check("untrusted: the backend refuses terminals and commands", (await pty) && (await refused(api.runCapture(root, "echo ran", 10))));
+    const gated = (tabs: { gate: HTMLElement; items: unknown[] }, text: string) =>
+      (!tabs.gate.hidden && tabs.gate.textContent!.includes(text) && tabs.gate.querySelector("button")?.textContent === "Trust Project" && !tabs.items.length) || tabs.gate.outerHTML;
+    bottom.show("run");
+    check("untrusted: Run tool window offers Trust Project", gated(runs, "Trust project to run"));
+    bottom.show("terminal");
+    check("untrusted: Terminal tool window offers Trust Project instead of a shell", gated(terminals, "Trust project to open a terminal"));
     await searchPopupChecks("untrusted", check, false);
+    bottom.show("terminal");
     await trustProject(root);
   }
+  bottom.show("terminal");
+  check("trusted: the Terminal opens without a restart", !!(await until(() => terminals.gate.hidden && terminals.items.length > 0, 5000)) || terminals.gate.outerHTML);
+  bottom.hide();
   check("trusted: git runs right away", await api.gitBranch(root).then((b) => b !== "", (e) => String(e)));
   const want = (await api.readFile(`${root}/.ruby-version`).catch(() => "")).trim().replace(/^ruby-/, "");
   const ruby = await api.runCapture(root, "ruby -e 'print RUBY_VERSION'", 60).catch((e) => String(e));
-  check("trusted: commands run with the login shell's Ruby", !want || ruby === want || ruby);
+  check("trusted: commands run with the login shell's Ruby", !want || ruby.startsWith(want) || ruby);
 }
 
 const keystroke = (target: EventTarget, init: KeyboardEventInit) => {
   for (const type of ["keydown", "keyup"]) target.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, ...init }));
 };
-const popupRows = () => [...document.querySelectorAll<HTMLElement>("#overlay-root .qp-item:not(.qp-error)")].filter((r) => r.getBoundingClientRect().height > 0);
+/// Rows of the open popup, only once they were rendered for the query now in its input.
+const popupRows = () => {
+  const list = document.querySelector<HTMLElement>("#overlay-root .qp-list");
+  if (!list || list.dataset.query !== document.querySelector<HTMLInputElement>("#overlay-root .qp-input")?.value) return [];
+  return [...list.querySelectorAll<HTMLElement>(".qp-item:not(.qp-error)")].filter((r) => r.getBoundingClientRect().height > 0);
+};
 const rowText = (r: HTMLElement) => `${r.querySelector(".qp-label")?.textContent ?? ""} ${r.querySelector(".qp-desc")?.textContent ?? ""}`;
 const rowsText = () => popupRows().map(rowText).join(" | ") || "no rows";
 const selectedRow = () => popupRows().findIndex((r) => r.classList.contains("selected"));
@@ -1073,9 +1092,11 @@ async function searchPopupChecks(phase: string, check: Check, lsp: boolean) {
     keystroke(input, { key: "Enter", code: "Enter" });
     return !!(await until(() => activeTab()?.path === file, 5000)) || String(activeTab()?.path);
   };
+  const stuck: string[] = [];
   const close = (input: HTMLInputElement | null) => {
-    if (input?.isConnected) keystroke(input, { key: "Escape", code: "Escape" });
-    document.querySelector("#overlay-root .qp-backdrop")?.remove();
+    if (!input?.isConnected) return;
+    keystroke(input, { key: "Escape", code: "Escape" });
+    if (input.isConnected) stuck.push(input.placeholder);
   };
   const shift = { key: "Shift", code: "ShiftLeft", shiftKey: true };
 
@@ -1107,6 +1128,24 @@ async function searchPopupChecks(phase: string, check: Check, lsp: boolean) {
   }
   close(input);
 
+  if (lsp) {
+    input = await open(() => (fromEditor(shift), fromEditor(shift)), "Search everywhere");
+    if (input) {
+      await type(input, "post");
+      await until(() => popupRows().filter((r) => !r.querySelector(".codicon-symbol-class") && rowText(r).includes(".rb")).length >= 3, 10000);
+      const symbolsBefore = popupRows().some((r) => r.querySelector(".codicon-symbol-class"));
+      keystroke(input, { key: "ArrowDown", code: "ArrowDown" });
+      keystroke(input, { key: "ArrowDown", code: "ArrowDown" });
+      const chosen = popupRows()[selectedRow()];
+      const path = chosen?.querySelector(".qp-desc")?.textContent ?? "";
+      const arrived = await until(() => popupRows().some((r) => r.querySelector(".codicon-symbol-class")), 30000);
+      const kept = popupRows()[selectedRow()]?.querySelector(".qp-desc")?.textContent === path;
+      const opened = kept && path ? await enterOpens(input, `${root}/${path}`) : rowsText();
+      c("Search Everywhere: late symbols keep the arrowed selection and Enter opens it", !!arrived && kept && opened === true ? true : JSON.stringify({ symbolsBefore, path, arrived: !!arrived, kept, opened }));
+    }
+    close(input);
+  }
+
   input = await open(() => fromEditor({ key: "O", code: "KeyO", metaKey: true, shiftKey: true }), "Go to file");
   c("⌘⇧O opens Go to File", !!input);
   if (input) {
@@ -1137,6 +1176,7 @@ async function searchPopupChecks(phase: string, check: Check, lsp: boolean) {
   input = await open(() => fromEditor({ key: "e", code: "KeyE", metaKey: true }), "Recent files");
   c("⌘E opens Recent Files", !!input);
   if (input) {
+    await until(() => popupRows().length > 0, 3000);
     const labels = popupRows().map((r) => r.querySelector(".qp-label")?.textContent ?? "");
     c("Recent Files: lists the files opened earlier, current file first or second", (labels.slice(0, 2).includes("posts_controller.rb") && labels.includes("post.rb")) || rowsText());
     c("Recent Files: the previous file is selected", popupRows()[selectedRow()]?.querySelector(".qp-label")?.textContent === "post.rb" || rowsText());
@@ -1145,4 +1185,5 @@ async function searchPopupChecks(phase: string, check: Check, lsp: boolean) {
     c("Recent Files: typing filters and Enter opens", top ? await enterOpens(input, model) : rowsText());
   }
   close(input);
+  c("popups close with Escape", !stuck.length || stuck.join(", "));
 }

@@ -102,6 +102,8 @@ async function onServerRequest(msg: Json) {
 }
 
 const progress = new Map<string | number, string>();
+/// ruby-lsp reports work in progress (indexing): an empty workspace/symbol reply may only mean "not indexed yet".
+export const lspBusy = () => progress.size > 0;
 
 function onNotification(msg: Json) {
   const p = msg.params;
@@ -709,6 +711,7 @@ export function workspaceSymbolsPopup(kinds?: number[]) {
   let inflight: monaco.CancellationTokenSource | null = null;
   quickPick({
     placeholder: kinds ? "Go to class or module" : "Go to symbol in project (classes, modules, methods)",
+    onClose: () => inflight?.cancel(),
     items: async (query): Promise<PickItem[]> => {
       inflight?.cancel();
       if (!query.trim()) return [];

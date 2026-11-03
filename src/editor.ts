@@ -513,6 +513,7 @@ export async function navigateForward() {
 
 export const recentFileList = () => [...recentFiles];
 export const restoreRecentFiles = (paths: string[]) => recentFiles.splice(0, recentFiles.length, ...paths.slice(0, 50));
+export const forgetRecentFile = (path: string) => recentFiles.includes(path) && recentFiles.splice(recentFiles.indexOf(path), 1);
 export const recentLocations = () => [...back].reverse();
 
 editor.onDidChangeCursorPosition((e) => {

@@ -371,6 +371,19 @@ describe("pull request view", () => {
     expect(button("Files 1", view())).toBeTruthy();
   });
 
+  it("a slow earlier open never overwrites the PR opened after it (B47)", async () => {
+    let release!: () => void;
+    const slow = new Promise<void>((r) => (release = r));
+    let call = 0;
+    fake.handlers.set("github_graphql", async () => (++call === 1 ? (await slow, detail({ title: "Old one" })) : detail({ title: "New one" })));
+    const first = openPullRequest("o/r", 7);
+    await openPullRequest("o/r", 7);
+    expect(view().querySelector(".pr-title")!.textContent).toBe("New one #7");
+    release();
+    await first;
+    expect(view().querySelector(".pr-title")!.textContent).toBe("New one #7");
+  });
+
   it("merges only after confirmation, with the head sha", async () => {
     fake.handlers.set("github_graphql", () => detail());
     await openPullRequest("o/r", 7);

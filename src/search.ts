@@ -5,7 +5,7 @@ import { rel } from "./state";
 import { bottom, fileIcon, h, toast } from "./ui";
 
 type SearchEvent =
-  | { type: "file"; path: string; matches: LineMatch[] }
+  | { type: "file"; path: string; matches: LineMatch[]; truncated?: boolean }
   | { type: "done"; total: number; truncated: boolean };
 
 const query = h("input", { class: "search-input", placeholder: "Search in project (Enter)", spellcheck: false });
@@ -44,7 +44,17 @@ let replaceTimer = 0;
 replaceInput.addEventListener("input", () => {
   clearTimeout(replaceTimer);
   replaceTimer = window.setTimeout(run, 250);
+  setPending(true);
 });
+query.addEventListener("input", () => setPending(true));
+
+/// The listed matches were computed for `searched`; Replace stays off while a search is pending or running.
+let searched = { query: "", replace: "" };
+let pending = false;
+function setPending(on: boolean) {
+  pending = on;
+  replaceAllBtn.disabled = replaceSelectedBtn.disabled = on;
+}
 
 const replacing = () => !replaceBar.hidden;
 interface FileResult {
@@ -68,7 +78,17 @@ function highlight(text: string, ranges: [number, number][]) {
   return parts;
 }
 
-function fileGroup(path: string, matches: LineMatch[]) {
+const countRanges = (matches: LineMatch[]) => matches.reduce((n, m) => n + m.ranges.length, 0);
+const moreNote = () => h("div", { class: "result-more dim" }, "More matches in this file aren't listed; narrow the search to see them.");
+
+/// One line for the summary: the last line of the regex engine's multi-line error ("error: unclosed group").
+export function searchError(e: unknown): string {
+  const text = String(e).trim();
+  const last = text.split("\n").pop()!.replace(/^error:\s*/, "");
+  return text.startsWith("regex parse error") ? `Invalid regular expression: ${last}` : last;
+}
+
+function fileGroup(path: string, matches: LineMatch[], more = false) {
   const list = h(
     "div",
     { class: "result-lines" },
@@ -93,16 +113,17 @@ function fileGroup(path: string, matches: LineMatch[]) {
     fileIcon(path),
     h("span", { class: "result-name" }, rel(path).split("/").pop()!),
     h("span", { class: "result-dir" }, rel(path).split("/").slice(0, -1).join("/")),
-    h("span", { class: "badge" }, String(matches.length)),
+    h("span", { class: "badge" }, `${countRanges(matches)}${more ? "+" : ""}`),
   );
+  if (more) list.append(moreNote());
   return h("div", { class: "result-group" }, head, list);
 }
 
-function replaceGroup(path: string, matches: LineMatch[]): FileResult {
+function replaceGroup(path: string, matches: LineMatch[], more = false): FileResult {
   const result: FileResult = { path, matches, excluded: new Set(), el: h("div") };
   const total = matches.reduce((n, m) => n + m.ranges.length, 0);
   const fileBox = h("input", { type: "checkbox", checked: true, title: "Include this file" }) as HTMLInputElement;
-  const badge = h("span", { class: "badge" }, String(total));
+  const badge = h("span", { class: "badge" }, `${total}${more ? "+" : ""}`);
   const lineBoxes: { m: LineMatch; box: HTMLInputElement; marks: HTMLElement[] }[] = [];
   const sync = () => {
     for (const { m, box, marks } of lineBoxes) {
@@ -114,7 +135,7 @@ function replaceGroup(path: string, matches: LineMatch[]): FileResult {
     const off = result.excluded.size;
     fileBox.checked = off < total;
     fileBox.indeterminate = off > 0 && off < total;
-    badge.textContent = off ? `${total - off}/${total}` : String(total);
+    badge.textContent = (off ? `${total - off}/${total}` : String(total)) + (more ? "+" : "");
   };
   const setAll = (keys: string[], include: boolean) => {
     for (const k of keys) include ? result.excluded.delete(k) : result.excluded.add(k);
@@ -172,6 +193,7 @@ function replaceGroup(path: string, matches: LineMatch[]): FileResult {
     h("span", { class: "result-dir" }, rel(path).split("/").slice(0, -1).join("/")),
     badge,
   );
+  if (more) list.append(moreNote());
   result.el = h("div", { class: "result-group" }, head, list);
   return result;
 }
@@ -179,6 +201,7 @@ function replaceGroup(path: string, matches: LineMatch[]): FileResult {
 let files = 0;
 let started = 0;
 let truncated = false;
+let active: Channel<SearchEvent> | null = null;
 
 export function run() {
   const q = query.value;
@@ -188,20 +211,33 @@ export function run() {
   files = 0;
   started = performance.now();
   summary.textContent = q ? "Searching…" : "";
+  summary.classList.remove("error");
+  summary.title = "";
+  searched = { query: q, replace: replaceInput.value };
+  setPending(!!q);
+  query.classList.remove("invalid");
+  active = null;
   if (!q) return;
   const channel = new Channel<SearchEvent>();
+  active = channel;
   channel.onmessage = (ev) => {
+    // Events from a superseded search (the Replace box re-runs on each keystroke) carry old replacement text.
+    if (channel !== active) return;
     if (ev.type === "file") {
       files++;
+      truncated ||= !!ev.truncated;
       if (replacing()) {
-        const r = replaceGroup(ev.path, ev.matches);
+        const r = replaceGroup(ev.path, ev.matches, ev.truncated);
         found.push(r);
         results.append(r.el);
-      } else results.append(fileGroup(ev.path, ev.matches));
+      } else results.append(fileGroup(ev.path, ev.matches, ev.truncated));
     } else {
       const ms = Math.round(performance.now() - started);
-      truncated = ev.truncated;
-      summary.textContent = `${ev.total}${ev.truncated ? "+" : ""} matches in ${files} files · ${ms} ms${ev.truncated && replacing() ? " · only listed matches are replaced" : ""}`;
+      truncated ||= ev.truncated;
+      const n = ev.total;
+      summary.textContent = `${n}${truncated ? "+" : ""} match${n === 1 ? "" : "es"} in ${files} file${files === 1 ? "" : "s"} · ${ms} ms${truncated && replacing() ? " · only listed matches are replaced" : ""}`;
+      setPending(false);
+      if (!n && include.value.trim()) results.append(h("div", { class: "empty" }, "No matches. Files ignored by .gitignore (and .git) are skipped, even when the include pattern names them."));
     }
   };
   invoke("search_text", {
@@ -214,7 +250,14 @@ export function run() {
       replace: replacing() ? replaceInput.value : null,
     },
     onEvent: channel,
-  }).catch((e) => (summary.textContent = String(e)));
+  }).catch((e) => {
+    if (channel !== active) return;
+    setPending(false);
+    summary.textContent = searchError(e);
+    summary.title = String(e);
+    summary.classList.add("error");
+    query.classList.add("invalid");
+  });
 }
 
 export function findInFiles(folder?: string, replace = false) {
@@ -238,6 +281,10 @@ export const replaceInFiles = () => findInFiles(undefined, true);
 /// Open buffers are edited through Monaco (one undo step per file); other files are rewritten on disk.
 async function replaceMatches(all: boolean) {
   if (!found.length) return;
+  if (pending || query.value !== searched.query || replaceInput.value !== searched.replace) {
+    toast("The search or replacement text changed since these matches were listed; press Enter to search again, then replace.", "error");
+    return;
+  }
   const open = new Set(allTabs().map((t) => t.model));
   let applied = 0;
   let planned = 0;

@@ -12,7 +12,17 @@ no subscription, no telemetry.
 
 **[Download the latest release](https://github.com/sachinkr7368/garnet/releases/latest)** (universal DMG for Apple Silicon and Intel), then see [Install](#install).
 
-<!-- screenshots -->
+[![Garnet demo: Search Everywhere, go to definition, RSpec test tree and debugger](docs/images/demo.gif)](https://github.com/sachinkr7368/garnet/releases/download/v0.2.3/Garnet-demo.mp4)
+
+▶ [Watch the full demo with sound](https://github.com/sachinkr7368/garnet/releases/download/v0.2.3/Garnet-demo.mp4)
+
+![Garnet editor with a Rails controller open, the project tree and the Git log](docs/images/screenshot-editor.png)
+
+<p>
+  <img src="docs/images/screenshot-tests.png" width="32%" alt="Test Results with an RSpec run: a tree of passed and failed examples and the failure message">
+  <img src="docs/images/screenshot-debugger.png" width="32%" alt="Debugger stopped at a breakpoint with frames, local variables and a watch">
+  <img src="docs/images/screenshot-database.png" width="32%" alt="Database tool window in the dark theme showing rows of the posts table">
+</p>
 
 Built with Tauri 2 (Rust) + TypeScript, Monaco for editing, xterm.js for
 terminals, [ruby-lsp](https://github.com/Shopify/ruby-lsp) for Ruby

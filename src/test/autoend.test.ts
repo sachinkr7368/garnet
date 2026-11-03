@@ -24,6 +24,7 @@ describe("auto end", () => {
     ["x = if ok\n  ^", "\nend"],
     ["@total ||= begin\n  ^", "\nend"],
     ["def a # comment\n  ^\ndef b\nend", "\nend"],
+    ["sql = <<~SQL\n  select 1\nSQL\nif ok\n  ^", "\nend"],
   ])("adds end after %j", (src, want) => expect(at(src)).toBe(want));
 
   it.each([
@@ -36,5 +37,7 @@ describe("auto end", () => {
     ["# def commented\n^"],
     ["puts 'done'\n^"],
     ["x = 1 if y\n^"],
+    ["sql = <<~SQL\n  def not_ruby\n  ^\nSQL"],
+    ["text = <<-EOS\n  if inside\n  ^\n  EOS\n"],
   ])("leaves %j alone", (src) => expect(at(src)).toBeNull());
 });

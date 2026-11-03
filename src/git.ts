@@ -1,6 +1,6 @@
 import { ask } from "@tauri-apps/plugin-dialog";
 import DiffWorker from "./diffworker?worker";
-import { activeTab, editor, events, handleFsChanged, handlePathMoved, monaco, openDiffTab, openFile, openTextDiff } from "./editor";
+import { activeTab, editor, encodingOf, events, handleFsChanged, handlePathMoved, monaco, openDiffTab, openFile, openTextDiff } from "./editor";
 import { buildTree, displayLine, filterPaths, hunkKind, matchEol, patchHunks, patchLines, rollbackEdits, splitLines, stagePatch, unstagePatch, type LineHunk } from "./difflogic";
 import { api, invoke, type ChangedFile, type GitStatusEntry, type OpState } from "./ipc";
 import { abortOperation, acceptSide, continueOperation, openResolver, showConflicts } from "./merge";
@@ -480,13 +480,16 @@ window.addEventListener(
   true,
 );
 
+/// A path's content at a revision, decoded like its open buffer (so diffs and Rollback Lines match the editor).
+const fileAt = (rev: string, path: string) => api.gitFileAt(root(), rev, path, encodingOf(path));
+
 /// Partial staging: hunks of index→working copy (stage) or HEAD→index (unstage)
 
 /// Both sides of a row's hunks: HEAD (old path of a rename) → index when staged, index → working copy otherwise.
 async function hunkTexts(r: Row): Promise<[string, string]> {
   const path = abs(r.path);
-  if (r.staged) return [(await api.gitFileAt(root(), "HEAD", abs(entryFor(r.path)?.orig ?? r.path))) ?? "", (await api.gitFileAt(root(), "", path)) ?? ""];
-  const index = (await api.gitFileAt(root(), "", path)) ?? "";
+  if (r.staged) return [(await fileAt("HEAD", abs(entryFor(r.path)?.orig ?? r.path))) ?? "", (await fileAt("", path)) ?? ""];
+  const index = (await fileAt("", path)) ?? "";
   return [index, matchEol(index, await api.readFile(path))];
 }
 
@@ -751,11 +754,11 @@ export async function showRowDiff(r: { path: string; code: string; staged: boole
   const path = abs(r.path);
   const orig = entryFor(r.path)?.orig ?? r.path;
   if (r.staged) {
-    const [left, right] = await Promise.all([api.gitFileAt(root(), "HEAD", abs(orig)), api.gitFileAt(root(), "", path)]);
+    const [left, right] = await Promise.all([fileAt("HEAD", abs(orig)), fileAt("", path)]);
     return openTextDiff(`staged:${r.path}`, path, left ?? "", right ?? "", `${basename(r.path)} (staged)`, `${orig} @ HEAD ↔ ${r.path} @ index`);
   }
   if (r.code === "D") {
-    const left = (await api.gitFileAt(root(), "", path)) ?? (await api.gitFileAt(root(), "HEAD", path));
+    const left = (await fileAt("", path)) ?? (await fileAt("HEAD", path));
     return openTextDiff(`deleted:${r.path}`, path, left ?? "", "", `${basename(r.path)} (deleted)`, `${r.path} ↔ deleted`);
   }
   return showDiff(path);
@@ -797,7 +800,7 @@ export async function compareWithBranch() {
 
 async function showCompareDiff(f: ChangedFile) {
   if (!compare) return;
-  const [left, right] = await Promise.all([api.gitFileAt(root(), compare.mergeBase, f.oldPath ?? f.path), api.gitFileAt(root(), "HEAD", f.path)]);
+  const [left, right] = await Promise.all([fileAt(compare.mergeBase, f.oldPath ?? f.path), fileAt("HEAD", f.path)]);
   openTextDiff(`compare:${compare.base}:${f.path}`, abs(f.path), left ?? "", right ?? "", `${basename(f.path)} (${compare.base}…HEAD)`, `${f.oldPath ?? f.path} @ merge base with ${compare.base} ↔ ${f.path} @ HEAD`);
 }
 
@@ -839,7 +842,7 @@ let gutterSeq = 0;
 
 async function headText(path: string): Promise<string | null> {
   if (!headCache.has(path)) {
-    const text = await api.gitFileAt(root(), "HEAD", path).catch(() => null);
+    const text = await fileAt("HEAD", path).catch(() => null);
     const added = entries.some((e) => abs(e.path) === path && e.index === "A");
     headCache.set(path, text ?? (added ? "" : null));
   }
@@ -923,7 +926,7 @@ async function stageHunk(hk: LineHunk) {
   const t = activeTab();
   if (!t) return;
   try {
-    const index = await api.gitFileAt(root(), "", t.path);
+    const index = await fileAt("", t.path);
     if (index === null) return toast("The file is not tracked yet; stage the whole file from the Commit tool window.");
     const patch = stagePatch(rel(t.path), index, matchEol(index, t.model.getValue()), hk.b0, hk.b1);
     if (patch === null) return toast("This change is already staged.");

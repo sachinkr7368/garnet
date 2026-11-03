@@ -65,6 +65,9 @@ pub struct TextFile {
     bom: bool,
     size: u64,
     truncated: bool,
+    /// Some bytes are not valid in `encoding` (Reopen with Encoding picked the wrong one): the buffer is read-only,
+    /// since saving would write U+FFFD in their place.
+    lossy: bool,
 }
 
 /// Files above this size open read-only, as plain text, with only this many bytes loaded.
@@ -75,7 +78,7 @@ pub async fn open_text(app: AppHandle, index: State<'_, Index>, path: String, en
     let (canonical, id) = check_read(&path, &read_roots(&app, &index).await?)?;
     tauri::async_runtime::spawn_blocking(move || {
         let (bytes, size) = read_bytes(&canonical, Some(id), LARGE_FILE)?;
-        decode(&bytes, encoding.as_deref(), size > LARGE_FILE).map(|(text, encoding, bom)| TextFile { text, encoding, bom, size, truncated: size > LARGE_FILE })
+        decode(&bytes, encoding.as_deref(), size > LARGE_FILE).map(|(text, encoding, bom, lossy)| TextFile { text, encoding, bom, size, truncated: size > LARGE_FILE, lossy })
     })
     .await
     .map_err(e2s)?
@@ -99,14 +102,14 @@ fn read_bytes(path: &Path, id: Option<(u64, u64)>, limit: u64) -> Result<(Vec<u8
 
 fn read_text(path: &Path, id: Option<(u64, u64)>) -> Result<String, String> {
     let (bytes, _) = read_bytes(path, id, u64::MAX)?;
-    decode(&bytes, None, false).map(|(text, _, _)| text)
+    decode(&bytes, None, false).map(|(text, ..)| text)
 }
 
 /// Decodes file bytes without losing any: a BOM wins, then valid UTF-8, else Windows-1252 (every byte maps to a
 /// distinct character, so it saves back byte for byte). `forced` is a "Reopen with Encoding" label. Files with NUL
 /// bytes and no UTF-16 BOM are binary and refused. `truncated`: the bytes are a prefix, so a UTF-8 sequence cut at the
-/// end is dropped instead of making the file look non-UTF-8.
-pub fn decode(bytes: &[u8], forced: Option<&str>, truncated: bool) -> Result<(String, String, bool), String> {
+/// end is dropped instead of making the file look non-UTF-8. The last value is true when some bytes did not decode.
+pub fn decode(bytes: &[u8], forced: Option<&str>, truncated: bool) -> Result<(String, String, bool, bool), String> {
     use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
     let (enc, bom_len) = match forced {
         Some(label) => {
@@ -118,13 +121,13 @@ pub fn decode(bytes: &[u8], forced: Option<&str>, truncated: bool) -> Result<(St
             None if bytes.iter().take(8000).any(|&b| b == 0) => return Err("binary file".into()),
             None => match std::str::from_utf8(bytes) {
                 Ok(_) => (UTF_8, 0),
-                Err(e) if truncated && e.error_len().is_none() => return Ok((String::from_utf8_lossy(&bytes[..e.valid_up_to()]).into_owned(), "UTF-8".into(), false)),
+                Err(e) if truncated && e.error_len().is_none() => return Ok((String::from_utf8_lossy(&bytes[..e.valid_up_to()]).into_owned(), "UTF-8".into(), false, false)),
                 Err(_) => (WINDOWS_1252, 0),
             },
         },
     };
-    let (text, _) = enc.decode_without_bom_handling(&bytes[bom_len..]);
-    Ok((text.into_owned(), enc.name().to_string(), bom_len > 0))
+    let (text, lossy) = enc.decode_without_bom_handling(&bytes[bom_len..]);
+    Ok((text.into_owned(), enc.name().to_string(), bom_len > 0, lossy))
 }
 
 /// Encodes text for saving in `encoding`; refuses (instead of writing `&#NNN;` or `?`) when a character has no
@@ -385,6 +388,41 @@ pub async fn delete_path(app: AppHandle, index: State<'_, Index>, path: String) 
     }
 }
 
+/// Project tree Delete: moves to the Trash (recoverable) instead of deleting.
+#[tauri::command]
+pub async fn trash_path(app: AppHandle, index: State<'_, Index>, path: String) -> Result<(), String> {
+    check_write(&path, &write_roots(&app, &index), true)?;
+    tauri::async_runtime::spawn_blocking(move || trash(Path::new(&path))).await.map_err(e2s)?
+}
+
+#[cfg(target_os = "macos")]
+fn trash(path: &Path) -> Result<(), String> {
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2::{class, msg_send};
+    let c = std::ffi::CString::new(path.to_str().ok_or("path is not UTF-8")?).map_err(e2s)?;
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let s: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()];
+        let url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: s];
+        let fm: *mut AnyObject = msg_send![class!(NSFileManager), defaultManager];
+        let mut err: *mut AnyObject = std::ptr::null_mut();
+        let ok: Bool = msg_send![fm, trashItemAtURL: url, resultingItemURL: std::ptr::null_mut::<*mut AnyObject>(), error: &mut err];
+        if ok.as_bool() {
+            return Ok(());
+        }
+        if err.is_null() {
+            return Err("could not move to the Trash".into());
+        }
+        let desc: *mut AnyObject = msg_send![err, localizedDescription];
+        let utf8: *const std::ffi::c_char = msg_send![desc, UTF8String];
+        Err(std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned())
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn trash(_path: &Path) -> Result<(), String> {
+    Err("moving to the Trash is only supported on macOS".into())
+}
+
 #[tauri::command]
 pub async fn reveal_in_finder(path: String) -> Result<(), String> {
     std::process::Command::new("open")
@@ -521,7 +559,7 @@ mod tests {
     #[test]
     fn latin1_files_save_back_byte_for_byte() {
         let bytes = b"# caf\xe9 \xa9 2026\r\nputs '\xfc\x81\x9d'\n".to_vec();
-        let (text, enc, bom) = decode(&bytes, None, false).unwrap();
+        let (text, enc, bom, _) = decode(&bytes, None, false).unwrap();
         assert_eq!((enc.as_str(), bom), ("windows-1252", false));
         assert!(text.starts_with("# café ©") && !text.contains('\u{FFFD}'));
         assert_eq!(encode(&text, &enc, bom).unwrap(), bytes);
@@ -531,24 +569,35 @@ mod tests {
     #[test]
     fn byte_order_marks_are_kept() {
         let utf8 = b"\xEF\xBB\xBFclass A; end\n".to_vec();
-        let (text, enc, bom) = decode(&utf8, None, false).unwrap();
+        let (text, enc, bom, _) = decode(&utf8, None, false).unwrap();
         assert_eq!((text.as_str(), enc.as_str(), bom), ("class A; end\n", "UTF-8", true));
         assert_eq!(encode(&text, &enc, bom).unwrap(), utf8);
         let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain("hé\n".encode_utf16().flat_map(|u| u.to_le_bytes())).collect();
-        let (text, enc, bom) = decode(&utf16, None, false).unwrap();
+        let (text, enc, bom, _) = decode(&utf16, None, false).unwrap();
         assert_eq!((text.as_str(), enc.as_str(), bom), ("hé\n", "UTF-16LE", true));
         assert_eq!(encode(&text, &enc, bom).unwrap(), utf16);
-        assert_eq!(decode("ok ✓".as_bytes(), None, false).unwrap(), ("ok ✓".into(), "UTF-8".into(), false));
+        assert_eq!(decode("ok ✓".as_bytes(), None, false).unwrap(), ("ok ✓".into(), "UTF-8".into(), false, false));
     }
 
     #[test]
     fn binary_files_are_refused_and_reopen_with_encoding_works() {
         assert_eq!(decode(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR", None, false).unwrap_err(), "binary file");
-        let (text, enc, _) = decode("é".as_bytes(), Some("windows-1252"), false).unwrap();
-        assert_eq!((text.as_str(), enc.as_str()), ("Ã©", "windows-1252"));
+        let (text, enc, _, lossy) = decode("é".as_bytes(), Some("windows-1252"), false).unwrap();
+        assert_eq!((text.as_str(), enc.as_str(), lossy), ("Ã©", "windows-1252", false));
         assert!(decode(b"x", Some("klingon"), false).is_err());
         let cut = &"aé".as_bytes()[..2];
         assert_eq!(decode(cut, None, true).unwrap().1, "UTF-8");
+    }
+
+    #[test]
+    fn a_wrong_forced_encoding_is_reported_lossy() {
+        let cp1252 = b"caf\xe9\n";
+        let (text, enc, _, lossy) = decode(cp1252, Some("UTF-8"), false).unwrap();
+        assert!(lossy && text.contains('\u{FFFD}') && enc == "UTF-8");
+        let utf16: Vec<u8> = [0xFF, 0xFE, b'h', 0, b'i', 0].to_vec();
+        assert!(!decode(&utf16, None, false).unwrap().3);
+        assert!(decode(&utf16, Some("UTF-8"), false).unwrap().3, "UTF-8 forced onto a UTF-16 file");
+        assert!(!decode(cp1252, None, false).unwrap().3);
     }
 
     #[test]

@@ -5,6 +5,9 @@ import { toast } from "./ui";
 export interface Buffer {
   path: string;
   text: string;
+  /// How the buffer saves back (absent in backups from before 0.2.4: the file's own encoding is used).
+  encoding?: string;
+  bom?: boolean;
 }
 
 const FILE = "unsaved.json";

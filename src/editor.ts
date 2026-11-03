@@ -6,7 +6,7 @@ import HtmlWorker from "monaco-editor/language/html/html.worker?worker";
 import TsWorker from "monaco-editor/language/typescript/ts.worker?worker";
 import { conf as htmlConf, language as htmlLanguage } from "monaco-editor/languages/definitions/html/html";
 import { ask, message } from "@tauri-apps/plugin-dialog";
-import { api } from "./ipc";
+import { api, type TextFile } from "./ipc";
 import { hamlConf, hamlLanguage } from "./languages/haml";
 import { erbLanguage, rubyLanguage } from "./languages/ruby";
 import { slimConf, slimLanguage } from "./languages/slim";
@@ -366,15 +366,25 @@ export function isDirty(tab: Tab) {
 }
 
 /// How a file buffer is saved back: the encoding it was read in (or converted to) and its BOM. `large`: only the
-/// first 10 MB were loaded, so the buffer is read-only. `forced`: picked with Reopen with Encoding.
+/// first 10 MB were loaded; `lossy`: some bytes are not valid in `encoding`. Either makes the buffer read-only, since
+/// saving would cut the file or write U+FFFD over those bytes. `forced`: picked with Reopen with Encoding.
 export interface FileMeta {
   encoding: string;
   bom: boolean;
   large: boolean;
+  lossy?: boolean;
   forced?: boolean;
 }
 const fileMeta = new WeakMap<monaco.editor.ITextModel, FileMeta>();
 export const metaOf = (model: monaco.editor.ITextModel): FileMeta => fileMeta.get(model) ?? { encoding: "UTF-8", bom: false, large: false };
+/// Why a buffer can't be saved, or null.
+export const lockedReason = (m: FileMeta) => (m.large ? "it is larger than 10 MB" : m.lossy ? `it is not valid ${m.encoding}; reopen it with the right encoding` : null);
+const metaFrom = (file: TextFile, forced?: boolean): FileMeta => ({ encoding: file.encoding, bom: file.bom, large: file.truncated, lossy: file.lossy, forced });
+/// The encoding of an open file's buffer, for reading other versions of it (git) the same way.
+export const encodingOf = (path: string) => {
+  const model = monaco.editor.getModel(uriFor(path));
+  return model ? fileMeta.get(model)?.encoding : undefined;
+};
 
 export async function ensureModel(path: string): Promise<monaco.editor.ITextModel | null> {
   const uri = uriFor(path);
@@ -390,7 +400,8 @@ export async function ensureModel(path: string): Promise<monaco.editor.ITextMode
   const again = monaco.editor.getModel(uri);
   if (again) return again;
   const model = monaco.editor.createModel(file.text, file.truncated ? "plaintext" : languageFor(path), uri);
-  fileMeta.set(model, { encoding: file.encoding, bom: file.bom, large: file.truncated });
+  fileMeta.set(model, metaFrom(file));
+  if (file.lossy) toast(`${basename(path)} is not valid ${file.encoding}: opened read-only.`, "error");
   if (file.truncated) toast(`${basename(path)} is ${Math.round(file.size / 1048576)} MB: showing the first 10 MB, read-only, as plain text.`);
   return model;
 }
@@ -421,7 +432,9 @@ function enforceTabLimit(keep: Tab) {
   const open = tabs.filter((t) => t.kind !== "view");
   if (limit <= 0 || open.length <= limit) return;
   const victim = open.filter((t) => t !== keep && t !== active && !t.pinned && !isDirty(t)).sort((a, b) => (a.usedAt ?? 0) - (b.usedAt ?? 0))[0];
-  if (victim) void closeTab(victim, true);
+  if (!victim) return;
+  if (victim.kind === "file") closedTabs.push(victim.path);
+  void closeTab(victim, true);
 }
 
 export async function openFile(path: string, target?: Target) {
@@ -630,7 +643,7 @@ export function activate(tab: Tab | null) {
     tab.view!.onActivate?.();
   } else if (tab?.kind === "file") {
     editor.setModel(tab.model);
-    editor.updateOptions({ readOnly: metaOf(tab.model).large, wordWrap: editorOptions().wordWrap });
+    editor.updateOptions({ readOnly: !!lockedReason(metaOf(tab.model)), wordWrap: editorOptions().wordWrap });
     if (tab.viewState) editor.restoreViewState(tab.viewState as monaco.editor.ICodeEditorViewState);
     editor.focus();
     langSlot.textContent = tab.model.getLanguageId();
@@ -757,11 +770,12 @@ function renderFileSlots() {
   const model = active?.kind === "file" ? active.model : null;
   const meta = model && metaOf(model);
   eolSlot.textContent = model ? (model.getEOL() === "\r\n" ? "CRLF" : "LF") : "";
-  encodingSlot.textContent = meta ? `${meta.encoding}${meta.bom ? " BOM" : ""}${meta.large ? " (read-only)" : ""}` : "";
+  encodingSlot.textContent = meta ? `${meta.encoding}${meta.bom ? " BOM" : ""}${lockedReason(meta) ? " (read-only)" : ""}` : "";
+  encodingSlot.title = meta && lockedReason(meta) ? `Read-only: ${lockedReason(meta)}` : "File encoding";
 }
 
 export function setLineSeparator(eol: "LF" | "CRLF") {
-  if (active?.kind !== "file" || metaOf(active.model).large) return;
+  if (active?.kind !== "file" || lockedReason(metaOf(active.model))) return;
   active.model.pushEOL(eol === "LF" ? monaco.editor.EndOfLineSequence.LF : monaco.editor.EndOfLineSequence.CRLF);
   renderFileSlots();
 }
@@ -784,7 +798,9 @@ export async function reopenWithEncoding(tab: Tab, encoding: string) {
   try {
     const file = await api.openText(tab.path, encoding);
     tab.model.setValue(file.text);
-    fileMeta.set(tab.model, { encoding: file.encoding, bom: file.bom, large: file.truncated, forced: true });
+    fileMeta.set(tab.model, metaFrom(file, true));
+    if (tab === active) editor.updateOptions({ readOnly: !!lockedReason(metaOf(tab.model)) });
+    if (file.lossy) toast(`${tab.title} is not valid ${encoding}: opened read-only so saving can't damage it.`, "error");
     const version = tab.model.getAlternativeVersionId();
     for (const t of tabs) if (t.model === tab.model) t.savedVersion = version;
   } catch (e) {
@@ -794,10 +810,16 @@ export async function reopenWithEncoding(tab: Tab, encoding: string) {
   renderFileSlots();
 }
 
+const NO_BOM = "UTF-8 (no BOM)";
+/// BOM after converting: always for UTF-16, kept for UTF-8 unless "UTF-8 (no BOM)" was picked, never otherwise.
+export const convertedBom = (before: { encoding: string; bom: boolean }, picked: string) =>
+  picked.startsWith("UTF-16") || (picked === "UTF-8" && before.encoding === "UTF-8" && before.bom);
+
 /// Saves the buffer in another encoding; if it can't represent the text, nothing changes.
-export async function convertEncoding(tab: Tab, encoding: string) {
+export async function convertEncoding(tab: Tab, picked: string) {
   const before = metaOf(tab.model);
-  fileMeta.set(tab.model, { ...before, encoding, bom: encoding.startsWith("UTF-16") });
+  const encoding = picked === NO_BOM ? "UTF-8" : picked;
+  fileMeta.set(tab.model, { ...before, encoding, bom: convertedBom(before, picked) });
   if (!(await save(tab))) fileMeta.set(tab.model, before);
   renderFileSlots();
 }
@@ -805,17 +827,17 @@ export async function convertEncoding(tab: Tab, encoding: string) {
 export function encodingMenu() {
   const tab = active?.kind === "file" ? active : null;
   if (!tab) return;
-  const pick = (title: string, run: (enc: string) => unknown) =>
-    quickPick({ placeholder: title, items: ENCODINGS.map((e) => ({ label: e, description: e === metaOf(tab.model).encoding ? "current" : "", data: e })), onAccept: (item) => item && void run(item.data as string) });
+  const pick = (title: string, run: (enc: string) => unknown, extra: string[] = []) =>
+    quickPick({ placeholder: title, items: [...ENCODINGS, ...extra].map((e) => ({ label: e, description: e === metaOf(tab.model).encoding ? "current" : "", data: e })), onAccept: (item) => item && void run(item.data as string) });
   quickPick({
     placeholder: `${tab.title}: ${metaOf(tab.model).encoding}`,
     items: [
       { label: "Reopen with Encoding…", description: "decode the file on disk differently", data: "reopen" },
-      { label: "Convert to Encoding…", description: "save the text in another encoding", data: "convert", icon: metaOf(tab.model).large ? "lock" : undefined },
+      { label: "Convert to Encoding…", description: "save the text in another encoding", data: "convert", icon: lockedReason(metaOf(tab.model)) ? "lock" : undefined },
     ],
     onAccept: (item) => {
       if (item?.data === "reopen") pick("Reopen with encoding", (enc) => reopenWithEncoding(tab, enc));
-      else if (item?.data === "convert" && !metaOf(tab.model).large) pick("Convert to encoding", (enc) => convertEncoding(tab, enc));
+      else if (item?.data === "convert" && !lockedReason(metaOf(tab.model))) pick("Convert to encoding", (enc) => convertEncoding(tab, enc), [NO_BOM]);
     },
   });
 }
@@ -842,8 +864,8 @@ function cleanupOnSave(tab: Tab) {
 export async function save(tab: Tab): Promise<boolean> {
   if (tab.kind === "view") return true;
   const meta = metaOf(tab.model);
-  if (meta.large) {
-    toast(`${tab.title} was opened read-only because it is larger than 10 MB.`, "error");
+  if (lockedReason(meta)) {
+    toast(`${tab.title} is read-only: ${lockedReason(meta)}.`, "error");
     return false;
   }
   if (tab.kind === "file" && tab === active && setting("editor.formatOnSave") && tab.model.getLanguageId() === "ruby") {
@@ -877,13 +899,14 @@ export const saveActive = () => active && save(active);
 export const saveAll = () => Promise.all(tabs.filter(isDirty).map(save));
 /// Titles of file buffers with unsaved changes, once per buffer (an editable diff shares its file's model).
 /// Unsaved file buffers with their text (hot exit backups).
-export const dirtyBuffers = () => [...new Map(tabs.filter((t) => t.kind === "file" && isDirty(t)).map((t) => [t.model, { path: t.path, text: t.model.getValue() }])).values()];
+export const dirtyBuffers = () => [...new Map(tabs.filter((t) => t.kind === "file" && isDirty(t)).map((t) => [t.model, { path: t.path, text: t.model.getValue(), encoding: metaOf(t.model).encoding, bom: metaOf(t.model).bom }])).values()];
 
 /// Puts backed-up text into a file's buffer as an undoable, unsaved edit; false when there is nothing to restore.
-export async function restoreBuffer(b: { path: string; text: string }): Promise<boolean> {
+export async function restoreBuffer(b: { path: string; text: string; encoding?: string; bom?: boolean }): Promise<boolean> {
   await openFile(b.path);
   const tab = tabs.find((t) => t.kind === "file" && t.path === b.path);
   if (!tab || tab.model.getValue() === b.text) return false;
+  if (b.encoding && !lockedReason(metaOf(tab.model))) fileMeta.set(tab.model, { ...metaOf(tab.model), encoding: b.encoding, bom: !!b.bom });
   tab.model.pushEditOperations([], [{ range: tab.model.getFullModelRange(), text: b.text }], () => null);
   return true;
 }
@@ -928,19 +951,19 @@ export async function handleFsChanged(paths: string[]) {
   for (const path of paths) {
     const model = monaco.editor.getModel(uriFor(path));
     if (!model) continue;
-    let text: string;
+    let file: TextFile;
     const meta = metaOf(model);
     try {
-      const file = await api.openText(path, meta.forced ? meta.encoding : undefined);
+      file = await api.openText(path, meta.forced ? meta.encoding : undefined);
       if (file.truncated) continue;
-      fileMeta.set(model, { ...meta, encoding: file.encoding, bom: file.bom });
-      text = file.text;
     } catch {
       continue;
     }
+    const text = file.text;
     if (text === model.getValue()) continue;
     const owners = tabs.filter((t) => t.model === model);
     const replace = () => {
+      fileMeta.set(model, metaFrom(file, meta.forced));
       model.pushEditOperations([], [{ range: model.getFullModelRange(), text }], () => null);
       const version = model.getAlternativeVersionId();
       for (const t of owners) t.savedVersion = version;

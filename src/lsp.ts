@@ -1,5 +1,5 @@
 import { allTabs, editor, ensureModel, events, handlePathMoved, monaco, openFile, uriFor, activeTab } from "./editor";
-import { api, Channel, invoke, onSearchSuperseded, type RpcEvent } from "./ipc";
+import { api, Channel, invoke, onSearchSuperseded, type RpcEvent, type TextFile } from "./ipc";
 import { runInPanel } from "./run";
 import { symbolPath } from "./breadcrumbs";
 import { constantName, implementationPattern } from "./implementations";
@@ -370,6 +370,13 @@ export async function onTypeEdits(model: monaco.editor.ITextModel, position: mon
   return (res ?? []).filter((e) => e.newText !== "$0").map((e) => ({ range: toRange(e.range), text: e.newText }));
 }
 
+/// Edits to a file that is not open: applied to its text and saved back in its own encoding and BOM. A file that
+/// was not loaded whole or did not decode cleanly is refused rather than damaged.
+export function closedFileEdit(file: TextFile, edits: TextEdit[]): { text: string; encoding: string; bom: boolean } {
+  if (file.truncated || file.lossy) throw new Error("the file is too large or not valid text; open it and edit it by hand");
+  return { text: applyTextEdits(file.text, edits), encoding: file.encoding, bom: file.bom };
+}
+
 /// Document sync
 
 export const lspPos = (p: monaco.IPosition): Pos => ({ line: p.lineNumber - 1, character: p.column - 1 });
@@ -502,8 +509,8 @@ export async function applyWorkspaceEdit(edit: Json, collect = false): Promise<m
       if (collect) for (const e of edits) forMonaco.push({ resource: model.uri, textEdit: { range: toRange(e.range), text: e.newText }, versionId: undefined });
       else model.pushEditOperations([], edits.map((e) => ({ range: toRange(e.range), text: e.newText })), () => null);
     } else {
-      const text = await api.readFile(parsed.fsPath);
-      await api.writeFile(parsed.fsPath, applyTextEdits(text, edits));
+      const out = closedFileEdit(await api.openText(parsed.fsPath), edits);
+      await api.writeFile(parsed.fsPath, out.text, out.encoding, out.bom);
     }
   }
   for (const [from, to] of renames) {

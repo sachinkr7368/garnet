@@ -103,6 +103,7 @@ export interface TextFile {
   bom: boolean;
   size: number;
   truncated: boolean;
+  lossy: boolean;
 }
 
 export interface MergeInput {
@@ -120,6 +121,7 @@ export const api = {
   writeFile: (path: string, content: string, encoding?: string, bom?: boolean) => invoke<void>("write_file", { path, content, encoding, bom }),
   openText: (path: string, encoding?: string) => invoke<TextFile>("open_text", { path, encoding }),
   copyPath: (from: string, to: string) => invoke<void>("copy_path", { from, to }),
+  trashPath: (path: string) => invoke<void>("trash_path", { path }),
   createPath: (path: string, dir: boolean) => invoke<void>("create_path", { path, dir }),
   renamePath: (from: string, to: string) => invoke<void>("rename_path", { from, to }),
   deletePath: (path: string) => invoke<void>("delete_path", { path }),
@@ -138,7 +140,7 @@ export const api = {
   gitStatus: (root: string) => invoke<GitStatusEntry[]>("git_status", { root }),
   gitBranch: (root: string) => invoke<string>("git_branch", { root }),
   gitShow: (root: string, path: string, rev: string) => invoke<string>("git_show", { root, path, rev }),
-  gitFileAt: (root: string, rev: string, path: string) => invoke<string | null>("git_file_at", { root, rev, path }),
+  gitFileAt: (root: string, rev: string, path: string, encoding?: string) => invoke<string | null>("git_file_at", { root, rev, path, encoding }),
   gitLog: (root: string, opts: LogOpts) => invoke<LogCommit[]>("git_log", { root, opts }),
   gitDiffFiles: (root: string, spec: string[]) => invoke<ChangedFile[]>("git_diff_files", { root, spec }),
   gitCommitDetails: (root: string, rev: string) => invoke<CommitDetails>("git_commit_details", { root, rev }),

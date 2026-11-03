@@ -265,6 +265,7 @@ pub fn run() {
             fsops::write_file,
             fsops::open_text,
             fsops::copy_path,
+            fsops::trash_path,
             fsops::export_file,
             fsops::import_file,
             fsops::create_path,

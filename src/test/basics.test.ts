@@ -99,3 +99,39 @@ describe("editor shortcuts and focus", () => {
     expect(editorHasFocus(at("x", "input"))).toBe(false);
   });
 });
+
+describe("encodings", () => {
+  it("edits to closed files keep their encoding and BOM, and refuse damaged loads", () => {
+    const file = { text: "caf\u00e9\n", encoding: "windows-1252", bom: false, size: 6, truncated: false, lossy: false };
+    const edit = [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "CAF" }];
+    expect(lsp.closedFileEdit(file, edit)).toEqual({ text: "CAF\u00e9\n", encoding: "windows-1252", bom: false });
+    expect(lsp.closedFileEdit({ ...file, encoding: "UTF-8", bom: true }, edit).bom).toBe(true);
+    expect(() => lsp.closedFileEdit({ ...file, lossy: true }, edit)).toThrow();
+    expect(() => lsp.closedFileEdit({ ...file, truncated: true }, edit)).toThrow();
+  });
+
+  it("keeps a UTF-8 BOM on convert unless UTF-8 (no BOM) is picked", () => {
+    expect(editorMod.convertedBom({ encoding: "UTF-8", bom: true }, "UTF-8")).toBe(true);
+    expect(editorMod.convertedBom({ encoding: "UTF-8", bom: true }, "UTF-8 (no BOM)")).toBe(false);
+    expect(editorMod.convertedBom({ encoding: "windows-1252", bom: false }, "UTF-8")).toBe(false);
+    expect(editorMod.convertedBom({ encoding: "UTF-8", bom: false }, "UTF-16LE")).toBe(true);
+  });
+
+  it("locks buffers that did not decode or were cut", () => {
+    expect(editorMod.lockedReason({ encoding: "UTF-8", bom: false, large: false, lossy: true })).toContain("not valid UTF-8");
+    expect(editorMod.lockedReason({ encoding: "UTF-8", bom: false, large: true })).toContain("10 MB");
+    expect(editorMod.lockedReason({ encoding: "UTF-8", bom: false, large: false })).toBeNull();
+  });
+});
+
+describe("project tree delete", () => {
+  it("asks with Cancel focused; Escape keeps the file", async () => {
+    const answer = tree.confirmTrash("app/models/post.rb");
+    const dialog = document.querySelector(".trash-dialog")!;
+    expect(dialog.textContent).toContain("Move app/models/post.rb to the Trash?");
+    expect(document.activeElement?.textContent).toBe("Cancel");
+    document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(await answer).toBe(false);
+    expect(document.querySelector(".trash-dialog")).toBeNull();
+  });
+});

@@ -1,4 +1,4 @@
-import { autoEndText } from "./autoend";
+import { autoEndText, insideHeredoc } from "./autoend";
 import { symbolPath, type SymbolNode } from "./breadcrumbs";
 import { commands, runEditorAction } from "./commands";
 import { runToCursor, toggleMuteBreakpoints } from "./debug";
@@ -24,6 +24,7 @@ async function autoEnd(text: string) {
   const model = editor.getModel();
   const pos = editor.getPosition();
   if (text !== "\n" || !model || !pos || model.getLanguageId() !== "ruby" || !setting("editor.autoInsertEnd") || editor.getOption(monaco.editor.EditorOption.readOnly)) return;
+  if (insideHeredoc(model.getLinesContent(), pos.lineNumber)) return;
   const version = model.getVersionId();
   let edits = await onTypeEdits(model, pos, "\n");
   if (edits?.some((e) => e.text?.trimStart().startsWith("#"))) edits = [];

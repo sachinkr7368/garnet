@@ -1,9 +1,8 @@
-import { ask } from "@tauri-apps/plugin-dialog";
 import { handlePathMoved, openFile } from "./editor";
 import { api, type DirEntry } from "./ipc";
 import { globToRegExp, setting } from "./settings";
 import { basename, dirname, rel, state } from "./state";
-import { bottom, contextMenu, fileIcon, h, icon, iconButton, inputBox, toast } from "./ui";
+import { bottom, contextMenu, fileIcon, h, icon, iconButton, inputBox, modal, toast } from "./ui";
 import { newTerminal } from "./terminal";
 import { railsTreeEl, refreshRailsTree } from "./railsview";
 
@@ -216,16 +215,35 @@ async function renameNode(node: Node) {
   }
 }
 
-async function deleteNode(node: Node) {
-  const ok = await ask(`Delete ${rel(node.entry.path)}${node.entry.dir ? " and everything in it" : ""}? This cannot be undone.`, {
-    title: "Delete",
-    kind: "warning",
-    okLabel: "Delete",
-    cancelLabel: "Cancel",
+/// RubyMine's Delete… dialog: Cancel has focus, so Enter or Escape keeps the file.
+export function confirmTrash(what: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let backdrop: HTMLElement | null = null;
+    const done = (yes: boolean) => {
+      backdrop?.remove();
+      backdrop = null;
+      treeEl.focus({ preventScroll: true });
+      resolve(yes);
+    };
+    const cancel = h("button", { class: "btn primary", onclick: () => done(false) }, "Cancel");
+    backdrop = modal(
+      h(
+        "div",
+        { class: "st-dialog trash-dialog" },
+        h("div", { class: "rc-title" }, icon("trash"), " Delete"),
+        h("div", { class: "st-page" }, `Move ${what} to the Trash?`),
+        h("div", { class: "rc-actions" }, h("button", { class: "btn", onclick: () => done(true) }, "Move to Trash"), cancel),
+      ),
+      () => done(false),
+      { autofocus: cancel },
+    );
   });
-  if (!ok) return;
+}
+
+async function deleteNode(node: Node) {
+  if (!(await confirmTrash(`${rel(node.entry.path)}${node.entry.dir ? " and everything in it" : ""}`))) return;
   try {
-    await api.deletePath(node.entry.path);
+    await api.trashPath(node.entry.path);
     handlePathMoved(node.entry.path, null);
     await refreshTree([node.entry.path]);
   } catch (e) {
@@ -288,7 +306,7 @@ let typed = "";
 let typedAt = 0;
 
 /// RubyMine Project view keys: arrows, ←/→ collapse/expand, Enter/F4 open, type to select, ⌘⌫ delete,
-/// ⇧F6/F2 rename, ⌘C/⌘V copy and paste files.
+/// ⇧F6/F2 rename, ⌘C/⌘V copy and paste files. ⌘⌫ moves to the Trash after a confirm that defaults to Cancel.
 treeEl.addEventListener("keydown", (e) => {
   const list = visibleNodes();
   const i = list.findIndex((n) => n.entry.path === selected);
@@ -310,7 +328,7 @@ treeEl.addEventListener("keydown", (e) => {
     if (cur.entry.dir && cur.expanded) void toggle(cur, false);
     else move(list.indexOf(nodes.get(dirname(cur.entry.path))!));
   } else if ((k === "Enter" || k === "F4") && !mods && cur) cur.entry.dir ? void toggle(cur) : void openFile(cur.entry.path);
-  else if (((k === "Backspace" && e.metaKey) || (k === "Delete" && !mods)) && cur) void deleteNode(cur);
+  else if (k === "Backspace" && e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && cur) void deleteNode(cur);
   else if (((k === "F6" && e.shiftKey) || (k === "F2" && !e.shiftKey)) && !mods && cur) void renameNode(cur);
   else if (e.metaKey && !e.shiftKey && !e.altKey && e.code === "KeyC" && cur) copyNode(cur);
   else if (e.metaKey && !e.shiftKey && !e.altKey && e.code === "KeyV") void pasteInto(cur);

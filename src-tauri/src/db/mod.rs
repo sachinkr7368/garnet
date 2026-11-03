@@ -373,13 +373,22 @@ impl Conn {
     /// always rolled back; a writable connection never gets that wrapper, since its BEGIN/ROLLBACK would end
     /// (MySQL: commit) whatever the console has open. `require_ro` makes SQLite refuse writing statements.
     async fn run(&self, stmts: &[&str], max: u32, require_ro: bool, query_id: Option<&str>) -> Result<Vec<QueryResult>, String> {
+        self.run_with(stmts, max, require_ro, query_id, false).await
+    }
+
+    /// `force_wrap` gives a writable connection the read-only wrapper too (grid reads when the read-only twin
+    /// session couldn't be opened); it is refused while the console has a transaction open, which BEGIN would end.
+    async fn run_with(&self, stmts: &[&str], max: u32, require_ro: bool, query_id: Option<&str>, force_wrap: bool) -> Result<Vec<QueryResult>, String> {
         let mut d = self.driver.lock().await;
         let begin = match self.dialect {
             Dialect::Postgres => "BEGIN READ ONLY",
             Dialect::Mysql => "START TRANSACTION READ ONLY",
             Dialect::Sqlite => "",
         };
-        let wrap = self.read_only && !begin.is_empty();
+        let wrap = (self.read_only || force_wrap) && !begin.is_empty();
+        if wrap && !self.read_only && d.in_transaction().await? {
+            return Err("The console has a transaction open, and the read-only session for browsing couldn't be opened; commit or roll back first".into());
+        }
         if wrap {
             d.exec(begin, 0, false).await?;
         }
@@ -551,14 +560,21 @@ impl Db {
         };
         let mut conn = open(cfg.clone()).await?;
         if !cfg.read_only && conn.dialect != Dialect::Sqlite {
-            conn.reader = Some(Box::new(open(ConnConfig { read_only: true, ..cfg.clone() }).await?));
+            // Without the twin (connection limit, role can't log in twice), grid reads fall back to a wrapper on the main session.
+            conn.reader = open(ConnConfig { read_only: true, ..cfg.clone() }).await.ok().map(Box::new);
         }
         let q = match conn.dialect {
             Dialect::Postgres => "SHOW server_version",
             Dialect::Mysql => "SELECT VERSION()",
             Dialect::Sqlite => "SELECT sqlite_version()",
         };
-        let r = conn.run(&[q], 1, false, None).await?;
+        let r = match conn.run(&[q], 1, false, None).await {
+            Ok(r) => r,
+            Err(e) => {
+                conn.close().await;
+                return Err(e);
+            }
+        };
         let version = r.first().and_then(|r| r.rows.first()).map(|row| cell(row, 0)).unwrap_or_default();
         let old = self.0.lock().unwrap_or_else(|p| p.into_inner()).insert(id, Arc::new(conn));
         if let Some(old) = old {
@@ -610,7 +626,7 @@ impl Db {
         let conn = self.get(id)?;
         let q = sql::schema_queries(conn.dialect);
         let q: Vec<&str> = q.iter().map(String::as_str).collect();
-        let r = conn.reads().run(&q, u32::MAX, true, None).await?;
+        let r = conn.read(&q, u32::MAX).await?;
         Ok(build_schema(&r[0], &r[1], &r[2], &r[3]))
     }
 
@@ -629,7 +645,7 @@ impl Db {
         let conn = self.get(id)?;
         let limit = limit.clamp(1, MAX_PAGE);
         let (page, count) = sql::page_sql(conn.dialect, schema, table, filter, order_by, desc, limit, offset)?;
-        let mut r = conn.reads().run(&[&count, &page], limit, true, None).await?;
+        let mut r = conn.read(&[&count, &page], limit).await?;
         let result = r.pop().unwrap_or_default();
         let total = r.first().and_then(|c| c.rows.first()).and_then(|row| cell(row, 0).parse().ok());
         Ok(TablePage { result, total })
@@ -646,6 +662,36 @@ pub struct RowEdit {
 const BINARY: [&str; 3] = ["blob", "bytea", "binary"];
 
 type Statement = (String, Vec<Option<String>>);
+
+/// A Postgres type without its typmod, so a cast never truncates (`character varying(10)` → `character varying`);
+/// the column's own assignment then raises "value too long" instead. `character`/`bit` alone mean length 1.
+fn pg_base_type(t: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0;
+    for ch in t.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (base, arr) = out.split_at(out.find("[]").unwrap_or(out.len()));
+    let base = match base.trim() {
+        "character" => "bpchar",
+        "bit" => "bit varying",
+        b => b,
+    };
+    format!("{base}{arr}")
+}
+
+/// Postgres types with no `=` (json, xml, geometric) or whose `=` isn't equality (box/circle compare areas):
+/// compared through their text form, which is what the grid showed.
+fn pg_compare_as_text(t: &str) -> bool {
+    let base = pg_base_type(t);
+    matches!(base.trim_end_matches("[]"), "json" | "xml" | "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle" | "txid_snapshot" | "pg_snapshot")
+}
 
 /// Checks the edits against the introspected table and builds one parameterized UPDATE per row: SET each changed
 /// column, WHERE the primary key matches and each changed column still holds the value the grid showed.
@@ -670,10 +716,12 @@ fn update_statements(d: Dialect, schema: &str, t: &TableInfo, rows: &[RowEdit]) 
             return Err(format!("Row {row}: the primary key ({}) and at least one change are required", pk.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")));
         }
         let mut params = vec![];
-        let mut arg = |v: Option<String>, c: &Column| {
+        // Postgres: as_text compares through the text form; otherwise a typmod-free cast of the text parameter.
+        let arg = |params: &mut Vec<Option<String>>, v: Option<String>, c: &Column, as_text: bool| {
             params.push(v);
             match d {
-                Dialect::Postgres => format!("CAST(${}::text AS {})", params.len(), c.data_type),
+                Dialect::Postgres if as_text => format!("${}::text", params.len()),
+                Dialect::Postgres => format!("CAST(${}::text AS {})", params.len(), pg_base_type(&c.data_type)),
                 _ => "?".to_string(),
             }
         };
@@ -685,7 +733,7 @@ fn update_statements(d: Dialect, schema: &str, t: &TableInfo, rows: &[RowEdit]) 
                 return Err(format!("Row {row}: {name} can't be edited in the grid ({})", if c.primary_key { "primary key" } else { "binary" }));
             }
             let Some(orig) = r.originals.get(name) else { return Err(format!("Row {row}: the original value of {name} is missing")) };
-            set.push(format!("{} = {}", sql::quote_ident(name, d), arg(v.clone(), c)));
+            set.push(format!("{} = {}", sql::quote_ident(name, d), arg(&mut params, v.clone(), c, false)));
             let same = match d {
                 Dialect::Postgres => "IS NOT DISTINCT FROM",
                 Dialect::Mysql => "<=>",
@@ -693,9 +741,11 @@ fn update_statements(d: Dialect, schema: &str, t: &TableInfo, rows: &[RowEdit]) 
             };
             cond.push((name, same, orig.clone(), c));
         }
-        let mut wh: Vec<String> = pk.iter().map(|c| format!("{} = {}", sql::quote_ident(&c.name, d), arg(Some(r.pk[&c.name].clone()), c))).collect();
+        let mut wh: Vec<String> = pk.iter().map(|c| format!("{} = {}", sql::quote_ident(&c.name, d), arg(&mut params, Some(r.pk[&c.name].clone()), c, false))).collect();
         for (name, same, orig, c) in cond {
-            wh.push(format!("{} {same} {}", sql::quote_ident(name, d), arg(orig, c)));
+            let as_text = d == Dialect::Postgres && pg_compare_as_text(&c.data_type);
+            let lhs = if as_text { format!("{}::text", sql::quote_ident(name, d)) } else { sql::quote_ident(name, d) };
+            wh.push(format!("{lhs} {same} {}", arg(&mut params, orig, c, as_text)));
         }
         out.push((format!("UPDATE {table} SET {} WHERE {}", set.join(", "), wh.join(" AND ")), params));
     }
@@ -752,8 +802,12 @@ impl Driver {
 }
 
 impl Conn {
-    fn reads(&self) -> &Conn {
-        self.reader.as_deref().unwrap_or(self)
+    /// Grid and schema reads: on the read-only twin when there is one, otherwise wrapped read-only on this session.
+    async fn read(&self, stmts: &[&str], max: u32) -> Result<Vec<QueryResult>, String> {
+        match &self.reader {
+            Some(r) => r.run(stmts, max, true, None).await,
+            None => self.run_with(stmts, max, true, None, self.dialect != Dialect::Sqlite).await,
+        }
     }
 }
 
@@ -777,7 +831,8 @@ impl Db {
             let res = d.exec_params(&sql, params).await;
             let bad = match res {
                 Ok(1) => continue,
-                Ok(k) => format!("Row {}: matched {k} rows (it changed or was deleted since it was loaded)", n + 1),
+                Ok(0) => format!("Row {}: the value changed since it was loaded, or can't be compared exactly (floating-point or untyped values); reload the table and edit again", n + 1),
+                Ok(k) => format!("Row {}: matched {k} rows", n + 1),
                 Err(e) => format!("Row {}: {e}", n + 1),
             };
             let _ = d.exec("ROLLBACK", 0, false).await;
@@ -795,17 +850,39 @@ fn binding(cfg: &ConnConfig) -> String {
     format!("{}|{}|{port}|{}", cfg.engine, if host.is_empty() { "localhost" } else { &host }, cfg.username.trim())
 }
 
+/// How strongly the connection is encrypted, as the drivers apply sslmode: disable < prefer (and anything else) < require.
+fn ssl_rank(mode: &str) -> u8 {
+    match mode {
+        "disable" => 0,
+        "require" => 2,
+        _ => 1,
+    }
+}
+
+fn ssl_of(cfg: &ConnConfig) -> String {
+    cfg.sslmode.clone().unwrap_or_else(|| "prefer".into())
+}
+
 #[derive(Serialize, Deserialize)]
 struct Saved {
     password: String,
     bind: String,
+    #[serde(default)]
+    ssl: String,
 }
 
-/// The saved password for `cfg`, or None when it was saved for another host, port or user (or by an older
-/// Garnet without a binding: the connect then fails and the password is asked for and saved again).
+impl Saved {
+    fn new(password: String, cfg: &ConnConfig) -> Saved {
+        Saved { password, bind: binding(cfg), ssl: ssl_of(cfg) }
+    }
+}
+
+/// The saved password for `cfg`, or None when it was saved for another host, port or user, when the connection
+/// would now be less encrypted than when it was saved, or when an older Garnet saved it without a binding (the
+/// connect then fails and the password is asked for and saved again).
 fn saved_password(raw: Option<String>, cfg: &ConnConfig) -> Option<String> {
     let s: Saved = serde_json::from_str(&raw?).ok()?;
-    (s.bind == binding(cfg)).then_some(s.password)
+    (s.bind == binding(cfg) && ssl_rank(&ssl_of(cfg)) >= ssl_rank(&s.ssl)).then_some(s.password)
 }
 
 async fn keychain_password(id: String, cfg: &ConnConfig) -> Result<Option<String>, String> {
@@ -937,7 +1014,7 @@ pub async fn db_update_rows(db: State<'_, Db>, id: String, schema: String, table
 
 #[tauri::command]
 pub async fn db_password_set(id: String, password: String, config: ConnConfig) -> Result<(), String> {
-    let value = serde_json::to_string(&Saved { password, bind: binding(&config) }).map_err(e2s)?;
+    let value = serde_json::to_string(&Saved::new(password, &config)).map_err(e2s)?;
     tokio::task::spawn_blocking(move || keychain::set(&id, &value)).await.map_err(e2s)?
 }
 
@@ -947,8 +1024,9 @@ pub async fn db_password_delete(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn db_password_exists(id: String) -> bool {
-    tokio::task::spawn_blocking(move || keychain::get(&id)).await.is_ok_and(|r| matches!(r, Ok(Some(_))))
+/// Whether a saved password would be offered to `config` (same server and user, at least as encrypted).
+pub async fn db_password_exists(id: String, config: ConnConfig) -> bool {
+    matches!(keychain_password(id, &config).await, Ok(Some(_)))
 }
 
 #[tauri::command]
@@ -1180,7 +1258,7 @@ mod tests {
         assert_eq!(name(2).await[1], None);
         // A row that changed since it was loaded stops the whole batch; the first row's edit is rolled back too.
         let err = db.update_rows("e", "main", "authors", &[edit("3", "name", Some("x"), Some("cy")), edit("1", "name", Some("y"), Some("ann"))]).await.unwrap_err();
-        assert!(err.starts_with("Row 2: matched 0 rows"), "{err}");
+        assert!(err.starts_with("Row 2: the value changed since it was loaded, or can't be compared exactly"), "{err}");
         assert_eq!(db.query("e", "SELECT name FROM authors WHERE id = 3", None, None, None).await.unwrap().rows[0][0].as_deref(), Some("cy"));
         for (table, rows, why) in [
             ("recent", vec![edit("1", "title", Some("x"), None)], "is a view"),
@@ -1202,18 +1280,53 @@ mod tests {
     }
 
     #[test]
+    fn postgres_edits_never_truncate_and_compare_types_without_equality_as_text() {
+        let col = |name: &str, ty: &str, pk: bool| Column { name: name.into(), data_type: ty.into(), nullable: true, default: None, primary_key: pk };
+        let t = TableInfo {
+            name: "t".into(),
+            kind: "table",
+            columns: vec![col("id", "bigint", true), col("code", "character varying(10)", false), col("doc", "json", false), col("at", "point", false), col("flag", "character(3)", false), col("tags", "character varying(5)[]", false)],
+            indexes: vec![],
+            foreign_keys: vec![],
+        };
+        let row = RowEdit {
+            pk: [("id".into(), "1".into())].into(),
+            changes: [("code", "x".repeat(15)), ("doc", "{}".into()), ("at", "(1,2)".into()), ("flag", "ab".into()), ("tags", "{a}".into())].map(|(k, v)| (k.to_string(), Some(v))).into(),
+            originals: [("code", "old"), ("doc", "{\"a\": 1}"), ("at", "(0,0)"), ("flag", "abc"), ("tags", "{b}")].map(|(k, v)| (k.to_string(), Some(v.to_string()))).into(),
+        };
+        let (sql, params) = update_statements(Dialect::Postgres, "public", &t, &[row]).unwrap().remove(0);
+        assert_eq!(
+            sql,
+            "UPDATE \"public\".\"t\" SET \"at\" = CAST($1::text AS point), \"code\" = CAST($2::text AS character varying), \"doc\" = CAST($3::text AS json), \"flag\" = CAST($4::text AS bpchar), \"tags\" = CAST($5::text AS character varying[]) \
+             WHERE \"id\" = CAST($6::text AS bigint) AND \"at\"::text IS NOT DISTINCT FROM $7::text AND \"code\" IS NOT DISTINCT FROM CAST($8::text AS character varying) \
+             AND \"doc\"::text IS NOT DISTINCT FROM $9::text AND \"flag\" IS NOT DISTINCT FROM CAST($10::text AS bpchar) AND \"tags\" IS NOT DISTINCT FROM CAST($11::text AS character varying[])"
+        );
+        assert_eq!(params.len(), 11);
+        assert_eq!(pg_base_type("timestamp(3) without time zone"), "timestamp without time zone");
+        assert_eq!(pg_base_type("numeric(10,2)"), "numeric");
+        assert_eq!(pg_base_type("bit(4)"), "bit varying");
+    }
+
+    #[test]
     fn keychain_password_is_only_offered_to_the_server_it_was_saved_for() {
         let mut c = cfg(Path::new("/x"), false);
         c.engine = "postgres".into();
         c.host = "db.local".into();
         c.username = "app".into();
-        let raw = serde_json::to_string(&Saved { password: "pw".into(), bind: binding(&c) }).unwrap();
+        c.sslmode = Some("prefer".into());
+        let raw = serde_json::to_string(&Saved::new("pw".into(), &c)).unwrap();
         assert_eq!(saved_password(Some(raw.clone()), &c).as_deref(), Some("pw"));
         let explicit = ConnConfig { port: Some(5432), host: " DB.local ".into(), ..c.clone() };
         assert_eq!(saved_password(Some(raw.clone()), &explicit).as_deref(), Some("pw"));
         for other in [ConnConfig { host: "evil.example".into(), ..c.clone() }, ConnConfig { port: Some(6543), ..c.clone() }, ConnConfig { username: "root".into(), ..c.clone() }] {
             assert_eq!(saved_password(Some(raw.clone()), &other), None);
         }
+        // Never sent over a weaker connection than the one it was saved for; a stronger one is fine.
+        assert_eq!(saved_password(Some(raw.clone()), &ConnConfig { sslmode: Some("disable".into()), ..c.clone() }), None);
+        assert_eq!(saved_password(Some(raw.clone()), &ConnConfig { sslmode: Some("require".into()), ..c.clone() }).as_deref(), Some("pw"));
+        assert_eq!(saved_password(Some(raw.clone()), &ConnConfig { sslmode: None, ..c.clone() }).as_deref(), Some("pw"));
+        let strict = serde_json::to_string(&Saved::new("pw".into(), &ConnConfig { sslmode: Some("require".into()), ..c.clone() })).unwrap();
+        assert_eq!(saved_password(Some(strict), &c), None);
         assert_eq!(saved_password(Some("legacy-plain-password".into()), &c), None);
         assert_eq!(saved_password(None, &c), None);
     }
@@ -1336,6 +1449,33 @@ mod tests {
             originals: [("v".to_string(), Some("b".to_string()))].into(),
         }]).await.unwrap_err().contains("transaction open"));
         db.query("n", "ROLLBACK", None, None, None).await.unwrap();
+        // A too-long value is an error, never truncated by a cast; nothing is saved.
+        db.query("n", "CREATE TABLE garnet_typed (id INT PRIMARY KEY, code VARCHAR(10), doc JSON)", None, None, None).await.unwrap();
+        db.query("n", "INSERT INTO garnet_typed VALUES (1, 'abc', '{\"a\": 1}')", None, None, None).await.unwrap();
+        let typed = |col: &str, new: &str, old: &str| RowEdit {
+            pk: [("id".to_string(), "1".to_string())].into(),
+            changes: [(col.to_string(), Some(new.to_string()))].into(),
+            originals: [(col.to_string(), Some(old.to_string()))].into(),
+        };
+        let err = db.update_rows("n", schema, "garnet_typed", &[typed("code", "fifteen-chars!!", "abc")]).await.unwrap_err();
+        assert!(err.to_lowercase().contains("too long") || err.contains("Data too long"), "{err}");
+        let row = || async { db.query("n", "SELECT code FROM garnet_typed WHERE id = 1", None, None, None).await.unwrap().rows[0][0].clone() };
+        assert_eq!(row().await.as_deref(), Some("abc"));
+        let doc = db.query("n", "SELECT doc FROM garnet_typed WHERE id = 1", None, None, None).await.unwrap().rows[0][0].clone().unwrap();
+        assert_eq!(db.update_rows("n", schema, "garnet_typed", &[typed("doc", "{\"b\": 2}", &doc)]).await, Ok(1));
+        confirmed(&db, "n", "DROP TABLE garnet_typed").await.unwrap();
+        // Without the read-only twin, grid reads are wrapped read-only on the main session and refused mid-transaction.
+        let fallback = Arc::new(Conn::open(&c, pw.as_deref()).await.unwrap());
+        db.0.lock().unwrap().insert("fb".into(), fallback);
+        assert!(db.table_page("fb", schema, "garnet_test", 0, 10, None, false, None).await.is_ok());
+        if engine == "Postgres" {
+            db.query("fb", "CREATE SEQUENCE IF NOT EXISTS garnet_seq", None, None, None).await.unwrap();
+            assert!(db.table_page("fb", schema, "garnet_test", 0, 10, None, false, Some("nextval('garnet_seq') > 0")).await.unwrap_err().contains("read-only"));
+            confirmed(&db, "fb", "DROP SEQUENCE garnet_seq").await.unwrap();
+        }
+        db.query("fb", "BEGIN", None, None, None).await.unwrap();
+        assert!(db.table_page("fb", schema, "garnet_test", 0, 10, None, false, None).await.unwrap_err().contains("transaction open"));
+        db.query("fb", "ROLLBACK", None, None, None).await.unwrap();
         c.read_only = true;
         db.connect("ro".into(), &c, pw.as_deref()).await.unwrap();
         assert_eq!(db.query("ro", "DELETE FROM garnet_test", None, None, None).await.unwrap_err(), sql::READ_ONLY);

@@ -170,6 +170,7 @@ describe("read-only explanation, DDL and explain plan", async () => {
     expect(readOnlyReason(conn({ host: "db.internal", readOnly: true }))).toMatch(/points at db.internal/);
     // It doesn't promise more than a read-only session gives (review 8).
     expect(readOnlyReason(erb)).toMatch(/pg_terminate_backend, dblink/);
+    expect(readOnlyReason(erb)).toMatch(/Server-side functions and procedures run with the connecting role's privileges/);
     expect(readOnlyReason(erb)).toMatch(/role without those privileges/);
   });
 
@@ -353,7 +354,8 @@ describe("rejected saved password (B48)", async () => {
     fake.reset();
     state.project = { root: "/b48", name: "b48" } as typeof state.project;
     fake.handlers.set("db_detect", () => [det()]);
-    fake.handlers.set("db_password_exists", () => true);
+    const existsArgs: Record<string, unknown>[] = [];
+    fake.handlers.set("db_password_exists", (a) => (existsArgs.push(a), true));
     let tries = 0;
     fake.handlers.set("db_connect", (a) => {
       tries++;
@@ -372,6 +374,7 @@ describe("rejected saved password (B48)", async () => {
     [...dialog.querySelectorAll("button")].find((b) => b.textContent === "Connect")!.click();
     await done;
     expect(fake.invocations.find((i) => i.cmd === "db_password_set")?.args).toMatchObject({ id: "/b48::env::development", password: "right", config: { host: "localhost", username: "app" } });
+    expect(existsArgs[0]).toMatchObject({ id: "/b48::env::development", config: { host: "localhost", username: "app", sslmode: "prefer" } });
     expect(tries).toBe(2);
     expect(dbTesting.isLive("/b48::env::development")).toBe(true);
     state.project = null;

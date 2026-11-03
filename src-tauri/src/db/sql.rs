@@ -26,12 +26,24 @@ impl Scan {
         self.words.iter().any(|(x, _)| x == w)
     }
 
+    /// EXPLAIN ANALYZE (or ANALYSE) runs the explained statement.
+    fn analyzes(&self) -> bool {
+        matches!(self.first_keyword.as_deref(), Some("EXPLAIN" | "DESCRIBE" | "DESC")) && (self.has("ANALYZE") || self.has("ANALYSE"))
+    }
+
     /// Why the statement needs an explicit confirmation: DROP/TRUNCATE/ALTER, or UPDATE/DELETE without a WHERE
     /// at its own level. Mirrors `classify` in src/sqlsafety.ts.
     fn destructive(&self) -> Option<String> {
         let first = self.first_keyword.as_deref().unwrap_or("");
         if matches!(first, "DROP" | "TRUNCATE" | "ALTER") {
             return Some(format!("{first} statement"));
+        }
+        // Server-side code whose effect can't be read from the text: anonymous blocks, procedures, prepared statements.
+        if matches!(first, "DO" | "CALL" | "EXECUTE" | "PREPARE") || (self.analyzes() && self.has("EXECUTE")) {
+            return Some(format!("{} statement", if matches!(first, "EXPLAIN" | "DESCRIBE" | "DESC") { "EXECUTE" } else { first }));
+        }
+        if first == "COPY" && self.has("PROGRAM") {
+            return Some("COPY … PROGRAM runs a server-side command".into());
         }
         for (k, (w, depth)) in self.words.iter().enumerate() {
             if w != "UPDATE" && w != "DELETE" {
@@ -94,8 +106,9 @@ pub fn check_read_only(c: &Checked, d: Dialect) -> Result<(), String> {
             _ => false,
         };
         let locks = s.words.windows(2).any(|w| matches!((w[0].0.as_str(), w[1].0.as_str()), ("FOR", "UPDATE" | "SHARE" | "NO" | "KEY") | ("LOCK", "IN")));
-        let writes = s.first_keyword.as_deref() == Some("WITH") && ["INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|w| s.has(w));
-        kw && !locks && !writes && !s.has("INTO") && !s.has("OUTFILE") && !s.has("DUMPFILE")
+        let modifying = ["INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|w| s.has(w));
+        let writes = (s.first_keyword.as_deref() == Some("WITH") && modifying) || (s.analyzes() && (modifying || s.has("EXECUTE") || s.has("CREATE")));
+        kw && !locks && !writes && !["INTO", "OUTFILE", "DUMPFILE", "LOAD_FILE"].iter().any(|w| s.has(w))
     });
     ok.then_some(()).ok_or_else(|| READ_ONLY.into())
 }

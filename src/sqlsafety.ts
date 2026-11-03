@@ -182,7 +182,9 @@ const WRITE = new Set(["INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "UPSERT
 const DDL = new Set(["CREATE", "DROP", "ALTER", "TRUNCATE", "RENAME", "COMMENT", "GRANT", "REVOKE"]);
 const TX = new Set(["BEGIN", "START", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "END", "ABORT"]);
 const MAIN = new Set(["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "VALUES", "TABLE"]);
-const EXPLAINED = new Set([...MAIN, "WITH", "REPLACE", "CREATE"]);
+const EXPLAINED = new Set([...MAIN, "WITH", "REPLACE", "CREATE", "EXECUTE"]);
+/// Server-side code whose effect can't be read from the text. Mirrors `destructive` in src-tauri/src/db/sql.rs.
+const OPAQUE = new Set(["DO", "CALL", "EXECUTE", "PREPARE"]);
 const MODIFYING = new Set(["INSERT", "UPDATE", "DELETE", "MERGE"]);
 
 /// First statement keyword after leading comments/parens, and for WITH the keyword of the main statement.
@@ -239,7 +241,10 @@ function classifyAs(sql: string, dialect: Dialect, reading: Reading): Classifica
   if (kw === "PRAGMA" && toks.some((x) => x.up === "=")) kind = "write";
   if (kw === "SELECT" && locks(toks, hd.main + 1, hd.base)) kind = "write";
   if (first === "WITH" && toks.some((x) => x.depth > hd.base && MODIFYING.has(x.up))) kind = "write";
+  if (toks.some((x, k) => x.up === "LOAD_FILE" && toks[k + 1]?.up === "(")) kind = "write";
   if (kw === "DROP" || kw === "TRUNCATE" || kw === "ALTER") return { kind, dangerous: true, reason: `${kw} statement` };
+  if (OPAQUE.has(kw)) return { kind, dangerous: true, reason: `${kw} statement` };
+  if (kw === "COPY" && toks.some((x) => x.up === "PROGRAM")) return { kind, dangerous: true, reason: "COPY … PROGRAM runs a server-side command" };
   if (kind === "write") {
     for (let k = 0; k < toks.length; k++) {
       const x = toks[k];

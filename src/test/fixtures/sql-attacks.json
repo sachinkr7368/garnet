@@ -271,5 +271,98 @@
     "dialect": "mysql",
     "readOnly": "allow",
     "writable": "run"
+  },
+  {
+    "sql": "EXPLAIN ANALYZE DELETE FROM t WHERE id = 1",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "run",
+    "note": "EXPLAIN ANALYZE runs the statement"
+  },
+  {
+    "sql": "EXPLAIN ANALYZE UPDATE t SET a = 1",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "EXPLAIN (ANALYZE) INSERT INTO t VALUES (1)",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "run"
+  },
+  {
+    "sql": "EXPLAIN ANALYZE EXECUTE p",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "EXPLAIN SELECT 1",
+    "dialect": "postgres",
+    "readOnly": "allow",
+    "writable": "run"
+  },
+  {
+    "sql": "DO $$BEGIN DELETE FROM t; END$$",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "the body runs server-side and can't be inspected"
+  },
+  {
+    "sql": "PREPARE p AS DELETE FROM t WHERE id = 1",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "EXECUTE p",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "CALL cleanup()",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "CALL cleanup()",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "PREPARE s FROM @q",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "EXECUTE s",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "COPY t FROM PROGRAM 'curl -s example.test'",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "COPY t TO STDOUT",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "run"
+  },
+  {
+    "sql": "SELECT load_file('/etc/passwd')",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "run",
+    "note": "reads a server file"
   }
 ]

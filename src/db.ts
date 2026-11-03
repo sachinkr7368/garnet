@@ -152,7 +152,7 @@ export function readOnlyReason(c: Conn): string {
   else if (c.unresolved.includes("host")) why = "The host comes from ERB/ENV in config/database.yml and couldn't be resolved, so Garnet can't tell whether it's this machine.";
   else if (c.engine !== "sqlite" && !isLocalHost(c.host)) why = `It points at ${c.host}, not this machine.`;
   else why = "You marked it read-only.";
-  return `Read-only: Garnet refuses statements that write and opens the session read-only, which stops ordinary INSERT/UPDATE/DELETE/DDL. It can't stop functions with side effects that a read-only session still allows (pg_terminate_backend, dblink, advisory locks); for a shared or production database, connect as a role without those privileges.\n${why}\n${how}`;
+  return `Read-only: Garnet refuses statements that write and opens the session read-only, which stops ordinary INSERT/UPDATE/DELETE/DDL. It can't stop functions with side effects that a read-only session still allows (pg_terminate_backend, dblink, advisory locks); for a shared or production database, connect as a role without those privileges.\nServer-side functions and procedures run with the connecting role's privileges, and Garnet can't see what they do: DO blocks, CALL, EXECUTE and COPY … PROGRAM always ask first, and are refused here.\n${why}\n${how}`;
 }
 
 const q = (d: Dialect, name: string) => (d === "mysql" ? `\`${name.replace(/`/g, "``")}\`` : `"${name.replace(/"/g, '""')}"`);
@@ -376,7 +376,7 @@ async function connect(c: Conn) {
   let password: string | undefined;
   if (c.engine !== "sqlite") {
     password = c.ymlPassword ?? sessionPasswords.get(c.id);
-    if (password === undefined && !(await invoke<boolean>("db_password_exists", { id: c.id }).catch(() => false))) {
+    if (password === undefined && !(await invoke<boolean>("db_password_exists", { id: c.id, config: configOf(c) }).catch(() => false))) {
       const p = await promptPassword(c);
       if (!p) return;
       password = p.password;
@@ -565,7 +565,7 @@ function editConnection(existing?: Conn, engine: Dialect = "postgres") {
     readOnly.checked = draft.readOnly = defaultReadOnly(d?.environment, draft.engine, draft.host);
   };
   syncReadOnly();
-  invoke<boolean>("db_password_exists", { id }).then((has) => {
+  invoke<boolean>("db_password_exists", { id, config: configOf({ ...draft, id, source: "manual", unresolved: [] } as Conn) }).then((has) => {
     hadSaved = !!has;
     keep.checked = hadSaved || !existing;
     password.placeholder = hadSaved ? "saved in Keychain (type to replace)" : "";

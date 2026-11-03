@@ -307,14 +307,14 @@ mod tests {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let root = project("atomic");
         let file = root.join("app/models/user.rb");
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o664)).unwrap();
         let before = std::fs::metadata(&file).unwrap().ino();
         let roots = [std::fs::canonicalize(&root).unwrap()];
         let e = vec![ReplaceEdit { line: 1, start: 6, end: 10, old: "User".into(), new: "Member".into() }];
         assert_eq!(replace_file(&file.to_string_lossy(), &e, &roots), Ok(1));
         let meta = std::fs::metadata(&file).unwrap();
         assert_ne!(meta.ino(), before, "written to a new file and renamed into place");
-        assert_eq!(meta.permissions().mode() & 0o777, 0o640);
+        assert_eq!(meta.permissions().mode() & 0o777, 0o664, "group-write survives the umask");
         let leftovers: Vec<_> = std::fs::read_dir(root.join("app/models")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains(".garnet-")).collect();
         assert!(leftovers.is_empty());
         // A directory swapped for a symlink after the check: the component-wise O_NOFOLLOW walk refuses it.
@@ -450,12 +450,15 @@ fn replace_file(path: &str, edits: &[ReplaceEdit], roots: &[std::path::PathBuf])
     let tmp = std::ffi::OsString::from(format!(".{}.garnet-{}-{nanos}", name.to_string_lossy(), std::process::id()));
     let mode = meta.permissions().mode() & 0o7777;
     let mut out = nofollow::open_at(&dir, &tmp, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, mode)?;
-    let written = out.write_all(next.as_bytes()).and_then(|_| out.sync_all()).map_err(e2s);
+    // openat's mode is masked by the umask; fchmod restores the original bits exactly.
+    let written = out.set_permissions(std::fs::Permissions::from_mode(mode)).and_then(|_| out.write_all(next.as_bytes())).and_then(|_| out.sync_all()).map_err(e2s);
     let moved = written.and_then(|_| nofollow::rename_at(&dir, &tmp, name));
     if moved.is_err() {
         nofollow::unlink_at(&dir, &tmp);
     }
-    moved.map(|_| applied)
+    moved?;
+    nofollow::sync(&dir);
+    Ok(applied)
 }
 
 /// openat/renameat relative to a directory handle, never following a symlink.
@@ -502,6 +505,11 @@ mod nofollow {
         let (f, t) = (cstr(from)?, cstr(to)?);
         let r = unsafe { libc::renameat(dir.as_raw_fd(), f.as_ptr(), dir.as_raw_fd(), t.as_ptr()) };
         check(r, to).map(|_| ())
+    }
+
+    /// fsync the directory so the rename itself is durable.
+    pub fn sync(dir: &OwnedFd) {
+        unsafe { libc::fsync(dir.as_raw_fd()) };
     }
 
     pub fn unlink_at(dir: &OwnedFd, name: &OsStr) {

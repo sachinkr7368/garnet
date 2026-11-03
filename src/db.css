@@ -30,9 +30,14 @@
   gap: 5px;
 }
 .db-tree .tree-label {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .db-detail {
+  flex: 0 1000 auto;
+  min-width: 2em;
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 11px;

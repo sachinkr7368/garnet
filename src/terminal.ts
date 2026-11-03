@@ -145,9 +145,17 @@ export class PtyTabs {
   el = h("div", { class: "pty-tabs" }, h("div", { class: "subtab-bar" }, this.tabsEl, this.toolbar), this.bodyEl);
   items: { title: string; view: PtyView; tab: HTMLElement; status: string }[] = [];
   active: PtyTabs["items"][number] | null = null;
-  overflow = overflowStrip(this.tabsEl, "Show Hidden Tabs", (t) => t.querySelector("span:not(.codicon)")?.textContent ?? "", (t) => {
-    const item = this.items.find((i) => i.tab === t);
-    if (item) this.select(item);
+  overflow = overflowStrip(this.tabsEl, {
+    title: "Show Hidden Tabs",
+    label: (t) => t.querySelector("span:not(.codicon)")?.textContent ?? "",
+    pick: (t) => {
+      const item = this.items.find((i) => i.tab === t);
+      if (item) this.select(item);
+    },
+    close: (t) => {
+      const item = this.items.find((i) => i.tab === t);
+      if (item) this.close(item);
+    },
   });
 
   add(title: string, view: PtyView) {

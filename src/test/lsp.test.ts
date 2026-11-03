@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("../editor", async () => await import("./fakeEditor"));
 vi.mock("../debug", () => ({ debugSession: vi.fn(), sessionFor: () => null, stopSession: vi.fn() }));
 
-import { applyTextEdits, lspPos, lspRange, toRange } from "../lsp";
+import { applyTextEdits, lspPos, lspRange, progressLabel, toRange } from "../lsp";
 
 const r = (sl: number, sc: number, el: number, ec: number) => ({ start: { line: sl, character: sc }, end: { line: el, character: ec } });
 
@@ -28,5 +28,13 @@ describe("applyTextEdits", () => {
   it("clamps positions past the end and supports inserts", () => {
     expect(applyTextEdits("a\n", [{ range: r(5, 0, 5, 0), newText: "b" }])).toBe("a\nb");
     expect(applyTextEdits("ac", [{ range: r(0, 1, 0, 1), newText: "b" }])).toBe("abc");
+  });
+});
+
+describe("progressLabel", () => {
+  it("drops the server's own name so the status bar says Ruby LSP once", () => {
+    expect(progressLabel("Ruby LSP: indexing files", 0)).toBe("indexing files 0%");
+    expect(progressLabel("Ruby LSP", 39)).toBe("39%");
+    expect(progressLabel("Indexing")).toBe("Indexing");
   });
 });

@@ -101,7 +101,9 @@ async function onServerRequest(msg: Json) {
   send({ id: msg.id, result });
 }
 
-const progress = new Map<string | number, string>();
+const progress = new Map<string | number, { title: string; pct?: number }>();
+/// "indexing files 39%" from a $/progress title like "Ruby LSP: Indexing files", without repeating the server name.
+export const progressLabel = (title: string, pct?: number) => `${title.replace(/^Ruby LSP:?\s*/i, "")}${pct !== undefined ? ` ${pct}%` : ""}`.trim();
 
 function onNotification(msg: Json) {
   const p = msg.params;
@@ -123,8 +125,9 @@ function onNotification(msg: Json) {
     case "$/progress": {
       const v = p.value;
       if (v.kind === "end") progress.delete(p.token);
-      else progress.set(p.token, `${v.title ?? progress.get(p.token)?.split(" ")[0] ?? ""}${v.percentage !== undefined ? ` ${v.percentage}%` : ""}`.trim());
-      const busy = [...progress.values()][0];
+      else progress.set(p.token, { title: v.title ?? progress.get(p.token)?.title ?? "", pct: v.percentage ?? progress.get(p.token)?.pct });
+      const first = [...progress.values()][0];
+      const busy = first && progressLabel(first.title, first.pct);
       if (ready) setStatus(busy ? `Ruby LSP: ${busy}` : "Ruby LSP", busy ? "busy" : "ok");
       break;
     }

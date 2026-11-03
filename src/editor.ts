@@ -151,9 +151,19 @@ export const events = {
 };
 
 const tabsEl = document.getElementById("tabs")!;
-const tabOverflow = overflowStrip(tabsEl, "Show Hidden Tabs", (el) => el.querySelector(".tab-title")?.textContent ?? "", (el) => {
-  const t = tabs.find((x) => x.el === el);
-  if (t) activate(t);
+const tabOf = (el: HTMLElement) => tabs.find((x) => x.el === el);
+const tabOverflow = overflowStrip(tabsEl, {
+  title: "Show Hidden Tabs",
+  label: (el) => el.querySelector(".tab-title")?.textContent ?? "",
+  detail: (el) => el.querySelector(".tab-desc")?.textContent ?? undefined,
+  pick: (el) => {
+    const t = tabOf(el);
+    if (t) activate(t);
+  },
+  close: (el) => {
+    const t = tabOf(el);
+    if (t) closeTab(t);
+  },
 });
 const editorEl = document.getElementById("editor")!;
 const diffEl = document.getElementById("diff-editor")!;

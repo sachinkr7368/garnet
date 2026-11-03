@@ -6,7 +6,7 @@ import { importJetBrainsKeymap, jetbrainsKeystroke } from "./keymapref";
 import { breakpointsIn, debugSessions, debugState, evaluate, flushBreakpoints, loadBreakpoints, resume, resumeSession, selectDebugSession, smokeHooks, stopAllSessions, stopDebug, toggleBreakpoint } from "./debug";
 import { rerunFailed, testRunState, testStatusAt } from "./testresults";
 import { defaultDocker } from "./docker";
-import { activeTab, activeViewTab, allTabs, closeTab, editor, languageFor, openFile } from "./editor";
+import { activate, activeTab, activeViewTab, allTabs, closeTab, editor, languageFor, openFile } from "./editor";
 import { symbolPath } from "./breadcrumbs";
 import { snippetsFor } from "./languages/snippets";
 import { replaceInFiles, searchView } from "./search";
@@ -18,6 +18,7 @@ import { stagePatch } from "./difflogic";
 import { api, Channel, invoke, type PtyEvent } from "./ipc";
 import { cachedSymbols, goToImplementation, lspCapabilities, lspReady, request } from "./lsp";
 import { buildCommand, configList, dockerUnavailable, editConfigurations, launch, newConfig, runs, safeEnv, validateConfig, type RunConfig } from "./run";
+import { terminals } from "./terminal";
 import { isDarkTheme, isTrusted, loadSettings, setting, toggleTheme, updateSetting } from "./settings";
 import { openSettingsWindow } from "./settingsui";
 import { refreshToolbar } from "./toolbar";
@@ -1014,10 +1015,12 @@ async function githubChecks(report: Report, check: Check) {
   check("github: signed-in account", (!!s.login && me.login === s.login && !!document.querySelector(".status-item.clickable")?.parentElement?.textContent?.includes(s.login)) || JSON.stringify({ login: s.login, me }));
 }
 
-/// Layout at each window width: no page scroll, nothing cut off by its clipping ancestor (unless it is a
-/// deliberate ellipsis), the active bottom tab on screen and every popup inside the window.
-const LAYOUT_WIDTHS = [800, 1024, 1280, 1440];
-const LAYOUT_SKIP = ".monaco-editor, .monaco-diff-editor, .xterm, .db-grid, .tr-detail, .st-page-body";
+/// Layout at each window size: no page scroll, nothing cut off by its clipping ancestor (unless it is a
+/// deliberate ellipsis) or squeezed to nothing, the active tabs on screen and every popup inside the window.
+/// The short 1024x600 pass also checks toolbars and dialogs for vertical clipping.
+const LAYOUT_SIZES: [number, number | null][] = [[800, null], [1024, null], [1280, null], [1440, null], [1024, 600]];
+const LAYOUT_SKIP = ".monaco-editor, .monaco-diff-editor, .xterm, .db-grid, .tr-detail";
+const LAYOUT_VERTICAL = ".view-toolbar, .search-bar, .subtab-bar, #bottom-head, .commit-actions, #overlay-root";
 
 const describeEl = (el: Element) => {
   const part = (e: Element) => `${e.tagName.toLowerCase()}${e.id ? `#${e.id}` : ""}${[...e.classList].slice(0, 3).map((c) => `.${c}`).join("")}${e instanceof HTMLElement && e.dataset.view ? `[data-view=${e.dataset.view}]` : ""}`;
@@ -1026,15 +1029,16 @@ const describeEl = (el: Element) => {
   return chain.join(" > ");
 };
 
-/// Ancestors that clip `el` horizontally, honouring absolute and fixed positioning.
-function clippers(el: Element): Element[] {
+/// Ancestors that clip `el`, honouring absolute and fixed positioning. Vertically, only non-scrolling clippers count.
+function clippers(el: Element, axis: "x" | "y" = "x"): Element[] {
   const out: Element[] = [];
   let pos = getComputedStyle(el).position;
   for (let a = el.parentElement; a; a = a.parentElement) {
     const s = getComputedStyle(a);
     if (pos === "fixed") break;
     if (pos === "absolute" && s.position === "static") continue;
-    if (s.overflowX !== "visible") out.push(a);
+    if (axis === "y" && (s.overflowY === "auto" || s.overflowY === "scroll")) break;
+    if (axis === "x" ? s.overflowX !== "visible" : s.overflowY === "hidden" || s.overflowY === "clip") out.push(a);
     if (pos === "absolute") pos = s.position;
   }
   return out;
@@ -1048,20 +1052,34 @@ export function layoutIssues(): string[] {
   for (const el of document.querySelectorAll("#app *, #overlay-root *")) {
     if (el.closest(LAYOUT_SKIP)) continue;
     const r = el.getBoundingClientRect();
-    if (r.width < 1 || r.height < 1) continue;
     const s = getComputedStyle(el);
     if (s.visibility === "hidden" || s.display === "contents" || s.animationName !== "none") continue;
+    if (r.width < 1 && r.height >= 1 && el.getClientRects().length && [...el.childNodes].some((n) => n.nodeType === Node.TEXT_NODE && n.textContent!.trim())) {
+      issues.add(`${describeEl(el)} squeezed to 0 width`);
+      continue;
+    }
+    if (r.width < 1 || r.height < 1) continue;
     const popup = el.parentElement?.parentElement?.id === "overlay-root" || el.matches(".ctx-menu, .toast");
     if (r.right > window.innerWidth + 1 || r.left < -1 || (popup && (r.bottom > window.innerHeight + 1 || r.top < -1))) {
       issues.add(`${describeEl(el)} outside the window (right ${Math.round(r.right)}, bottom ${Math.round(r.bottom)})`);
       continue;
     }
+    if (el.closest(LAYOUT_VERTICAL)) {
+      const vclip = clippers(el, "y").find((c) => {
+        const cr = c.getBoundingClientRect();
+        return cr.height > 0 && r.bottom > cr.bottom + 1;
+      });
+      if (vclip) issues.add(`${describeEl(el)} cut off at the bottom by ${describeEl(vclip)} (${Math.round(r.bottom - vclip.getBoundingClientRect().bottom)}px)`);
+    }
     if (ellipsis(s)) continue;
     const clip = clippers(el).find((c) => {
       const cr = c.getBoundingClientRect();
-      return cr.width > 0 && r.left < cr.right && r.right > cr.right + 1;
+      return cr.width > 0 && r.right > cr.right + 1;
     });
-    if (clip && !ellipsis(getComputedStyle(clip))) issues.add(`${describeEl(el)} cut off by ${describeEl(clip)} (${Math.round(r.right - clip.getBoundingClientRect().right)}px)`);
+    if (clip && !ellipsis(getComputedStyle(clip))) {
+      const cr = clip.getBoundingClientRect();
+      issues.add(r.left >= cr.right ? `${describeEl(el)} fully hidden by ${describeEl(clip)}` : `${describeEl(el)} cut off by ${describeEl(clip)} (${Math.round(r.right - cr.right)}px)`);
+    }
   }
   return [...issues];
 }
@@ -1090,27 +1108,47 @@ async function layoutChecks(report: Report, check: Check) {
       const r = tab?.getBoundingClientRect();
       if (!tab || tab.hidden || !r || r.width < 1 || r.left < head.left - 1 || r.right > head.right + 1) found.push(`active bottom tab ${bottom.active} not visible`);
     }
+    const strip = document.getElementById("tabs")!.getBoundingClientRect();
+    const editorTab = document.querySelector<HTMLElement>("#tabs .tab.active");
+    const er = editorTab?.getBoundingClientRect();
+    if (allTabs().length && (!editorTab || editorTab.hidden || !er || er.width < 1 || er.left < strip.left - 1 || er.right > strip.right + 1)) found.push("active editor tab not visible");
     if (found.length) failures[label] = found;
   };
   try {
     for (const f of files) await api.writeFile(f, "# layout smoke\n");
     await refreshGit();
-    for (const f of opened) await openFile(f).catch(() => {});
+    for (const f of opened) await openFile(f).catch((e) => (failures["open fixtures"] ??= []).push(`${f}: ${e}`));
+    const missing = opened.filter((f) => !allTabs().some((t) => t.path === f));
+    if (missing.length) (failures["open fixtures"] ??= []).push(`not open: ${missing.map((f) => f.slice(root.length + 1)).join(", ")}`);
+    // ResizeObserver pauses while the window is occluded, so refit the strips once the panels have clamped.
+    const refit = async () => {
+      window.dispatchEvent(new Event("resize"));
+      await settle();
+      activate(activeTab() ?? activeViewTab());
+      terminals.render();
+      runs.render();
+    };
     const summary = document.querySelector<HTMLElement>(".tests-view .search-summary");
     if (summary) summary.textContent = "Smoke specs: 0 passed · no results (did the runner start? see the console for the full output of the runner)";
-    for (const width of LAYOUT_WIDTHS) {
-      await win.setSize(new LogicalSize(width, Math.max(600, startH)));
-      await until(() => window.innerWidth === width, 5000, 50);
+    for (const [w, h] of LAYOUT_SIZES) {
+      const height = h ?? Math.max(600, startH);
+      const width = h ? `${w}x${h}` : `${w}`;
+      await win.setSize(new LogicalSize(w, height));
+      // setSize includes the title bar, so the viewport ends up a little shorter than `height`.
+      if (!(await until(() => window.innerWidth === w && window.innerHeight <= height && window.innerHeight >= height - 40, 5000, 50))) {
+        failures[`${width} resize`] = [`window is ${window.innerWidth}x${window.innerHeight}, wanted ${w}x${height}`];
+        continue;
+      }
       await settle();
       for (const panels of ["default", "min"] as const) {
         side.style.width = panels === "min" ? "160px" : saved.side;
         right.style.width = panels === "min" ? "200px" : saved.right;
         bottomEl.style.height = panels === "min" ? "100px" : saved.bottom;
-        window.dispatchEvent(new Event("resize"));
+        await refit();
         for (const id of bottom.views.keys()) {
           substep(`${width} ${panels} bottom:${id}`);
           bottom.show(id);
-          await settle();
+          await refit();
           audit(`${width} ${panels} bottom:${id}`);
         }
         for (const [dock, name] of [[sidebar, "side"], [rightbar, "right"]] as const) {
@@ -1133,6 +1171,7 @@ async function layoutChecks(report: Report, check: Check) {
       bottomEl.style.height = saved.bottom;
       sidebar.show("commit");
       bottom.show("tests");
+      await refit();
       await settle();
       const dialog = async (label: string, open: () => unknown, ready: () => Element | null | undefined) => {
         substep(`${width} ${label}`);
@@ -1163,14 +1202,15 @@ async function layoutChecks(report: Report, check: Check) {
       await dialog("search everywhere", () => runCommand("searchEverywhere"), typed("posts"));
       await dialog("go to file", () => runCommand("goToFile"), typed("app"));
       for (const [i, btn] of [...document.querySelectorAll<HTMLElement>("#switchers .switcher")].entries()) await dialog(`switcher ${i}`, () => btn.click(), () => overlay.querySelector(".qp-item, .ctx-item"));
-      const more = document.querySelector<HTMLElement>("#bottom-head .tab-overflow:not([hidden])");
-      if (more) await dialog("bottom tab overflow menu", () => more.click(), () => overlay.querySelector(".ctx-item"));
-      const editorMore = document.querySelector<HTMLElement>("#topbar .tab-overflow:not([hidden])");
-      if (editorMore) await dialog("editor tab overflow menu", () => editorMore.click(), () => overlay.querySelector(".ctx-item"));
+      for (const [label, sel] of [["bottom tab overflow menu", "#bottom-head > .tab-overflow:not([hidden])"], ["editor tab overflow menu", "#tabs > .tab-overflow:not([hidden])"]]) {
+        const more = document.querySelector<HTMLElement>(sel);
+        if (more) await dialog(label, () => more.click(), () => overlay.querySelector(".ctx-item"));
+        else if (w === 800) failures[`${width} ${label}`] = ["» button missing"];
+      }
     }
     report.layoutIssues = failures;
     const flat = Object.entries(failures).flatMap(([k, v]) => v.map((x) => `${k}: ${x}`));
-    check("layout: no page scroll, clipping or hidden active tab at 800/1024/1280/1440", flat.length === 0 || `${flat.length} issues: ${flat.slice(0, 25).join(" | ")}`);
+    check("layout: no page scroll, clipping or hidden active tab at 800/1024/1280/1440 and 1024x600", flat.length === 0 || `${flat.length} issues: ${flat.slice(0, 25).join(" | ")}`);
   } finally {
     await win.setSize(new LogicalSize(startW, startH)).catch(() => {});
     side.style.width = saved.side;

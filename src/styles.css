@@ -776,6 +776,12 @@ kbd {
 .view-toolbar {
   min-width: 0;
 }
+.search-summary:not(:empty) {
+  min-width: 48px;
+}
+.search-view {
+  overflow-y: auto;
+}
 
 .results,
 .problems,
@@ -966,18 +972,10 @@ mark {
 .change-row > .twisty-space:first-child {
   width: 16px;
 }
-.change-row {
-  position: relative;
-}
 .row-actions {
   display: none;
-  position: absolute;
-  right: 4px;
-  background: inherit;
-  border-radius: 5px;
 }
-.change-row:hover > .row-actions,
-.change-row.selected > .row-actions {
+.change-row:hover > .row-actions {
   display: inline-flex;
 }
 .change-dir {
@@ -1111,6 +1109,10 @@ mark {
 }
 .line-numbers.glyph-bp.disabled::after {
   color: var(--dim);
+}
+.line-numbers.glyph-bp.disabled:not(.conditional, .logpoint)::after {
+  content: "\eabc";
+  color: var(--breakpoint);
 }
 .glyph-frame {
   color: var(--warn);
@@ -1386,6 +1388,24 @@ mark {
   padding-left: 18px;
   color: var(--dim);
   font-size: 12px;
+}
+.ctx-detail {
+  color: var(--dim);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-check {
+  margin-left: auto;
+  padding-left: 12px;
+}
+.ctx-close {
+  margin-left: auto;
+  visibility: hidden;
+}
+.ctx-item:hover .ctx-close,
+.ctx-item.selected .ctx-close {
+  visibility: visible;
 }
 .ctx-sep {
   height: 1px;
@@ -1882,7 +1902,8 @@ body.sidebar-right #rightstrip {
   overflow: hidden;
 }
 @container (max-width: 520px) {
-  .tr-progress {
+  .tr-progress,
+  .tests-view .exc-filter > span {
     display: none;
   }
 }

@@ -1,6 +1,6 @@
 import { activeTab, editor, events, monaco, openFile } from "./editor";
 import { api, Channel, invoke, type RpcEvent } from "./ipc";
-import { dapBreakpoints, describe, deserialize, interpolate, newBreakpointId, passCountReached, serialize, trackLines, type Breakpoint, type BreakpointMap } from "./bpmodel";
+import { dapBreakpoints, describe, deserialize, interpolate, isBreakpointClick, newBreakpointId, passCountReached, serialize, trackLines, type Breakpoint, type BreakpointMap, type GutterPress } from "./bpmodel";
 import { isRunGlyph, launch, type RunConfig } from "./run";
 import { SessionList } from "./sessionlist";
 import { modifyConfig, onSettingsChange, setting } from "./settings";
@@ -209,7 +209,8 @@ const fileModel = (path: string) => monaco.editor.getModel(monaco.Uri.file(path)
 
 function bpIcon(bp: Breakpoint) {
   const kind = bp.logMessage ? "-log" : bp.condition || bp.hitCount ? "-conditional" : "";
-  return bp.enabled ? (kind ? `debug-breakpoint${kind}` : "circle-filled") : `debug-breakpoint${kind}-disabled`;
+  if (!kind) return bp.enabled ? "circle-filled" : "circle-outline";
+  return bp.enabled ? `debug-breakpoint${kind}` : `debug-breakpoint${kind}-disabled`;
 }
 
 /// RubyMine's New UI draws a breakpoint over its line number.
@@ -320,11 +321,35 @@ async function editBreakpoint(path: string, line: number, kind: "condition" | "l
 }
 
 const inGutter = (t: monaco.editor.MouseTargetType) => t === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN || t === monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS;
+let press: GutterPress | null = null;
+let lastToggle = { line: 0, at: 0 };
 
+/// Glyph margin: toggles on a plain single click. Line numbers: toggles on mouse-up of a plain single click that didn't
+/// drag, so selecting lines by dragging or shift-clicking the numbers still works; a double-click undoes its first toggle.
 editor.onMouseDown((e) => {
-  if (!inGutter(e.target.type) || e.event.rightButton) return;
+  press = null;
   const line = e.target.position?.lineNumber;
-  if (line && (e.target.type === monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS || !isRunGlyph(line))) toggleBreakpoint(line);
+  const ev = e.event;
+  if (!line || !inGutter(e.target.type) || !ev.leftButton) return;
+  const modifiers = ev.shiftKey || ev.ctrlKey || ev.altKey || ev.metaKey;
+  if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
+    if (!modifiers && ev.detail === 1 && !isRunGlyph(line)) toggleBreakpoint(line);
+    return;
+  }
+  if (ev.detail === 2 && lastToggle.line === line && Date.now() - lastToggle.at < 600) {
+    lastToggle = { line: 0, at: 0 };
+    return toggleBreakpoint(line);
+  }
+  press = { line, x: ev.posx, y: ev.posy, left: true, modifiers, clicks: ev.detail };
+});
+
+editor.onMouseUp((e) => {
+  const down = press;
+  press = null;
+  if (!down || e.target.type !== monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS) return;
+  if (!isBreakpointClick(down, { line: e.target.position?.lineNumber, x: e.event.posx, y: e.event.posy })) return;
+  toggleBreakpoint(down.line);
+  lastToggle = { line: down.line, at: Date.now() };
 });
 
 editor.onContextMenu((e) => {

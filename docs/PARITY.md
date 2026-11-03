@@ -133,9 +133,10 @@ partial row is meant to become a GitHub issue.
 | --- | --- | --- |
 | Connections from `config/database.yml` per environment (ERB never executed: only `ENV[...]`/`ENV.fetch` with literal defaults are resolved, the rest is left for you to fill in) plus manual connections; PostgreSQL, MySQL, SQLite | done | connection details in Garnet's config dir, passwords only in the macOS Keychain; nothing connects until you click Connect |
 | Schema browser (schemas, tables, views, columns, indexes, foreign keys), table data viewer (paging, sort, WHERE filter) | done | |
-| SQL console: Monaco SQL with table/column completion, run statement at cursor or selection (⌘↩), results grid, cancel, query history, export to CSV/JSON | done | grid cells are read-only |
+| SQL console: Monaco SQL with table/column completion, run statement at cursor or selection (⌘↩), results grid, cancel, query history, export to CSV/JSON | done | |
 | Safety: read-only connections (default for non-development environments and non-local hosts) run in read-only transactions / `query_only` and Garnet blocks writes; confirmation for UPDATE/DELETE without WHERE, DROP, TRUNCATE, ALTER; automatic LIMIT 500 on SELECT (toggle); per-connection colour tag | done | |
-| Editing cell values in the grid, ER diagram | planned | |
+| Edit cell values in table tabs (stage, review, submit as one checked transaction) | done | |
+| ER diagram, manual transaction mode | planned | |
 
 ## Docker and remote
 

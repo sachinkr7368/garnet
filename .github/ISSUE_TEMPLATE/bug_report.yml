@@ -1,0 +1,68 @@
+name: Bug report
+description: Something in Garnet does not work as expected
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Garnet version
+      description: The DMG file name, or Get Info on Garnet.app in Finder.
+      placeholder: "0.2.3"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "Sequoia 15.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: chip
+    attributes:
+      label: Chip
+      options:
+        - Apple Silicon
+        - Intel
+    validations:
+      required: true
+  - type: dropdown
+    id: manager
+    attributes:
+      label: Ruby version manager
+      options:
+        - mise
+        - rbenv
+        - asdf
+        - chruby
+        - rvm
+        - System Ruby
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: ruby
+    attributes:
+      label: Ruby version
+      placeholder: "3.3.5"
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Press ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Logs or screenshots
+      description: Remove tokens, passwords and private code first.

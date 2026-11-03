@@ -106,10 +106,21 @@ function argvs(expr: string, src: Source, at: number): Argv[] {
   return argvs(def, src, at);
 }
 
-/// The initializer of `const|let name = …` nearest before `at` (else the first in the file).
+/// Whether a binding at `from` is still in scope at `at`: no block it sits in closes in between.
+function inScope(text: string, from: number, at: number): boolean {
+  let depth = 0;
+  for (let i = from; i < at; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}" && --depth < 0) return false;
+  }
+  return true;
+}
+
+/// The initializer of the `const|let name = …` in scope at `at` (the nearest one). A name used before any binding
+/// resolves only when the file binds it once; several bindings and none in scope is ambiguous and stays unresolved.
 function definition(name: string, src: Source, at: number): string | null {
   const defs = [...src.text.matchAll(new RegExp(`(?:const|let)\\s+${name.replace("$", "\\$")}(?:\\s*:[^=;]+)?\\s*=\\s*`, "g"))];
-  const def = defs.filter((d) => d.index! < at).pop() ?? defs[0];
+  const def = defs.filter((d) => d.index! < at && inScope(src.text, d.index!, at)).pop() ?? (defs.length === 1 ? defs[0] : undefined);
   if (!def) return null;
   const start = def.index! + def[0].length;
   const end = topLevel(src.text.slice(start), ";")[0];
@@ -127,20 +138,27 @@ function argvList(expr: string, src: Source): Argv[] {
 const line = (src: Source, at: number) => src.text.slice(0, at).split("\n").length;
 
 /// Arguments of every git_run caller: api.git(root, …), a file's `git(…)` wrapper around it, and runGitOp(label, argv).
-/// Wrappers that only forward their own `...args` parameter are skipped; `git(...step)` in prs.ts runs the
-/// checkoutPlan steps from ghmodel.ts.
+/// A call that forwards its function's own `args` parameter is skipped only inside the two scanned entry points (a
+/// file's `const git = (...args: string[]) => api.git(root(), ...args)` and merge.ts runGitOp); any other forwarding
+/// function is reported, since its call sites are not scanned. `git(...step)` in prs.ts runs the checkoutPlan steps
+/// from ghmodel.ts.
 export function extract(sources: Source[]): { where: string; argv: Argv }[] {
   const out: { where: string; argv: Argv }[] = [];
   const all = new Map(sources.map((s) => [s.file, s]));
   for (const src of sources) {
-    const wrapper = /const git = \(\.\.\.args: string\[\]\) => api\.git\(/.test(src.text);
+    const wrapper = /const git = \(\.\.\.args: string\[\]\) => api\.git\(root\(\), \.\.\.args\);/.test(src.text);
     for (const m of src.text.matchAll(/(?<![\w.$])(api\.git|git|runGitOp)\(/g)) {
       const open = m.index! + m[0].length - 1;
       const args = splitTop(src.text.slice(open + 1, closing(src.text, open)));
-      const before = src.text.slice(Math.max(0, m.index! - 200), m.index!);
-      const forwards = (args.at(-1) === "...args" && /args: string\[\]\)[^\n]*$|args: string\[\]\)[^]*\{[^}]*$/.test(before)) || /function\s+$/.test(before);
-      if (forwards || !args.length) continue;
+      if (/function\s+$/.test(src.text.slice(0, m.index!))) continue;
       const where = `${src.file}:${line(src, m.index!)}`;
+      const owner = forwarder(src, m.index!, args);
+      if (owner === "git" || (owner === "runGitOp" && src.file === "merge.ts")) continue;
+      if (owner) {
+        out.push({ where, argv: [`<${owner} forwards its args to git_run; its call sites are not scanned>`] });
+        continue;
+      }
+      if (!args.length) continue;
       // After `--` every argument is a pathspec (git_run passes --literal-pathspecs), so any expression there is a value.
       const paths = (argv: Argv) => argv.map((a, i) => (i > argv.indexOf("--") && argv.includes("--") ? (a.startsWith("<unresolved") ? VALUE : a) : a));
       const add = (list: Argv[]) => list.forEach((argv) => out.push({ where, argv: paths(argv) }));
@@ -153,6 +171,32 @@ export function extract(sources: Source[]): { where: string; argv: Argv }[] {
     }
   }
   return out;
+}
+
+/// Whether `at` is inside the body of the function whose header ends at `end`.
+function encloses(text: string, end: number, at: number): boolean {
+  if (end > at) return false;
+  const arrow = text.slice(end).match(/^\s*(?::[^={;]+)?=>\s*/);
+  if (arrow && text[end + arrow[0].length] !== "{") return end + arrow[0].length + (topLevel(text.slice(end + arrow[0].length), ";")[0] ?? Infinity) > at;
+  const open = text.indexOf("{", end);
+  if (open < 0 || open > at) return false;
+  let depth = 0;
+  for (let i = open; i < at; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}" && --depth === 0) return false;
+  }
+  return true;
+}
+
+/// The function whose own `args` parameter this call passes on, if any.
+function forwarder(src: Source, at: number, args: string[]): string | null {
+  if (!args.some((a) => a === "args" || a === "...args")) return null;
+  const headers = [...src.text.slice(0, at).matchAll(/(?:function\s+([\w$]+)\s*|(?:const|let)\s+([\w$]+)\s*=\s*(?:async\s*)?)\(([^()]*)\)/g)];
+  const h = headers.filter((x) => encloses(src.text, x.index! + x[0].length, at)).pop();
+  if (!h || !/(?:^|[\s,(]|\.\.\.)args\s*[:,)]|(?:^|\.\.\.)args$/.test(h[3].trim())) return null;
+  const name = h[1] ?? h[2];
+  if (name === "git" && !/^const git = \(\.\.\.args: string\[\]\) => api\.git\(root\(\), \.\.\.args\)/.test(src.text.slice(h.index!).trimStart())) return "git (not the plain api.git wrapper)";
+  return name;
 }
 
 function sources(dir = SRC): Source[] {
@@ -209,5 +253,34 @@ describe("git_run callers", () => {
       ["<unresolved unknown at x.ts:9>"],
     ]);
     expect(argv.slice(-3).map(problem)).toEqual(["unknown subcommand <v>", "<option `--${side}`>", "unknown subcommand <unresolved unknown at x.ts:9>"]);
+  });
+
+  it("reports any other function that forwards its args to git_run, and same-name bindings out of scope", () => {
+    const text = [
+      "const git = (...args: string[]) => api.git(root(), ...args);",
+      "async function stashOp(args: string[]) {",
+      "  return git(...args);",
+      "}",
+      "const quiet = (label: string, ...args: string[]) => api.git(root(), ...args);",
+      "function a() {",
+      '  const step = ["status"];',
+      "}",
+      "function b() {",
+      '  const step = ["log"];',
+      "}",
+      "function c() {",
+      "  git(...step);",
+      "  const local = [\"fetch\"];",
+      "  git(...local);",
+      "}",
+    ].join("\n");
+    const argv = extract([{ file: "x.ts", text }]).map((f) => f.argv);
+    expect(argv).toEqual([
+      ["<stashOp forwards its args to git_run; its call sites are not scanned>"],
+      ["<quiet forwards its args to git_run; its call sites are not scanned>"],
+      ["<unresolved step at x.ts:13>"],
+      ["fetch"],
+    ]);
+    expect(argv.slice(0, 3).every((a) => problem(a) !== null)).toBe(true);
   });
 });

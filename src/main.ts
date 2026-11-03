@@ -16,6 +16,7 @@ import { gitLogView, reload as reloadGitLog, showGitLog, stashChanges, unstashCh
 import { abortOperation, continueOperation, showConflicts } from "./merge";
 import { api, invoke } from "./ipc";
 import { fileStructurePopup, findUsages, goToImplementation, goToTypeDefinition, lspBusy, lspLogView, lspReady, request, outlineView, problemsView, startLsp, stopLsp, workspaceSymbolsPopup } from "./lsp";
+import { symbolSearch } from "./symbolsearch";
 import { goToTest, loadRoutes, routesView, showRelated } from "./rails";
 import { dbProjectOpened } from "./db";
 import "./railsprovider";
@@ -107,13 +108,19 @@ async function openRecent() {
 
 const E = (id: string, title: string, key: string | undefined, action: string) => ({ id, title, key, editor: true, run: editorAction(action) });
 
+// A recent file that no longer opens (deleted, moved, unreadable) leaves the list.
+const openRecentFile = (p: string) =>
+  openFile(p).then(
+    () => activeTab()?.path !== p && forgetRecentFile(p),
+    () => forgetRecentFile(p),
+  );
+
 function pickPaths(placeholder: string, paths: string[], selectedIndex = 0) {
   quickPick({
     placeholder,
     selected: selectedIndex,
     items: paths.map((p) => ({ label: p.split("/").pop()!, description: rel(p), icon: fileIconName(p), data: p })),
-    // A file that no longer opens (deleted, moved) leaves the list.
-    onAccept: (item) => item && openFile(item.data as string).then(() => activeTab()?.path !== item.data && forgetRecentFile(item.data as string)),
+    onAccept: (item) => item && openRecentFile(item.data as string),
   });
 }
 
@@ -131,33 +138,19 @@ function recentLocationsPopup() {
 function searchEverywhere() {
   if (!state.project) return showPalette();
   // Files and actions render at once; workspace symbols are added when ruby-lsp answers (it can be busy indexing).
-  const symbols = new Map<string, Json[]>();
-  let inflight: { q: string; cts: monaco.CancellationTokenSource } | null = null;
-  const refreshIf = (q: string) => picker.query() === q && void picker.refresh();
-  const fetchSymbols = (q: string) => {
-    inflight?.cts.cancel();
-    const mine = (inflight = { q, cts: new monaco.CancellationTokenSource() });
-    request<Json[] | null>("workspace/symbol", { query: q }, mine.cts.token).then(
-      (res) => {
-        if (inflight === mine) inflight = null;
-        // ponytail: an empty reply while ruby-lsp is indexing is retried once a second for as long as the query is shown
-        if (!res?.length && lspBusy()) return void setTimeout(() => picker.query() === q && !symbols.has(q) && inflight?.q !== q && fetchSymbols(q), 1000);
-        symbols.set(q, res ?? []);
-        refreshIf(q);
-      },
-      () => {
-        if (inflight === mine) inflight = null;
-        if (!mine.cts.token.isCancellationRequested) symbols.set(q, []);
-        refreshIf(q);
-      },
-    );
-  };
+  const symbols = symbolSearch({
+    request: (q, token) => request<Json[] | null>("workspace/symbol", { query: q }, token as monaco.CancellationToken),
+    newSource: () => new monaco.CancellationTokenSource(),
+    busy: lspBusy,
+    current: () => picker.query(),
+    refresh: () => void picker.refresh(),
+  });
   const picker = quickPick({
     placeholder: "Search everywhere: files, actions, symbols",
-    onClose: () => inflight?.cts.cancel(),
+    onClose: () => symbols.close(),
     items: async (q): Promise<PickItem[]> => {
-      if (!q.trim()) return recentFileList().slice(0, 20).map((p) => ({ label: p.split("/").pop()!, description: rel(p), icon: fileIconName(p), data: { file: p } }));
-      if (lspReady() && !symbols.has(q) && inflight?.q !== q) fetchSymbols(q);
+      if (!q.trim()) return recentFileList().slice(0, 20).map((p) => ({ label: p.split("/").pop()!, description: rel(p), icon: fileIconName(p), data: { file: p, recent: true } }));
+      const found = lspReady() ? symbols.get(q) : [];
       const files = await api.findFiles(q, 30);
       const actions = allCommands()
         .map((c) => ({ c, s: fuzzyScore(q, c.title) }))
@@ -166,15 +159,16 @@ function searchEverywhere() {
         .slice(0, 8);
       return [
         ...files.map((p) => ({ label: p.split("/").pop()!, description: p, icon: fileIconName(p), data: { file: abs(p) } })),
-        ...(symbols.get(q) ?? []).slice(0, 30).map((s) => ({ label: s.name, description: s.containerName ?? "", detail: rel(monaco.Uri.parse(s.location.uri).fsPath), icon: "symbol-class", data: { loc: s.location } })),
+        ...found.slice(0, 30).map((s) => ({ label: s.name, description: s.containerName ?? "", detail: rel(monaco.Uri.parse(s.location.uri).fsPath), icon: "symbol-class", data: { loc: s.location } })),
         ...actions.map(({ c }) => ({ label: c.title, detail: keyLabel(c), icon: commandIcon(c), data: { cmd: c.id } })),
       ];
     },
     onAccept: (item, q) => {
-      const d = item?.data as { file?: string; loc?: Json; cmd?: string } | undefined;
+      const d = item?.data as { file?: string; recent?: boolean; loc?: Json; cmd?: string } | undefined;
       if (!d) return;
       const line = q.match(/:(\d+)$/)?.[1];
-      if (d.file) openFile(d.file, line ? { line: Number(line) } : undefined);
+      if (d.recent) openRecentFile(d.file!);
+      else if (d.file) openFile(d.file, line ? { line: Number(line) } : undefined);
       else if (d.loc) openFile(monaco.Uri.parse(d.loc.uri).fsPath, { line: d.loc.range.start.line + 1, column: d.loc.range.start.character + 1 });
       else if (d.cmd) runCommand(d.cmd);
     },

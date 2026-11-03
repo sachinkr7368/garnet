@@ -23,7 +23,7 @@ pub fn shell_env(cwd: &Path) -> HashMap<String, String> {
             return env.clone();
         }
     }
-    let mut env = trusted.then(|| capture(cwd)).flatten().unwrap_or_else(|| inherited(std::env::vars()).into_iter().collect());
+    let mut env = trusted.then(|| capture(cwd)).flatten().unwrap_or_else(|| inherited(parent_env()).into_iter().collect());
     env.entry("LANG".into()).or_insert_with(|| "en_US.UTF-8".into());
     if trusted {
         *cache = Some((cwd.to_path_buf(), env.clone()));
@@ -48,6 +48,11 @@ fn is_parent_shell_state(key: &str) -> bool {
 }
 
 /// The environment a login shell or terminal inherits from Garnet: Garnet's own, minus the launching shell's state.
+/// Garnet's own environment; std::env::vars() panics on a non-UTF-8 entry, so those are skipped.
+pub fn parent_env() -> impl Iterator<Item = (String, String)> {
+    std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+}
+
 pub fn inherited(parent: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
     parent.into_iter().filter(|(k, _)| !is_parent_shell_state(k)).collect()
 }
@@ -60,7 +65,7 @@ fn login_shell(cwd: &Path, script: &str, parent: impl IntoIterator<Item = (Strin
 
 fn capture(cwd: &Path) -> Option<HashMap<String, String>> {
     const MARK: &str = "__GARNET_ENV__";
-    let mut child = login_shell(cwd, &format!("printf '{MARK}'; env -0"), std::env::vars())
+    let mut child = login_shell(cwd, &format!("printf '{MARK}'; env -0"), parent_env())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

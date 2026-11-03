@@ -379,6 +379,8 @@ let dockerCheck: Promise<string> | null = null;
 
 /// Empty when `docker compose` works; otherwise why Docker run targets are unavailable.
 export function dockerUnavailable(): Promise<string> {
+  // Every caller asks for Trust first; Safe Mode refusing to run commands says nothing about Docker.
+  if (!isTrusted()) return Promise.resolve("");
   dockerCheck ??= api
     .runCapture(root(), "command -v docker >/dev/null 2>&1 || { echo 'docker is not installed (not found on PATH)'; exit 0; }; docker compose version >/dev/null 2>&1 || { echo 'the docker compose plugin is not installed'; exit 0; }; docker info >/dev/null 2>&1 || echo 'the Docker daemon is not running'", 30)
     .then((out) => out.trim())
@@ -556,8 +558,9 @@ export function pickConfiguration(mode: "run" | "debug") {
 
 /// Configuration editor dialog
 
-export function editConfigurations() {
-  if (!state.project) return;
+/// Edits are written to the project's run configuration files, so editing waits for Trust.
+export async function editConfigurations() {
+  if (!state.project || !(await askTrust())) return;
   renderWidget();
   let draft: RunConfig[] = structuredClone(configs);
   let current = Math.max(0, draft.findIndex((c) => c.name === selectedName));

@@ -146,6 +146,7 @@ function onEvent(ev: RpcEvent) {
   if (ev.type === "exit") {
     ready = false;
     running = false;
+    progress.clear();
     for (const p of pending.values()) p.reject(new Error("Ruby LSP exited"));
     pending.clear();
     setStatus("Ruby LSP stopped", "off");
@@ -193,6 +194,7 @@ export async function startLsp(opts: { launcher?: boolean } = {}) {
   if (gen !== generation) return;
   stopping = false;
   stderr.length = 0;
+  progress.clear();
   setStatus("Ruby LSP: starting", "busy");
   const channel = new Channel<RpcEvent>();
   channel.onmessage = (ev) => gen === generation && onEvent(ev);
@@ -255,6 +257,7 @@ export async function stopLsp() {
   notify("exit", null);
   ready = false;
   running = false;
+  progress.clear();
   await invoke("lsp_stop");
 }
 

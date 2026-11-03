@@ -1,8 +1,9 @@
+import { ask } from "@tauri-apps/plugin-dialog";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../editor", async () => await import("./fakeEditor"));
 vi.mock("../debug", () => ({ debugSession: vi.fn(), sessionFor: () => null, stopSession: vi.fn() }));
 
-import { buildCommand, configList, loadRunConfigs, newConfig, parseDotenv, rakeTask, safeEnv, saveRunConfigs, validateConfig, type RunConfig } from "../run";
+import { buildCommand, configList, editConfigurations, loadRunConfigs, newConfig, parseDotenv, rakeTask, safeEnv, saveRunConfigs, validateConfig, type RunConfig } from "../run";
 import { mergeConfigs, splitConfigs } from "../runstore";
 import { checkTrust, loadSettings, trustProject } from "../settings";
 import { state } from "../state";
@@ -134,6 +135,18 @@ describe("trust gating", () => {
     expect(fake.config.has("run-configs.json")).toBe(false);
     expect(fake.calls).not.toContain("api.writeFile");
     expect(captured).toEqual([]);
+  });
+
+  it("asks for Trust before editing configurations and opens no editor in Safe Mode", async () => {
+    await loadRunConfigs();
+    vi.mocked(ask).mockClear();
+    await editConfigurations();
+    expect(ask).toHaveBeenCalledOnce();
+    expect(document.querySelector(".rc-list")).toBeNull();
+    vi.mocked(ask).mockResolvedValueOnce(true);
+    await editConfigurations();
+    expect(document.querySelector(".rc-list")).not.toBeNull();
+    document.querySelector(".rc-list")!.closest("[data-modal]")?.remove();
   });
 
   it("reads a trusted project's run.json and skips invalid entries", async () => {

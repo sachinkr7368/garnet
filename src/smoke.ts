@@ -272,7 +272,7 @@ async function uiChecks(check: (n: string, ok: boolean | string) => void) {
   const stored = JSON.parse((await api.configRead("run-configs.json")) ?? "{}")[state.project!.root];
   const sharedNames = configList().filter((c) => c.shared).map((c) => c.name);
   check("run configurations stored in Garnet's config dir", (stored?.configurations.length ?? 0) + sharedNames.length === names.length || JSON.stringify({ stored, sharedNames, names }));
-  editConfigurations();
+  await editConfigurations();
   check("run configuration dialog lists configs", overlay.querySelectorAll(".rc-item").length === names.length);
   check("run configuration dialog offers Store as project file", [...overlay.querySelectorAll(".rc-check")].some((l) => l.textContent?.includes("Store as project file")));
   overlay.replaceChildren();
@@ -1045,7 +1045,7 @@ async function trustFlowChecks(report: Report, check: Check) {
   check("trusted: git runs right away", await api.gitBranch(root).then((b) => b !== "", (e) => String(e)));
   const want = (await api.readFile(`${root}/.ruby-version`).catch(() => "")).trim().replace(/^ruby-/, "");
   const ruby = await api.runCapture(root, "ruby -e 'print RUBY_VERSION'", 60).catch((e) => String(e));
-  check("trusted: commands run with the login shell's Ruby", !want || ruby.startsWith(want) || ruby);
+  check("trusted: commands run with the login shell's Ruby", !want || ruby === want || ruby.startsWith(`${want}.`) || ruby);
 }
 
 const keystroke = (target: EventTarget, init: KeyboardEventInit) => {

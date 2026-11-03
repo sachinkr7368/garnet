@@ -144,7 +144,7 @@ pub fn pty_spawn(
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(e2s)?;
     let shell = shell.filter(|s| !s.is_empty()).unwrap_or_else(user_shell);
-    let cmd = shell_command(shell, command.as_deref(), &cwd, std::env::vars(), env.unwrap_or_default());
+    let cmd = shell_command(shell, command.as_deref(), &cwd, crate::env::parent_env(), env.unwrap_or_default());
     let child = pair.slave.spawn_command(cmd).map_err(e2s)?;
     drop(pair.slave);
     let mut reader = pair.master.try_clone_reader().map_err(e2s)?;

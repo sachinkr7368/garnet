@@ -44,16 +44,19 @@ fn reap(mut s: Session) {
         // The shell is a session leader, so its pid is the process group id.
         unsafe { libc::killpg(pid, libc::SIGHUP) };
     }
-    for _ in 0..50 {
+    // A deadline, not a count of sleeps: on a loaded machine each 10ms sleep can overrun several times over.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while std::time::Instant::now() < deadline {
         if matches!(s.child.try_wait(), Ok(Some(_))) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    if let Some(pid) = pid {
-        unsafe { libc::killpg(pid, libc::SIGKILL) };
-    }
-    let _ = s.child.kill();
+    match pid {
+        Some(pid) => drop(unsafe { libc::killpg(pid, libc::SIGKILL) }),
+        // portable-pty's kill() starts with SIGHUP and its own 200ms grace, so only use it without a pid.
+        None => drop(s.child.kill()),
+    };
     let _ = s.child.wait();
 }
 
@@ -206,7 +209,8 @@ mod tests {
         assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0, "the shell was running");
         let started = std::time::Instant::now();
         ptys.kill(id);
-        assert!(started.elapsed() < std::time::Duration::from_secs(2), "kill waited for the shell to exit on its own");
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(2), "kill waited for the shell to exit on its own ({took:?})");
         // Already waited for: no zombie is left for anyone else to collect.
         let r = unsafe { libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG) };
         assert_eq!((r, std::io::Error::last_os_error().raw_os_error()), (-1, Some(libc::ECHILD)));

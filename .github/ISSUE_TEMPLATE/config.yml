@@ -3,3 +3,6 @@ contact_links:
   - name: Report a security vulnerability
     url: https://github.com/sachinkr7368/garnet/security/advisories/new
     about: Use private vulnerability reporting, not a public issue.
+  - name: Questions and help
+    url: https://github.com/sachinkr7368/garnet/discussions
+    about: Setup questions, how-tos and ideas go to Discussions.

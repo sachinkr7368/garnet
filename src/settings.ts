@@ -290,6 +290,7 @@ export interface Session {
   active?: string;
   expanded?: string[];
   bottom?: string | null;
+  recent?: string[];
 }
 
 export async function loadSession(root: string): Promise<Session | undefined> {

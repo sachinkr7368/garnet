@@ -26,7 +26,7 @@ export function initToolbar(switchProject: (path: string) => void) {
   openProjectHere = switchProject;
 }
 
-const git = (...args: string[]) => invoke<string>("git_run", { root: root(), args });
+const git = (...args: string[]) => api.git(root(), ...args);
 
 /// Runs a git action with a result toast; true when it succeeded.
 async function run(label: string, fn: () => Promise<unknown>) {

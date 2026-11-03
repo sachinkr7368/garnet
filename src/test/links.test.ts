@@ -27,6 +27,7 @@ describe("fuzzy matcher", () => {
     expect(fuzzyScore("pc", "posts_controller.rb")).not.toBeNull();
     expect(fuzzyScore("cp", "pc")).toBeNull();
     expect(fuzzyScore("", "anything")).toBe(0);
+    expect(fuzzyScore("Post", "post.rb")).not.toBeNull();
   });
 
   it("prefers word starts, camel humps and consecutive runs", () => {

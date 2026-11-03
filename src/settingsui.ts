@@ -3,7 +3,7 @@ import { allCommands, captureNextKey, formatKey, keymap, keysFor, runCommand } f
 import { openFile } from "./editor";
 import { api } from "./ipc";
 import { managersDetected } from "./run";
-import { editableSettingsPath, globalOnly, onSettingsChange, projectSettingsPath, SCHEMA, scopeValue, setting, updateSetting, type SettingDef } from "./settings";
+import { editableSettingsPath, globalOnly, isTrusted, onSettingsChange, projectSettingsPath, SCHEMA, scopeValue, setting, updateSetting, type SettingDef } from "./settings";
 import { root, state } from "./state";
 import { fuzzyScore, h, icon, iconButton, modal, toast } from "./ui";
 
@@ -165,6 +165,7 @@ export function openSettingsWindow(initialPage = "Appearance") {
 
 function pageIntro(page: string): HTMLElement[] {
   if (page === "Languages/Ruby" && state.project) {
+    if (!isTrusted()) return [h("div", { class: "st-info" }, "Trust the project to detect its Ruby (it runs through your login shell in the project).")];
     const info = h("div", { class: "st-info" }, "Detecting Ruby…");
     api
       .runCapture(root(), "echo \"$(ruby -v 2>&1) at $(command -v ruby)\"; bundle -v 2>/dev/null; command -v ruby-lsp >/dev/null && echo \"ruby-lsp $(ruby-lsp --version 2>/dev/null)\"", 20)

@@ -2,7 +2,7 @@ import "./github.css";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { activeTab, editor } from "./editor";
 import { cloneProgress, cloneUrl, deviceNext, sanitizeHtml } from "./ghmodel";
-import { Channel, invoke } from "./ipc";
+import { api, Channel, invoke } from "./ipc";
 import { setting } from "./settings";
 import { basename, dirname, rel, root, state } from "./state";
 import { fuzzyFilter, h, icon, modal as modalBackdrop, quickPick, statusSlot, toast } from "./ui";
@@ -46,7 +46,7 @@ export async function gql<T = any>(query: string, variables: Record<string, unkn
   }
 }
 
-const git = (...args: string[]) => invoke<string>("git_run", { root: root(), args });
+const git = (...args: string[]) => api.git(root(), ...args);
 
 export async function remoteRepo(): Promise<{ owner: string; repo: string } | null> {
   if (!state.project?.git) return null;

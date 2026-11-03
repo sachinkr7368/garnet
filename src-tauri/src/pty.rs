@@ -99,6 +99,31 @@ fn complete_utf8_len(buf: &[u8]) -> usize {
     }
 }
 
+/// A login shell (running `command`, or interactive) with Garnet's environment minus the launching shell's Ruby state,
+/// terminal variables, and the caller's `env` on top.
+fn shell_command(shell: String, command: Option<&str>, cwd: &str, parent: impl IntoIterator<Item = (String, String)>, env: HashMap<String, String>) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new(shell);
+    match command {
+        Some(c) => cmd.args(["-ilc", c]),
+        None => cmd.arg("-l"),
+    }
+    cmd.cwd(cwd);
+    cmd.env_clear();
+    for (k, v) in crate::env::inherited(parent) {
+        cmd.env(k, v);
+    }
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("TERM_PROGRAM", "Garnet");
+    if cmd.get_env("LANG").is_none() {
+        cmd.env("LANG", "en_US.UTF-8");
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn pty_spawn(
@@ -112,24 +137,14 @@ pub fn pty_spawn(
     rows: u16,
     on_event: Channel<PtyEvent>,
 ) -> Result<u32, String> {
+    if !crate::git::trusted() {
+        return Err("Trust project to open a terminal".into());
+    }
     let pair = native_pty_system()
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(e2s)?;
-    let mut cmd = CommandBuilder::new(shell.filter(|s| !s.is_empty()).unwrap_or_else(user_shell));
-    match &command {
-        Some(c) => cmd.args(["-ilc", c]),
-        None => cmd.arg("-l"),
-    }
-    cmd.cwd(&cwd);
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-    cmd.env("TERM_PROGRAM", "Garnet");
-    if std::env::var_os("LANG").is_none() {
-        cmd.env("LANG", "en_US.UTF-8");
-    }
-    for (k, v) in env.unwrap_or_default() {
-        cmd.env(k, v);
-    }
+    let shell = shell.filter(|s| !s.is_empty()).unwrap_or_else(user_shell);
+    let cmd = shell_command(shell, command.as_deref(), &cwd, crate::env::parent_env(), env.unwrap_or_default());
     let child = pair.slave.spawn_command(cmd).map_err(e2s)?;
     drop(pair.slave);
     let mut reader = pair.master.try_clone_reader().map_err(e2s)?;
@@ -188,6 +203,16 @@ pub async fn pty_kill(app: AppHandle, id: u32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_env_drops_the_launching_shells_ruby_state_and_keeps_the_callers() {
+        let parent = ["PATH", "HOME", "__MISE_DIFF", "DIRENV_DIR", "BUNDLE_GEMFILE", "RUBYOPT", "RBENV_VERSION"].map(|k| (k.to_string(), "x".to_string()));
+        let cmd = shell_command("/bin/zsh".into(), Some("true"), "/tmp", parent, HashMap::from([("FOO".to_string(), "1".to_string())]));
+        let mut keys: Vec<&str> = cmd.iter_full_env_as_str().map(|(k, _)| k).collect();
+        keys.sort();
+        assert_eq!(keys, ["COLORTERM", "FOO", "HOME", "LANG", "PATH", "TERM", "TERM_PROGRAM"]);
+        assert_eq!(cmd.get_argv().iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>(), ["/bin/zsh", "-ilc", "true"]);
+    }
 
     fn session(ptys: &Ptys, program: &str, writer: Box<dyn Write + Send>) -> (u32, u32) {
         let pair = native_pty_system().openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }).unwrap();

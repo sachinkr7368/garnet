@@ -1,18 +1,43 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../editor", async () => await import("./fakeEditor"));
 
-import { newTerminal, PtyView, terminals } from "../terminal";
+import { checkTrust, trustProject } from "../settings";
+import { newTerminal, PtyView, showTerminalPanel, terminals } from "../terminal";
+import { bottom } from "../ui";
 import { state } from "../state";
 import { fake } from "./fakeIpc";
 
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 type Ch = { onmessage: (ev: unknown) => void };
 
-beforeEach(() => {
+beforeEach(async () => {
   fake.reset();
+  await trustProject("/work/blog", true);
   document.getElementById("overlay-root")!.replaceChildren();
   state.project = { root: "/work/blog", name: "blog", git: true, rails: true, rspec: false, minitest: true, binRspec: false, debugBundled: false };
   for (const i of [...terminals.items]) terminals.close(i);
+});
+
+describe("terminal trust gate", () => {
+  it("shows Trust Project instead of starting a shell in Safe Mode, and opens one once trusted", async () => {
+    fake.config.delete("trusted.json");
+    expect(await checkTrust("/work/blog")).toBe(false);
+    fake.handlers.set("pty_spawn", () => 1);
+    if (!bottom.views.has("terminal")) bottom.add({ id: "terminal", title: "Terminal", icon: "terminal", el: terminals.el });
+    bottom.show("terminal");
+    showTerminalPanel();
+    newTerminal();
+    expect(fake.invocations.some((i) => i.cmd === "pty_spawn")).toBe(false);
+    expect(terminals.gate.hidden).toBe(false);
+    expect(terminals.gate.textContent).toContain("Trust project to open a terminal");
+    expect(terminals.gate.querySelector("button")?.textContent).toBe("Trust Project");
+    await trustProject("/work/blog");
+    await tick();
+    expect(terminals.gate.hidden).toBe(true);
+    expect(terminals.items).toHaveLength(1);
+    expect(fake.invocations.filter((i) => i.cmd === "pty_spawn")).toHaveLength(1);
+    bottom.hide();
+  });
 });
 
 describe("terminals", () => {

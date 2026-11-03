@@ -60,6 +60,41 @@ describe("quick pick hover", () => {
   });
 });
 
+describe("quick pick late results", () => {
+  it("keeps the selected item when late results for the same query arrive, so Enter opens it", async () => {
+    const accept = vi.fn();
+    const late: { label: string; data: unknown }[] = [];
+    const files = ["post.rb", "posts_controller.rb", "posts_helper.rb"].map((label) => ({ label, data: { file: `/p/${label}` } }));
+    const input = () => overlay().querySelector<HTMLInputElement>(".qp-input")!;
+    const pick = quickPick({ placeholder: "x", items: async () => [...late, ...files], onAccept: (i) => accept(i?.data), onClose: () => accept("closed") });
+    await tick();
+    key(input(), "ArrowDown");
+    key(input(), "ArrowDown");
+    late.push({ label: "Post", data: { loc: "post.rb:1" } }, { label: "PostsController", data: { loc: "posts_controller.rb:1" } });
+    await pick.refresh();
+    expect(overlay().querySelector(".qp-item.selected .qp-label")?.textContent).toBe("posts_helper.rb");
+    input().value = "posts";
+    input().dispatchEvent(new Event("input"));
+    await tick();
+    expect(overlay().querySelector(".qp-item.selected .qp-label")?.textContent).toBe("Post");
+    key(input(), "ArrowDown");
+    key(input(), "ArrowDown");
+    key(input(), "ArrowDown");
+    await pick.refresh();
+    key(input(), "Enter");
+    expect(accept.mock.calls).toEqual([["closed"], [{ file: "/p/posts_controller.rb" }]]);
+  });
+
+  it("tells the owner when it closes, so in-flight requests can be cancelled", async () => {
+    const onClose = vi.fn();
+    const pick = quickPick({ placeholder: "x", items: [{ label: "a" }], onAccept: () => {}, onClose });
+    await tick();
+    expect(pick.query()).toBe("");
+    key(overlay().querySelector(".qp-input")!, "Escape");
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("quick pick limits and failures", () => {
   it("never selects past the 200 rows it renders", async () => {
     const accept = vi.fn();

@@ -1,8 +1,9 @@
+import { ask } from "@tauri-apps/plugin-dialog";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../editor", async () => await import("./fakeEditor"));
 vi.mock("../debug", () => ({ debugSession: vi.fn(), sessionFor: () => null, stopSession: vi.fn() }));
 
-import { buildCommand, configList, loadRunConfigs, newConfig, parseDotenv, rakeTask, safeEnv, saveRunConfigs, validateConfig, type RunConfig } from "../run";
+import { buildCommand, configList, editConfigurations, loadRunConfigs, newConfig, parseDotenv, rakeTask, safeEnv, saveRunConfigs, validateConfig, type RunConfig } from "../run";
 import { mergeConfigs, splitConfigs } from "../runstore";
 import { checkTrust, loadSettings, trustProject } from "../settings";
 import { state } from "../state";
@@ -109,6 +110,43 @@ describe("trust gating", () => {
     await loadRunConfigs();
     expect(configList().map((c) => c.name)).toEqual(["Rails server", "Rails console", "All tests"]);
     expect(fake.calls).not.toContain("api.writeFile");
+  });
+
+  it("stores no defaults while untrusted, so trusting shows the project's run.json without shadow copies", async () => {
+    fake.files.set(`${ROOT}/.garnet/run.json`, JSON.stringify({ configurations: [{ name: "Rails server", type: "rails-server" }] }));
+    await loadRunConfigs();
+    expect(fake.config.has("run-configs.json")).toBe(false);
+    await trustProject(ROOT, true);
+    await loadRunConfigs();
+    expect(configList().map((c) => [c.name, c.shared])).toEqual([["Rails server", true]]);
+    expect(fake.config.has("run-configs.json")).toBe(false);
+  });
+
+  it("keeps Safe Mode selections and edits in memory and runs no shell probe", async () => {
+    const captured: string[] = [];
+    fake.capture = (c) => (captured.push(c), "");
+    await loadRunConfigs();
+    const select = document.querySelector<HTMLSelectElement>("#run-widget .run-select")!;
+    select.value = "Rails console";
+    select.dispatchEvent(new Event("change"));
+    await saveRunConfigs([...configList(), newConfig("rspec", "Mine", "spec")]);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(configList().map((c) => c.name)).toContain("Mine");
+    expect(fake.config.has("run-configs.json")).toBe(false);
+    expect(fake.calls).not.toContain("api.writeFile");
+    expect(captured).toEqual([]);
+  });
+
+  it("asks for Trust before editing configurations and opens no editor in Safe Mode", async () => {
+    await loadRunConfigs();
+    vi.mocked(ask).mockClear();
+    await editConfigurations();
+    expect(ask).toHaveBeenCalledOnce();
+    expect(document.querySelector(".rc-list")).toBeNull();
+    vi.mocked(ask).mockResolvedValueOnce(true);
+    await editConfigurations();
+    expect(document.querySelector(".rc-list")).not.toBeNull();
+    document.querySelector(".rc-list")!.closest("[data-modal]")?.remove();
   });
 
   it("reads a trusted project's run.json and skips invalid entries", async () => {

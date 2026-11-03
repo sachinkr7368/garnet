@@ -1158,7 +1158,7 @@ dependencies = [
 
 [[package]]
 name = "garnet"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "base64 0.23.1",
  "encoding_rs",

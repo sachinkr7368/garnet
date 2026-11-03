@@ -96,3 +96,16 @@ export async function interpolate(template: string, evaluate: (expr: string) => 
 
 export const describe = (bp: Breakpoint) =>
   [bp.logMessage ? `log: ${bp.logMessage}` : "", bp.condition ? `if ${bp.condition}` : "", bp.hitCount ? `pass count ${bp.hitCount}` : "", bp.enabled ? "" : "disabled"].filter(Boolean).join(" · ");
+
+export interface GutterPress {
+  line: number;
+  x: number;
+  y: number;
+  left: boolean;
+  modifiers: boolean;
+  clicks: number;
+}
+
+/// A line-number click toggles a breakpoint only as a plain single left click that ends on the same line without dragging.
+export const isBreakpointClick = (down: GutterPress | null, up: { line?: number; x: number; y: number }) =>
+  !!down && down.left && !down.modifiers && down.clicks === 1 && up.line === down.line && Math.abs(up.x - down.x) < 4 && Math.abs(up.y - down.y) < 4;

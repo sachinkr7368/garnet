@@ -6,7 +6,7 @@ import { importJetBrainsKeymap, jetbrainsKeystroke } from "./keymapref";
 import { breakpointsIn, debugSessions, debugState, evaluate, flushBreakpoints, loadBreakpoints, resume, resumeSession, selectDebugSession, smokeHooks, stopAllSessions, stopDebug, toggleBreakpoint } from "./debug";
 import { rerunFailed, testRunState, testStatusAt } from "./testresults";
 import { defaultDocker } from "./docker";
-import { activeTab, activeViewTab, allTabs, closeTab, editor, languageFor, openFile } from "./editor";
+import { activate, activeTab, activeViewTab, allTabs, closeTab, editor, languageFor, openFile } from "./editor";
 import { symbolPath } from "./breadcrumbs";
 import { snippetsFor } from "./languages/snippets";
 import { replaceInFiles, searchView } from "./search";
@@ -30,7 +30,7 @@ import { loadMigrations } from "./migrations";
 import { railsTreeEl, refreshRailsTree } from "./railsview";
 import { toggleRailsView } from "./tree";
 import { gh, refreshAccount, signIn } from "./github";
-import { bottom, rightbar } from "./ui";
+import { bottom, rightbar, sidebar } from "./ui";
 
 type Report = Record<string, unknown> & { checks: Record<string, boolean | string> };
 
@@ -178,6 +178,8 @@ export async function runSmoke(project: string, withDebug: boolean, openProject:
     await githubChecks(report, check);
     step("docker");
     await dockerChecks(report, check);
+    step("layout");
+    await layoutChecks(report, check);
     if (withDebug) {
       step("debug: rails request");
       await debugRailsRequest(report, controller, check);
@@ -1186,4 +1188,216 @@ async function searchPopupChecks(phase: string, check: Check, lsp: boolean) {
   }
   close(input);
   c("popups close with Escape", !stuck.length || stuck.join(", "));
+}
+
+/// Layout at each window size: no page scroll, nothing cut off by its clipping ancestor (unless it is a
+/// deliberate ellipsis) or squeezed to nothing, the active tabs on screen and every popup inside the window.
+/// The short 1024x600 pass also checks toolbars and dialogs for vertical clipping.
+const LAYOUT_SIZES: [number, number | null][] = [[800, null], [1024, null], [1280, null], [1440, null], [1024, 600]];
+const LAYOUT_SKIP = ".monaco-editor, .monaco-diff-editor, .xterm, .db-grid, .tr-detail";
+const LAYOUT_VERTICAL = ".view-toolbar, .search-bar, .subtab-bar, #bottom-head, .commit-actions, #overlay-root";
+
+const describeEl = (el: Element) => {
+  const part = (e: Element) => `${e.tagName.toLowerCase()}${e.id ? `#${e.id}` : ""}${[...e.classList].slice(0, 3).map((c) => `.${c}`).join("")}${e instanceof HTMLElement && e.dataset.view ? `[data-view=${e.dataset.view}]` : ""}`;
+  const chain = [part(el)];
+  for (let a = el.parentElement; a && chain.length < 3 && a !== document.body; a = a.parentElement) chain.unshift(part(a));
+  return chain.join(" > ");
+};
+
+/// Ancestors that clip `el`, honouring absolute and fixed positioning. Vertically, only non-scrolling clippers count.
+function clippers(el: Element, axis: "x" | "y" = "x"): Element[] {
+  const out: Element[] = [];
+  let pos = getComputedStyle(el).position;
+  for (let a = el.parentElement; a; a = a.parentElement) {
+    const s = getComputedStyle(a);
+    if (pos === "fixed") break;
+    if (pos === "absolute" && s.position === "static") continue;
+    if (axis === "y" && (s.overflowY === "auto" || s.overflowY === "scroll")) break;
+    if (axis === "x" ? s.overflowX !== "visible" : s.overflowY === "hidden" || s.overflowY === "clip") out.push(a);
+    if (pos === "absolute") pos = s.position;
+  }
+  return out;
+}
+
+export function layoutIssues(): string[] {
+  const issues = new Set<string>();
+  const doc = document.documentElement;
+  if (doc.scrollWidth > window.innerWidth) issues.add(`page scrolls horizontally (${doc.scrollWidth} > ${window.innerWidth})`);
+  const ellipsis = (s: CSSStyleDeclaration) => s.textOverflow === "ellipsis" && s.overflowX !== "visible" && !/flex|grid/.test(s.display);
+  for (const el of document.querySelectorAll("#app *, #overlay-root *")) {
+    if (el.closest(LAYOUT_SKIP)) continue;
+    const r = el.getBoundingClientRect();
+    const s = getComputedStyle(el);
+    if (s.visibility === "hidden" || s.display === "contents" || s.animationName !== "none") continue;
+    if (r.width < 1 && r.height >= 1 && el.getClientRects().length && [...el.childNodes].some((n) => n.nodeType === Node.TEXT_NODE && n.textContent!.trim())) {
+      issues.add(`${describeEl(el)} squeezed to 0 width`);
+      continue;
+    }
+    if (r.width < 1 || r.height < 1) continue;
+    const popup = el.parentElement?.parentElement?.id === "overlay-root" || el.matches(".ctx-menu, .toast");
+    if (r.right > window.innerWidth + 1 || r.left < -1 || (popup && (r.bottom > window.innerHeight + 1 || r.top < -1))) {
+      issues.add(`${describeEl(el)} outside the window (right ${Math.round(r.right)}, bottom ${Math.round(r.bottom)})`);
+      continue;
+    }
+    if (el.closest(LAYOUT_VERTICAL)) {
+      const vclip = clippers(el, "y").find((c) => {
+        const cr = c.getBoundingClientRect();
+        return cr.height > 0 && r.bottom > cr.bottom + 1;
+      });
+      if (vclip) issues.add(`${describeEl(el)} cut off at the bottom by ${describeEl(vclip)} (${Math.round(r.bottom - vclip.getBoundingClientRect().bottom)}px)`);
+    }
+    if (ellipsis(s)) continue;
+    const clip = clippers(el).find((c) => {
+      const cr = c.getBoundingClientRect();
+      return cr.width > 0 && r.right > cr.right + 1;
+    });
+    if (clip && !ellipsis(getComputedStyle(clip))) {
+      const cr = clip.getBoundingClientRect();
+      issues.add(r.left >= cr.right ? `${describeEl(el)} fully hidden by ${describeEl(clip)}` : `${describeEl(el)} cut off by ${describeEl(clip)} (${Math.round(r.right - cr.right)}px)`);
+    }
+  }
+  return [...issues];
+}
+
+async function layoutChecks(report: Report, check: Check) {
+  const { getCurrentWindow, LogicalSize } = await import("@tauri-apps/api/window");
+  const win = getCurrentWindow();
+  const root = state.project!.root;
+  const overlay = document.getElementById("overlay-root")!;
+  const settle = () => sleep(150);
+  const startW = window.innerWidth;
+  const startH = window.innerHeight;
+  const side = document.getElementById("sidebar")!;
+  const right = document.getElementById("rightbar")!;
+  const bottomEl = document.getElementById("bottom")!;
+  const saved = { side: side.style.width, right: right.style.width, bottom: bottomEl.style.height, sideView: sidebar.active, rightView: rightbar.active, bottomView: bottom.active };
+  const files = [`${root}/garnet_layout_smoke_compose_override.yml`, `${root}/app/models/garnet_layout_smoke_with_a_long_name.rb`];
+  const opened = ["app/controllers/posts_controller.rb", "app/models/post.rb", "app/models/application_record.rb", "config/routes.rb", "config/database.yml", "Gemfile", "app/helpers/posts_helper.rb", "app/views/posts/index.html.erb", "app/views/posts/_form.html.erb", "config/application.rb"].map((f) => `${root}/${f}`);
+  const before = new Set(allTabs().map((t) => t.path));
+  const failures: Record<string, string[]> = {};
+  const audit = (label: string) => {
+    const found = layoutIssues();
+    const tab = !bottom.active ? null : document.querySelector<HTMLElement>(`#bottom-head .dock-tab[data-view="${bottom.active}"]`);
+    if (bottom.active && !bottomEl.hidden) {
+      const head = document.getElementById("bottom-head")!.getBoundingClientRect();
+      const r = tab?.getBoundingClientRect();
+      if (!tab || tab.hidden || !r || r.width < 1 || r.left < head.left - 1 || r.right > head.right + 1) found.push(`active bottom tab ${bottom.active} not visible`);
+    }
+    const strip = document.getElementById("tabs")!.getBoundingClientRect();
+    const editorTab = document.querySelector<HTMLElement>("#tabs .tab.active");
+    const er = editorTab?.getBoundingClientRect();
+    if (allTabs().length && (!editorTab || editorTab.hidden || !er || er.width < 1 || er.left < strip.left - 1 || er.right > strip.right + 1)) found.push("active editor tab not visible");
+    if (found.length) failures[label] = found;
+  };
+  try {
+    for (const f of files) await api.writeFile(f, "# layout smoke\n");
+    await refreshGit();
+    for (const f of opened) await openFile(f).catch((e) => (failures["open fixtures"] ??= []).push(`${f}: ${e}`));
+    const missing = opened.filter((f) => !allTabs().some((t) => t.path === f));
+    if (missing.length) (failures["open fixtures"] ??= []).push(`not open: ${missing.map((f) => f.slice(root.length + 1)).join(", ")}`);
+    // ResizeObserver pauses while the window is occluded, so refit the strips once the panels have clamped.
+    const refit = async () => {
+      window.dispatchEvent(new Event("resize"));
+      await settle();
+      activate(activeTab() ?? activeViewTab());
+      terminals.render();
+      runs.render();
+    };
+    const summary = document.querySelector<HTMLElement>(".tests-view .search-summary");
+    if (summary) summary.textContent = "Smoke specs: 0 passed · no results (did the runner start? see the console for the full output of the runner)";
+    for (const [w, h] of LAYOUT_SIZES) {
+      const height = h ?? Math.max(600, startH);
+      const width = h ? `${w}x${h}` : `${w}`;
+      await win.setSize(new LogicalSize(w, height));
+      // setSize includes the title bar, so the viewport ends up a little shorter than `height`.
+      if (!(await until(() => window.innerWidth === w && window.innerHeight <= height && window.innerHeight >= height - 40, 5000, 50))) {
+        failures[`${width} resize`] = [`window is ${window.innerWidth}x${window.innerHeight}, wanted ${w}x${height}`];
+        continue;
+      }
+      await settle();
+      for (const panels of ["default", "min"] as const) {
+        side.style.width = panels === "min" ? "160px" : saved.side;
+        right.style.width = panels === "min" ? "200px" : saved.right;
+        bottomEl.style.height = panels === "min" ? "100px" : saved.bottom;
+        await refit();
+        for (const id of bottom.views.keys()) {
+          substep(`${width} ${panels} bottom:${id}`);
+          bottom.show(id);
+          await refit();
+          audit(`${width} ${panels} bottom:${id}`);
+        }
+        for (const [dock, name] of [[sidebar, "side"], [rightbar, "right"]] as const) {
+          for (const id of dock.views.keys()) {
+            substep(`${width} ${panels} ${name}:${id}`);
+            dock.show(id);
+            await settle();
+            audit(`${width} ${panels} ${name}:${id}`);
+          }
+        }
+        const welcome = document.getElementById("welcome")!;
+        const wasHidden = welcome.hidden;
+        welcome.hidden = false;
+        await settle();
+        audit(`${width} ${panels} welcome hints`);
+        welcome.hidden = wasHidden;
+        rightbar.hide();
+      }
+      side.style.width = saved.side;
+      bottomEl.style.height = saved.bottom;
+      sidebar.show("commit");
+      bottom.show("tests");
+      await refit();
+      await settle();
+      const dialog = async (label: string, open: () => unknown, ready: () => Element | null | undefined) => {
+        substep(`${width} ${label}`);
+        await open();
+        const el = await until(ready, 5000);
+        await settle();
+        if (!el) failures[`${width} ${label}`] = ["did not open"];
+        else audit(`${width} ${label}`);
+        const backdrop = overlay.querySelector(".qp-backdrop, .ctx-backdrop");
+        (backdrop?.querySelector("input") ?? backdrop)?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        overlay.querySelector(".ctx-backdrop")?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+        overlay.replaceChildren();
+        document.getElementById("app")?.toggleAttribute("inert", false);
+        await settle();
+      };
+      const typed = (q: string) => () => {
+        const input = overlay.querySelector<HTMLInputElement>(".qp-input");
+        if (!input) return null;
+        if (input.value !== q) ((input.value = q), input.dispatchEvent(new Event("input")));
+        return overlay.querySelector(".qp-item");
+      };
+      await dialog("settings", () => openSettingsWindow(), () => overlay.querySelector(".st-node"));
+      await dialog("settings keymap", () => openSettingsWindow("Keymap"), () => overlay.querySelector(".st-key-row"));
+      await dialog("new connection", async () => {
+        runCommand("dbNewConnection");
+        (await until(() => overlay.querySelector(".qp-item"), 5000))?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      }, () => overlay.querySelector(".db-dialog"));
+      await dialog("search everywhere", () => runCommand("searchEverywhere"), typed("posts"));
+      await dialog("go to file", () => runCommand("goToFile"), typed("app"));
+      for (const [i, btn] of [...document.querySelectorAll<HTMLElement>("#switchers .switcher")].entries()) await dialog(`switcher ${i}`, () => btn.click(), () => overlay.querySelector(".qp-item, .ctx-item"));
+      for (const [label, sel] of [["bottom tab overflow menu", "#bottom-head > .tab-overflow:not([hidden])"], ["editor tab overflow menu", "#tabs > .tab-overflow:not([hidden])"]]) {
+        const more = document.querySelector<HTMLElement>(sel);
+        if (more) await dialog(label, () => more.click(), () => overlay.querySelector(".ctx-item"));
+        else if (w === 800) failures[`${width} ${label}`] = ["» button missing"];
+      }
+    }
+    report.layoutIssues = failures;
+    const flat = Object.entries(failures).flatMap(([k, v]) => v.map((x) => `${k}: ${x}`));
+    check("layout: no page scroll, clipping or hidden active tab at 800/1024/1280/1440 and 1024x600", flat.length === 0 || `${flat.length} issues: ${flat.slice(0, 25).join(" | ")}`);
+  } finally {
+    await win.setSize(new LogicalSize(startW, startH)).catch(() => {});
+    side.style.width = saved.side;
+    right.style.width = saved.right;
+    bottomEl.style.height = saved.bottom;
+    if (saved.sideView) sidebar.show(saved.sideView);
+    if (saved.rightView) rightbar.show(saved.rightView);
+    else rightbar.hide();
+    if (saved.bottomView) bottom.show(saved.bottomView);
+    for (const t of allTabs().filter((t) => !before.has(t.path))) await closeTab(t, true);
+    for (const f of files) await api.deletePath(f).catch(() => {});
+    await refreshGit();
+    clearToasts();
+  }
 }

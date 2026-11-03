@@ -109,6 +109,116 @@ export function iconButton(name: string, title: string, onclick: (e: MouseEvent)
   return withTip(h("button", { class: "icon-btn", onclick }, icon(name)), title, command);
 }
 
+/// Which tabs of a strip stay visible: all when they fit, else as many as fit in order next to the "»" button,
+/// always including the active one.
+export function fitTabs(widths: number[], available: number, moreWidth: number, active: number): number[] {
+  const all = widths.map((_, i) => i);
+  if (widths.reduce((a, b) => a + b, 0) <= available) return all;
+  let budget = available - moreWidth - (widths[active] ?? 0);
+  const keep = new Set(active >= 0 && active < widths.length ? [active] : []);
+  for (const i of all) {
+    if (keep.has(i)) continue;
+    if (widths[i] > budget) break;
+    budget -= widths[i];
+    keep.add(i);
+  }
+  return all.filter((i) => keep.has(i));
+}
+
+const codiconOf = (el: Element) => el.querySelector(".codicon")?.className.match(/codicon-([\w-]+)/)?.[1] ?? "blank";
+
+/// Opens a "»" menu under its button and keeps aria-expanded in step with it.
+function overflowMenu(more: HTMLElement, items: MenuItem[]) {
+  const r = more.getBoundingClientRect();
+  const { menu } = contextMenu({ clientX: r.left, clientY: r.bottom, preventDefault() {} } as MouseEvent, items);
+  more.setAttribute("aria-expanded", "true");
+  const root = document.getElementById("overlay-root")!;
+  const watch = new MutationObserver(() => {
+    if (menu.isConnected) return;
+    more.setAttribute("aria-expanded", "false");
+    watch.disconnect();
+  });
+  watch.observe(root, { childList: true });
+}
+
+const moreButton = (cls: string, title: string) => {
+  const more = withTip(h("button", { class: cls, hidden: true, "aria-haspopup": "menu", "aria-expanded": "false" }, "»"), title);
+  return more;
+};
+
+interface StripOptions {
+  title: string;
+  label: (tab: HTMLElement) => string;
+  pick: (tab: HTMLElement) => void;
+  detail?: (tab: HTMLElement) => string | undefined;
+  close?: (tab: HTMLElement) => void;
+}
+
+/// Keeps a tab strip on one line: tabs that don't fit are hidden and listed in a trailing "»" menu.
+export function overflowStrip(strip: HTMLElement, opts: StripOptions) {
+  const tabs = () => [...strip.children].filter((c): c is HTMLElement => c !== more && c instanceof HTMLElement);
+  const more = moreButton("tab-overflow", opts.title);
+  more.onclick = () =>
+    overflowMenu(
+      more,
+      tabs()
+        .filter((t) => t.hidden)
+        .map((t) => ({ label: opts.label(t), detail: opts.detail?.(t), title: t.title, icon: codiconOf(t), run: () => opts.pick(t), close: opts.close && (() => opts.close!(t)) })),
+    );
+  strip.append(more);
+  const fit = () => {
+    const all = tabs();
+    for (const t of all) t.hidden = false;
+    more.hidden = false;
+    const style = getComputedStyle(strip);
+    const gap = parseFloat(style.columnGap) || 0;
+    const pad = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) || 0;
+    const widths = all.map((t) => t.getBoundingClientRect().width + gap);
+    const visible = new Set(fitTabs(widths, strip.clientWidth - pad, more.getBoundingClientRect().width + gap, all.findIndex((t) => t.classList.contains("active"))));
+    all.forEach((t, i) => (t.hidden = !visible.has(i)));
+    more.hidden = visible.size === all.length;
+    if (!more.hidden && strip.lastElementChild !== more) strip.append(more);
+  };
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(() => fit()).observe(strip);
+  return { more, fit };
+}
+
+/// RubyMine's toolbar "»": icon buttons that don't fit move into a menu, starting from the end of the toolbar.
+export function overflowToolbar(bar: HTMLElement) {
+  const more = moreButton("icon-btn toolbar-overflow", "More actions");
+  const buttons = () => [...bar.children].filter((c): c is HTMLButtonElement => c instanceof HTMLButtonElement && c.classList.contains("icon-btn") && c !== more);
+  more.onclick = () =>
+    overflowMenu(
+      more,
+      buttons()
+        .filter((b) => b.classList.contains("overflowed") && !b.hidden)
+        .map((b) => ({ label: b.getAttribute("aria-label") || b.title, title: b.title, icon: codiconOf(b), disabled: b.disabled, checked: b.matches(".on, .active") || undefined, run: () => b.click() })),
+    );
+  bar.append(more);
+  const fit = () => {
+    const all = buttons();
+    for (const b of all) b.classList.remove("overflowed");
+    more.hidden = true;
+    if (bar.scrollWidth <= bar.clientWidth + 1) return;
+    more.hidden = false;
+    const gap = parseFloat(getComputedStyle(bar).columnGap) || 0;
+    const widths = all.map((b) => b.getBoundingClientRect().width + gap);
+    let excess = bar.scrollWidth - bar.clientWidth;
+    let first = all.length;
+    while (first > 0 && excess > 1) excess -= widths[--first];
+    for (const b of all.slice(first)) b.classList.add("overflowed");
+  };
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(() => fit()).observe(bar);
+  return fit;
+}
+
+/// A toolbar built after its tool window was added, with the same "»" overflow.
+export const withOverflow = (...args: Parameters<typeof h>) => {
+  const bar = h(...args);
+  overflowToolbar(bar);
+  return bar;
+};
+
 /// Sidebar and bottom tool windows
 
 interface View {
@@ -123,22 +233,28 @@ interface View {
 export class Dock {
   views = new Map<string, View>();
   active: string | null = null;
+  private overflow: ReturnType<typeof overflowStrip> | null = null;
+  private toolbars = new Map<string, (() => void)[]>();
   constructor(
     private host: HTMLElement,
     private head: HTMLElement,
     private body: HTMLElement,
     private strip: HTMLElement | null,
-  ) {}
+  ) {
+    if (!strip) this.overflow = overflowStrip(head, { title: "More tool windows", label: (t) => t.textContent ?? "", pick: (t) => this.show(t.dataset.view!) });
+  }
 
   add(view: View) {
     this.views.set(view.id, view);
+    this.toolbars.set(view.id, [...view.el.querySelectorAll<HTMLElement>(".view-toolbar, .search-bar")].map(overflowToolbar));
     view.el.classList.add("view");
     view.el.hidden = true;
     this.body.append(view.el);
     const tab = withTip(h("button", { class: "dock-tab", onclick: () => this.toggle(view.id) }, icon(view.icon)), view.title, view.command);
     tab.dataset.view = view.id;
     if (!this.strip) tab.append(h("span", {}, view.title));
-    (this.strip ?? this.head).append(tab);
+    if (this.overflow) this.overflow.more.before(tab);
+    else (this.strip ?? this.head).append(tab);
   }
 
   show(id: string) {
@@ -150,8 +266,9 @@ export class Dock {
     for (const t of (this.strip ?? this.head).querySelectorAll<HTMLElement>(".dock-tab"))
       t.classList.toggle("active", t.dataset.view === id);
     if (this.strip) this.head.textContent = view.title;
-    else this.head.querySelector<HTMLElement>(`.dock-tab[data-view="${id}"]`)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    this.overflow?.fit();
     view.onShow?.();
+    for (const fit of this.toolbars.get(id) ?? []) fit();
     window.dispatchEvent(new Event("resize"));
   }
 
@@ -159,6 +276,7 @@ export class Dock {
     this.host.hidden = true;
     this.active = null;
     for (const t of (this.strip ?? this.head).querySelectorAll(".dock-tab")) t.classList.remove("active");
+    this.overflow?.fit();
     window.dispatchEvent(new Event("resize"));
   }
 
@@ -230,7 +348,7 @@ export function dragWidth(rect: { left: number; right: number }, clientX: number
 /// Caps the bottom panel and the side panels to what the window has room for, keeping 120px for the editor and its
 /// tabs and 320px of editor width. Caps (not sizes) so a panel grows back when the window does.
 export function clampPanels() {
-  const main = document.getElementById("main")!.getBoundingClientRect().width;
+  const main = document.getElementById("main")!.getBoundingClientRect().width - document.getElementById("toolstrip")!.offsetWidth - document.getElementById("rightstrip")!.offsetWidth;
   const center = document.getElementById("center")!.getBoundingClientRect().height;
   const side = document.getElementById("sidebar")!;
   const right = document.getElementById("rightbar")!;
@@ -244,8 +362,6 @@ export function clampPanels() {
 export function setupResizers() {
   window.addEventListener("resize", clampPanels);
   clampPanels();
-  const tabs = document.getElementById("bottom-head")!;
-  tabs.addEventListener("wheel", (e) => e.deltaY && !e.deltaX && (tabs.scrollLeft += e.deltaY), { passive: true });
   const drag = (handle: HTMLElement, onMove: (e: PointerEvent) => void) =>
     handle.addEventListener("pointerdown", (e) =>
       trackDrag(handle, e, (ev) => {
@@ -494,6 +610,13 @@ export interface MenuItem {
   command?: string;
   /// Fixed context-local shortcut (tree keys), shown when there is no keymap command.
   shortcut?: string;
+  title?: string;
+  /// Dim text after the label (a file's folder).
+  detail?: string;
+  /// Shown as a checkmark for toggle actions.
+  checked?: boolean;
+  /// Adds a close button to the row (hidden editor tabs in the "»" menu).
+  close?: () => void;
   disabled?: boolean;
 }
 
@@ -526,13 +649,23 @@ export function contextMenu(e: MouseEvent, items: (MenuItem | null)[]) {
         "div",
         {
           class: `ctx-item${item.disabled ? " disabled" : ""}`,
-          role: "menuitem",
+          role: item.checked === undefined ? "menuitem" : "menuitemcheckbox",
+          "aria-checked": item.checked === undefined ? undefined : String(item.checked),
+          title: item.title,
           onmousemove: () => pointerMoved && selected !== i && select(i),
           onmousedown: (ev: MouseEvent) => (ev.preventDefault(), runItem(item)),
         },
         icon(item.icon ?? menuIconFor(item.label), "ctx-icon"),
         h("span", { class: "ctx-label" }, item.label),
+        item.detail ? h("span", { class: "ctx-detail" }, item.detail) : null,
         key ? h("span", { class: "ctx-key" }, key) : null,
+        item.checked ? icon("check", "ctx-check") : null,
+        item.close
+          ? withTip(
+              h("button", { class: "tab-close ctx-close", onmousedown: (ev: MouseEvent) => (ev.preventDefault(), ev.stopPropagation(), close(), item.close!()) }, icon("close")),
+              "Close",
+            )
+          : null,
       );
       rows.push(row);
       actions.push(item);
@@ -643,6 +776,24 @@ export function modal(box: HTMLElement, onClose: () => void, opts: { class?: str
   });
   return backdrop;
 }
+
+/// Text cut off by an ellipsis shows in full on hover, unless it or an ancestor already has its own tooltip.
+document.addEventListener("mouseover", (e) => {
+  let el = e.target instanceof HTMLElement ? e.target : null;
+  if (!el || el.closest(".monaco-editor")) return;
+  for (let i = 0; el && i < 3 && getComputedStyle(el).textOverflow !== "ellipsis"; i++) el = el.parentElement;
+  if (!el || getComputedStyle(el).textOverflow !== "ellipsis") return;
+  const own = el.closest<HTMLElement>("[title]:not([data-auto-title])");
+  if (own?.title) return;
+  const cut = el.scrollWidth > el.clientWidth + 1;
+  if (cut) {
+    el.title = (el.textContent ?? "").trim();
+    el.dataset.autoTitle = "";
+  } else if (el.dataset.autoTitle !== undefined) {
+    el.removeAttribute("title");
+    delete el.dataset.autoTitle;
+  }
+});
 
 /// Status bar slots
 

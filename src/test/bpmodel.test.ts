@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dapBreakpoints, deserialize, interpolate, passCountReached, serialize, trackLines, type Breakpoint } from "../bpmodel";
+import { dapBreakpoints, deserialize, interpolate, passCountReached, serialize, trackLines, type Breakpoint, isBreakpointClick } from "../bpmodel";
 
 const ROOT = "/work/blog";
 const rel = (p: string) => p.slice(ROOT.length + 1);
@@ -78,5 +78,20 @@ describe("DAP and runtime behaviour", () => {
 
   it("inserts values literally, even when they contain $& or $'", async () => {
     expect(await interpolate("got {a} and {b}", async (e) => (e === "a" ? '"$&"' : "$'tail"))).toBe(`got "$&" and $'tail`);
+  });
+});
+
+describe("line-number click", () => {
+  const down = { line: 4, x: 10, y: 50, left: true, modifiers: false, clicks: 1 };
+  it("toggles on a plain single left click released on the same line", () => {
+    expect(isBreakpointClick(down, { line: 4, x: 12, y: 51 })).toBe(true);
+  });
+  it("ignores drags, other lines, modifiers, double clicks and other buttons", () => {
+    expect(isBreakpointClick(down, { line: 4, x: 10, y: 70 })).toBe(false);
+    expect(isBreakpointClick(down, { line: 5, x: 10, y: 50 })).toBe(false);
+    expect(isBreakpointClick({ ...down, modifiers: true }, { line: 4, x: 10, y: 50 })).toBe(false);
+    expect(isBreakpointClick({ ...down, clicks: 2 }, { line: 4, x: 10, y: 50 })).toBe(false);
+    expect(isBreakpointClick({ ...down, left: false }, { line: 4, x: 10, y: 50 })).toBe(false);
+    expect(isBreakpointClick(null, { line: 4, x: 10, y: 50 })).toBe(false);
   });
 });

@@ -41,33 +41,112 @@ pub async fn list_dir(path: String) -> Result<Vec<Entry>, String> {
     Ok(entries)
 }
 
-#[tauri::command]
-pub async fn read_file(app: AppHandle, index: State<'_, Index>, path: String) -> Result<String, String> {
-    let mut roots = write_roots(&app, &index);
+async fn read_roots(app: &AppHandle, index: &Index) -> Result<Vec<PathBuf>, String> {
+    let mut roots = write_roots(app, index);
     roots.extend(app.path().app_data_dir().ok().and_then(|d| fs::canonicalize(d).ok()));
     if let Ok(project) = index.root() {
         roots.extend(tauri::async_runtime::spawn_blocking(move || ruby_roots(&project)).await.map_err(e2s)?);
     }
-    let (canonical, id) = check_read(&path, &roots)?;
+    Ok(roots)
+}
+
+#[tauri::command]
+pub async fn read_file(app: AppHandle, index: State<'_, Index>, path: String) -> Result<String, String> {
+    let (canonical, id) = check_read(&path, &read_roots(&app, &index).await?)?;
     read_text(&canonical, Some(id))
 }
 
-/// Reads a file; with `id` (device, inode) it must be the file that was checked: opened without following a final
-/// symlink and compared after opening, so swapping the file or a parent directory in between is refused.
-fn read_text(path: &Path, id: Option<(u64, u64)>) -> Result<String, String> {
+/// A file opened in an editor tab: its text, the encoding it was decoded from (and saved back in), and whether it
+/// is a large file of which only the first `LARGE_FILE` bytes were loaded.
+#[derive(Serialize, Debug)]
+pub struct TextFile {
+    text: String,
+    encoding: String,
+    bom: bool,
+    size: u64,
+    truncated: bool,
+}
+
+/// Files above this size open read-only, as plain text, with only this many bytes loaded.
+pub const LARGE_FILE: u64 = 10 * 1024 * 1024;
+
+#[tauri::command]
+pub async fn open_text(app: AppHandle, index: State<'_, Index>, path: String, encoding: Option<String>) -> Result<TextFile, String> {
+    let (canonical, id) = check_read(&path, &read_roots(&app, &index).await?)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (bytes, size) = read_bytes(&canonical, Some(id), LARGE_FILE)?;
+        decode(&bytes, encoding.as_deref(), size > LARGE_FILE).map(|(text, encoding, bom)| TextFile { text, encoding, bom, size, truncated: size > LARGE_FILE })
+    })
+    .await
+    .map_err(e2s)?
+}
+
+/// Reads at most `limit` bytes of a file and its full size; with `id` (device, inode) it must be the file that was
+/// checked: opened without following a final symlink and compared after opening, so swapping the file or a parent
+/// directory in between is refused.
+fn read_bytes(path: &Path, id: Option<(u64, u64)>, limit: u64) -> Result<(Vec<u8>, u64), String> {
     use std::io::Read;
     use std::os::unix::fs::MetadataExt;
-    let mut file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path).map_err(e2s)?;
+    let file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path).map_err(e2s)?;
     let meta = file.metadata().map_err(e2s)?;
     if id.is_some_and(|id| id != (meta.dev(), meta.ino())) {
         return Err(format!("{} changed while it was being opened", path.display()));
     }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(e2s)?;
-    if bytes.iter().take(8000).any(|&b| b == 0) {
-        return Err("binary file".into());
+    file.take(limit).read_to_end(&mut bytes).map_err(e2s)?;
+    Ok((bytes, meta.len()))
+}
+
+fn read_text(path: &Path, id: Option<(u64, u64)>) -> Result<String, String> {
+    let (bytes, _) = read_bytes(path, id, u64::MAX)?;
+    decode(&bytes, None, false).map(|(text, _, _)| text)
+}
+
+/// Decodes file bytes without losing any: a BOM wins, then valid UTF-8, else Windows-1252 (every byte maps to a
+/// distinct character, so it saves back byte for byte). `forced` is a "Reopen with Encoding" label. Files with NUL
+/// bytes and no UTF-16 BOM are binary and refused. `truncated`: the bytes are a prefix, so a UTF-8 sequence cut at the
+/// end is dropped instead of making the file look non-UTF-8.
+pub fn decode(bytes: &[u8], forced: Option<&str>, truncated: bool) -> Result<(String, String, bool), String> {
+    use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
+    let (enc, bom_len) = match forced {
+        Some(label) => {
+            let enc = Encoding::for_label(label.as_bytes()).ok_or_else(|| format!("unknown encoding {label}"))?;
+            (enc, Encoding::for_bom(bytes).filter(|(e, _)| *e == enc).map_or(0, |(_, n)| n))
+        }
+        None => match Encoding::for_bom(bytes) {
+            Some(found) => found,
+            None if bytes.iter().take(8000).any(|&b| b == 0) => return Err("binary file".into()),
+            None => match std::str::from_utf8(bytes) {
+                Ok(_) => (UTF_8, 0),
+                Err(e) if truncated && e.error_len().is_none() => return Ok((String::from_utf8_lossy(&bytes[..e.valid_up_to()]).into_owned(), "UTF-8".into(), false)),
+                Err(_) => (WINDOWS_1252, 0),
+            },
+        },
+    };
+    let (text, _) = enc.decode_without_bom_handling(&bytes[bom_len..]);
+    Ok((text.into_owned(), enc.name().to_string(), bom_len > 0))
+}
+
+/// Encodes text for saving in `encoding`; refuses (instead of writing `&#NNN;` or `?`) when a character has no
+/// representation there.
+pub fn encode(text: &str, encoding: &str, bom: bool) -> Result<Vec<u8>, String> {
+    let enc = encoding_rs::Encoding::for_label(encoding.as_bytes()).ok_or_else(|| format!("unknown encoding {encoding}"))?;
+    let utf16 = |be: bool| -> Vec<u8> {
+        let mark = if bom { Some(0xFEFF) } else { None };
+        mark.into_iter().chain(text.encode_utf16()).flat_map(|u| if be { u.to_be_bytes() } else { u.to_le_bytes() }).collect()
+    };
+    match enc.name() {
+        "UTF-8" => Ok([if bom { &b"\xEF\xBB\xBF"[..] } else { b"" }, text.as_bytes()].concat()),
+        "UTF-16LE" => Ok(utf16(false)),
+        "UTF-16BE" => Ok(utf16(true)),
+        name => {
+            let (bytes, _, unmappable) = enc.encode(text);
+            if unmappable {
+                return Err(format!("the file contains characters that {name} cannot represent; convert it to UTF-8 to save"));
+            }
+            Ok(bytes.into_owned())
+        }
     }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Where the project's Ruby keeps its standard library and gems (asked once per project from that Ruby), plus the
@@ -192,7 +271,7 @@ fn git_dirs(root: &Path) -> Vec<PathBuf> {
     [Some(dir), common].into_iter().flatten().filter_map(|d| fs::canonicalize(d).ok()).collect()
 }
 
-pub(crate) fn write_new(p: &Path, content: &str, create_new: bool) -> Result<(), String> {
+pub(crate) fn write_new(p: &Path, content: &[u8], create_new: bool) -> Result<(), String> {
     use std::io::Write;
     let mut opts = fs::OpenOptions::new();
     opts.write(true).custom_flags(libc::O_NOFOLLOW);
@@ -201,13 +280,27 @@ pub(crate) fn write_new(p: &Path, content: &str, create_new: bool) -> Result<(),
     } else {
         opts.create(true).truncate(true);
     }
-    opts.open(p).and_then(|mut f| f.write_all(content.as_bytes())).map_err(e2s)
+    opts.open(p).and_then(|mut f| f.write_all(content)).map_err(e2s)
 }
 
 #[tauri::command]
-pub async fn write_file(app: AppHandle, index: State<'_, Index>, path: String, content: String) -> Result<(), String> {
+pub async fn write_file(app: AppHandle, index: State<'_, Index>, path: String, content: String, encoding: Option<String>, bom: Option<bool>) -> Result<(), String> {
     check_write(&path, &write_roots(&app, &index), false)?;
-    write_new(Path::new(&path), &content, false)
+    let bytes = encode(&content, encoding.as_deref().unwrap_or("UTF-8"), bom.unwrap_or(false))?;
+    write_new(Path::new(&path), &bytes, false)
+}
+
+/// Project tree paste: copies a file (not a directory) to a new path; never overwrites.
+#[tauri::command]
+pub async fn copy_path(app: AppHandle, index: State<'_, Index>, from: String, to: String) -> Result<(), String> {
+    let roots = write_roots(&app, &index);
+    let (canonical, id) = check_read(&from, &roots)?;
+    check_write(&to, &roots, false)?;
+    if canonical.is_dir() {
+        return Err("only files can be copied".into());
+    }
+    let (bytes, _) = read_bytes(&canonical, Some(id), u64::MAX)?;
+    write_new(Path::new(&to), &bytes, true)
 }
 
 /// The only export formats; the extension is enforced on the path the save dialog returns.
@@ -232,7 +325,7 @@ pub async fn export_file(app: AppHandle, format: String, default_name: String, c
     let ext = export_extension(&format)?;
     let name = Path::new(&default_name).file_name().and_then(|n| n.to_str()).unwrap_or("export").to_string();
     if let Some(path) = crate::project::smoke_export_path(ext) {
-        write_new(&path, &content, false)?;
+        write_new(&path, content.as_bytes(), false)?;
         return Ok(Some(path.to_string_lossy().into_owned()));
     }
     let picked = tauri::async_runtime::spawn_blocking(move || {
@@ -246,7 +339,7 @@ pub async fn export_file(app: AppHandle, format: String, default_name: String, c
     let dir = path.parent().ok_or("invalid export path")?;
     let text = path.to_string_lossy().into_owned();
     check_write(&text, &[fs::canonicalize(dir).map_err(e2s)?], false)?;
-    write_new(&path, &content, false)?;
+    write_new(&path, content.as_bytes(), false)?;
     Ok(Some(text))
 }
 
@@ -263,7 +356,7 @@ pub async fn create_path(app: AppHandle, index: State<'_, Index>, path: String, 
         if let Some(parent) = p.parent() {
             fs::create_dir_all(parent).map_err(e2s)?;
         }
-        write_new(p, "", true)
+        write_new(p, b"", true)
     }
 }
 
@@ -340,7 +433,7 @@ mod tests {
         fs::write(proj.join(".git"), "gitdir: store/worktrees/wt\n").unwrap();
         assert!(check_write(&at(&proj.join("store/worktrees/wt/HEAD")), &roots, false).is_err(), "worktree gitdir");
         assert!(check_write(&at(&proj.join("store/config")), &roots, false).is_err(), "common dir");
-        assert!(write_new(&proj.join("link.rb"), "pwned", false).is_err());
+        assert!(write_new(&proj.join("link.rb"), b"pwned", false).is_err());
         assert_eq!(fs::read_to_string(outside.join("secret")).unwrap(), "keep");
         fs::remove_dir_all(&base).unwrap();
     }
@@ -423,5 +516,49 @@ mod tests {
         assert!(check_export_path(Path::new("/tmp/out.json"), "csv").is_err());
         assert!(check_export_path(Path::new("/tmp/out.csv.sh"), "csv").is_err());
         assert!(check_export_path(Path::new("/tmp/out"), "csv").is_err());
+    }
+
+    #[test]
+    fn latin1_files_save_back_byte_for_byte() {
+        let bytes = b"# caf\xe9 \xa9 2026\r\nputs '\xfc\x81\x9d'\n".to_vec();
+        let (text, enc, bom) = decode(&bytes, None, false).unwrap();
+        assert_eq!((enc.as_str(), bom), ("windows-1252", false));
+        assert!(text.starts_with("# café ©") && !text.contains('\u{FFFD}'));
+        assert_eq!(encode(&text, &enc, bom).unwrap(), bytes);
+        assert!(encode("snowman \u{2603}", &enc, false).unwrap_err().contains("cannot represent"));
+    }
+
+    #[test]
+    fn byte_order_marks_are_kept() {
+        let utf8 = b"\xEF\xBB\xBFclass A; end\n".to_vec();
+        let (text, enc, bom) = decode(&utf8, None, false).unwrap();
+        assert_eq!((text.as_str(), enc.as_str(), bom), ("class A; end\n", "UTF-8", true));
+        assert_eq!(encode(&text, &enc, bom).unwrap(), utf8);
+        let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain("hé\n".encode_utf16().flat_map(|u| u.to_le_bytes())).collect();
+        let (text, enc, bom) = decode(&utf16, None, false).unwrap();
+        assert_eq!((text.as_str(), enc.as_str(), bom), ("hé\n", "UTF-16LE", true));
+        assert_eq!(encode(&text, &enc, bom).unwrap(), utf16);
+        assert_eq!(decode("ok ✓".as_bytes(), None, false).unwrap(), ("ok ✓".into(), "UTF-8".into(), false));
+    }
+
+    #[test]
+    fn binary_files_are_refused_and_reopen_with_encoding_works() {
+        assert_eq!(decode(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR", None, false).unwrap_err(), "binary file");
+        let (text, enc, _) = decode("é".as_bytes(), Some("windows-1252"), false).unwrap();
+        assert_eq!((text.as_str(), enc.as_str()), ("Ã©", "windows-1252"));
+        assert!(decode(b"x", Some("klingon"), false).is_err());
+        let cut = &"aé".as_bytes()[..2];
+        assert_eq!(decode(cut, None, true).unwrap().1, "UTF-8");
+    }
+
+    #[test]
+    fn large_files_load_only_a_prefix() {
+        let dir = std::env::temp_dir().join(format!("garnet-large-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let f = dir.join("big.log");
+        fs::write(&f, vec![b'x'; (LARGE_FILE + 5) as usize]).unwrap();
+        let (bytes, size) = read_bytes(&f, None, LARGE_FILE).unwrap();
+        assert_eq!((bytes.len() as u64, size), (LARGE_FILE, LARGE_FILE + 5));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

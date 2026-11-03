@@ -1,5 +1,7 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
+import { eventKey, keysFor } from "./commands";
 import "@xterm/xterm/css/xterm.css";
 import { openFile } from "./editor";
 import { Channel, invoke, type PtyEvent } from "./ipc";
@@ -36,6 +38,10 @@ export interface PtyOptions {
 export class PtyView {
   term: Terminal;
   fit = new FitAddon();
+  search = new SearchAddon();
+  /// Set by PtyTabs: the Find keystroke (⌘F) in this terminal, and search result counts.
+  onFind?: () => void;
+  onResults?: (r: { resultIndex: number; resultCount: number }) => void;
   el = h("div", { class: "pty" });
   id: number | null = null;
   exited = false;
@@ -50,6 +56,14 @@ export class PtyView {
       macOptionIsMeta: true,
     });
     this.term.loadAddon(this.fit);
+    this.term.loadAddon(this.search);
+    this.search.onDidChangeResults((r) => this.onResults?.(r));
+    this.term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown" || !this.onFind || !keysFor("find").includes(eventKey(e))) return true;
+      e.preventDefault();
+      this.onFind();
+      return false;
+    });
     this.term.registerLinkProvider({
       provideLinks: (y, callback) => {
         const line = this.term.buffer.active.getLine(y - 1)?.translateToString(true) ?? "";
@@ -160,8 +174,63 @@ export class PtyTabs {
     },
   });
 
+  findInput = h("input", { class: "search-input term-find-input", placeholder: "Find", spellcheck: false, "aria-label": "Find in terminal" });
+  findCount = h("span", { class: "dim term-find-count" });
+  findBar = h(
+    "div",
+    { class: "term-find", hidden: true },
+    this.findInput,
+    this.findCount,
+    iconButton("arrow-up", "Previous Occurrence", () => this.find(-1)),
+    iconButton("arrow-down", "Next Occurrence", () => this.find(1)),
+    iconButton("close", "Close", () => this.closeFind()),
+  );
+
   constructor() {
     window.addEventListener("garnet:trusted", () => (this.gate.hidden = true));
+    this.bodyEl.append(this.findBar);
+    this.findInput.addEventListener("input", () => this.find(0));
+    this.findInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") this.find(e.shiftKey ? -1 : 1);
+      else if (e.key === "Escape") this.closeFind();
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+    });
+  }
+
+  /// Find in the active terminal (⌘F there): highlights every match and steps through them.
+  openFind() {
+    const view = this.active?.view;
+    if (!view) return;
+    const sel = view.term.getSelection();
+    if (sel && !sel.includes("\n")) this.findInput.value = sel;
+    this.findBar.hidden = false;
+    this.findInput.focus();
+    this.findInput.select();
+    if (this.findInput.value) this.find(0);
+  }
+
+  find(dir: -1 | 0 | 1): boolean {
+    const view = this.active?.view;
+    if (!view) return false;
+    const term = this.findInput.value;
+    view.onResults = (r) => (this.findCount.textContent = r.resultCount ? `${r.resultIndex + 1}/${r.resultCount}` : "No matches");
+    if (!term) {
+      view.search.clearDecorations();
+      this.findCount.textContent = "";
+      return false;
+    }
+    const opts: ISearchOptions = { incremental: dir === 0, decorations: FIND_DECORATIONS };
+    const found = dir < 0 ? view.search.findPrevious(term, opts) : view.search.findNext(term, opts);
+    if (!found) this.findCount.textContent = "No matches";
+    return found;
+  }
+
+  closeFind() {
+    this.findBar.hidden = true;
+    this.active?.view.search.clearDecorations();
+    this.active?.view.term.focus();
   }
 
   showGate(message: string) {
@@ -171,6 +240,7 @@ export class PtyTabs {
 
   add(title: string, view: PtyView) {
     const item = { title, view, tab: h("div"), status: "" };
+    view.onFind = () => this.openFind();
     this.items.push(item);
     view.start(this.bodyEl);
     this.select(item);
@@ -227,6 +297,13 @@ export class PtyTabs {
   }
 }
 
+const FIND_DECORATIONS = {
+  matchBackground: "#d7a74466",
+  matchOverviewRuler: "#d7a744",
+  activeMatchBackground: "#e8b84d",
+  activeMatchColorOverviewRuler: "#e8b84d",
+};
+
 export const terminals = new PtyTabs();
 let termCount = 0;
 terminals.toolbar.append(iconButton("add", "New Terminal", () => newTerminal()));
@@ -234,10 +311,10 @@ terminals.toolbar.append(iconButton("add", "New Terminal", () => newTerminal()))
 const TERMINAL_GATE = "Trust project to open a terminal.";
 window.addEventListener("garnet:trusted", () => bottom.active === "terminal" && !terminals.items.length && newTerminal());
 
-export function newTerminal() {
+export function newTerminal(cwd?: string) {
   if (!isTrusted()) return terminals.showGate(TERMINAL_GATE);
   // Like RubyMine, a shell that exits (exit, ⌃D) closes its tab; one Garnet killed or could not start stays.
-  const item = terminals.add(`Local${++termCount > 1 ? ` (${termCount})` : ""}`, new PtyView({ onExit: (code) => code === 0 && terminals.close(item) }));
+  const item = terminals.add(`Local${++termCount > 1 ? ` (${termCount})` : ""}`, new PtyView({ cwd, onExit: (code) => code === 0 && terminals.close(item) }));
 }
 
 /// Runs a command the user asked for in a new Terminal tab, so its output stays visible.

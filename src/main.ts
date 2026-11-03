@@ -20,6 +20,7 @@ import { symbolSearch } from "./symbolsearch";
 import { goToTest, loadRoutes, routesView, showRelated } from "./rails";
 import { dbProjectOpened } from "./db";
 import "./railsprovider";
+import "./basics";
 import { runRailsGenerator } from "./generators";
 import { loadMigrations, migrationsView } from "./migrations";
 import { sendToRailsConsole } from "./railsconsole";

@@ -97,6 +97,14 @@ export interface OpState {
   conflicts: string[];
 }
 
+export interface TextFile {
+  text: string;
+  encoding: string;
+  bom: boolean;
+  size: number;
+  truncated: boolean;
+}
+
 export interface MergeInput {
   symlink: boolean;
   nonUtf8?: boolean;
@@ -109,7 +117,9 @@ export interface MergeInput {
 export const api = {
   listDir: (path: string) => invoke<DirEntry[]>("list_dir", { path }),
   readFile: (path: string) => invoke<string>("read_file", { path }),
-  writeFile: (path: string, content: string) => invoke<void>("write_file", { path, content }),
+  writeFile: (path: string, content: string, encoding?: string, bom?: boolean) => invoke<void>("write_file", { path, content, encoding, bom }),
+  openText: (path: string, encoding?: string) => invoke<TextFile>("open_text", { path, encoding }),
+  copyPath: (from: string, to: string) => invoke<void>("copy_path", { from, to }),
   createPath: (path: string, dir: boolean) => invoke<void>("create_path", { path, dir }),
   renamePath: (from: string, to: string) => invoke<void>("rename_path", { from, to }),
   deletePath: (path: string) => invoke<void>("delete_path", { path }),

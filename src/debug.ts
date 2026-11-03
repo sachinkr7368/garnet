@@ -12,6 +12,7 @@ type Json = any;
 type RunItem = PtyTabs["items"][number];
 
 let breakpoints: BreakpointMap = new Map();
+let muted = false;
 const watches: string[] = [];
 const enabledFilters = new Set<string>();
 let exceptionFilters: { filter: string; label: string }[] = [
@@ -40,6 +41,8 @@ interface Session {
   target: string;
   localfsMap?: string;
   ended: boolean;
+  /// Run to Cursor: a one-shot breakpoint, dropped at the next stop.
+  runTo?: { path: string; line: number };
 }
 const sessions = new SessionList<Session>();
 const sel = () => sessions.selected;
@@ -60,6 +63,8 @@ const IDLE = "Not debugging. Pick a configuration and press Debug, or Alt+click 
 const statusEl = h("span", { class: "search-summary" }, IDLE);
 const filtersEl = h("span", { class: "exc-filters" });
 
+const muteButton = iconButton("debug-breakpoint-unsupported", "Mute Breakpoints", () => void toggleMuteBreakpoints(), "muteBreakpoints");
+
 export const debugView = h(
   "div",
   { class: "debug-view" },
@@ -79,6 +84,7 @@ export const debugView = h(
     iconButton("debug-stop", "Stop", () => stopDebug(), "stopDebug"),
     h("span", { class: "debug-toolbar-sep" }),
     iconButton("debug-breakpoint-log-unverified", "View Breakpoints", () => viewBreakpoints(), "viewBreakpoints"),
+    muteButton,
     filtersEl,
     statusEl,
   ),
@@ -218,7 +224,7 @@ function glyph(bp: Breakpoint): monaco.editor.IModelDecorationOptions {
   const kind = bp.logMessage ? " logpoint" : bp.condition || bp.hitCount ? " conditional" : "";
   const hover = [bp.logMessage ? `Logpoint: ${bp.logMessage}` : "Breakpoint", describe(bp), "right-click to edit, ⌘⇧F8 for all"].filter(Boolean).join(" · ");
   return {
-    lineNumberClassName: `glyph-bp${kind}${bp.enabled ? "" : " disabled"}`,
+    lineNumberClassName: `glyph-bp${kind}${bp.enabled && !muted ? "" : " disabled"}`,
     lineNumberHoverMessage: { value: hover },
     stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
   };
@@ -445,9 +451,33 @@ function request(s: Session, command: string, args: Json = {}): Promise<Json> {
   return new Promise((resolve) => s.pending.set(seq, resolve));
 }
 
+export const breakpointsMuted = () => muted;
+
 function sendBreakpoints(s: Session, path: string) {
   // rdbg has no native logpoints or pass counts: Garnet evaluates those on each stop and resumes.
-  return request(s, "setBreakpoints", { source: { path, name: rel(path) }, breakpoints: dapBreakpoints(breakpoints.get(path) ?? []) }).catch(() => {});
+  const list = muted ? [] : dapBreakpoints(breakpoints.get(path) ?? []);
+  if (s.runTo?.path === path && !list.some((b) => b.line === s.runTo!.line)) list.push({ line: s.runTo.line });
+  return request(s, "setBreakpoints", { source: { path, name: rel(path) }, breakpoints: list }).catch(() => {});
+}
+
+/// Run | Mute Breakpoints: sessions keep running past every breakpoint until unmuted (the gutter dims them).
+export async function toggleMuteBreakpoints() {
+  muted = !muted;
+  for (const p of breakpoints.keys()) decorate(p);
+  muteButton.classList.toggle("active", muted);
+  await Promise.all(sessions.live().flatMap((s) => [...breakpoints.keys()].map((p) => sendBreakpoints(s, p))));
+}
+
+/// Run to Cursor (⌥F9): resumes and pauses at the caret line through a temporary breakpoint.
+export async function runToCursor() {
+  const s = sel();
+  const t = activeTab();
+  const line = editor.getPosition()?.lineNumber;
+  if (!s?.paused || !t || t.kind !== "file" || !line) return;
+  await sendPendingBreakpoints();
+  s.runTo = { path: t.path, line };
+  await sendBreakpoints(s, t.path);
+  request(s, "continue", { threadId: s.threadId });
 }
 
 const sendExceptionFilters = (s: Session) => request(s, "setExceptionBreakpoints", { filters: [...enabledFilters] }).catch(() => {});
@@ -468,6 +498,11 @@ async function onMessage(s: Session, msg: Json) {
       break;
     case "stopped": {
       s.threadId = body.threadId ?? s.threadId;
+      if (s.runTo) {
+        const path = s.runTo.path;
+        s.runTo = undefined;
+        await sendBreakpoints(s, path);
+      }
       if (!s.entryHandled && body.reason === "pause") {
         s.entryHandled = true;
         request(s, "continue", { threadId: s.threadId });

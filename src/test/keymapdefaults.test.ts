@@ -110,6 +110,16 @@ const RUBYMINE_MACOS: [string, string, string][] = [
   ["Push", "push", "cmd+shift+k"],
   ["Next Change", "nextChange", "ctrl+alt+shift+down"],
   ["Previous Change", "prevChange", "ctrl+alt+shift+up"],
+  ["Last Edit Location", "lastEditLocation", "cmd+shift+backspace"],
+  ["Run To Cursor", "runToCursor", "alt+f9"],
+  ["Introduce Variable", "extractVariable", "cmd+alt+v"],
+  ["Extract Method", "extractMethod", "cmd+alt+m"],
+  ["Toggle Case", "toggleCase", "cmd+shift+u"],
+  ["Deselect Last Occurrence", "unselectOccurrence", "ctrl+shift+g"],
+  ["Copy Paths", "copyPath", "cmd+shift+c"],
+  ["Copy Reference", "copyReference", "cmd+alt+shift+c"],
+  ["Introduce Constant (extract-constant.html)", "extractConstant", "cmd+alt+c"],
+  ["Insert Live Template (using-live-templates.html)", "insertLiveTemplate", "cmd+j"],
 ];
 
 describe("RubyMine macOS default keymap", () => {

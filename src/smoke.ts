@@ -6,7 +6,7 @@ import { importJetBrainsKeymap, jetbrainsKeystroke } from "./keymapref";
 import { breakpointsIn, debugSessions, debugState, evaluate, flushBreakpoints, loadBreakpoints, resume, resumeSession, selectDebugSession, smokeHooks, stopAllSessions, stopDebug, toggleBreakpoint } from "./debug";
 import { rerunFailed, testRunState, testStatusAt } from "./testresults";
 import { defaultDocker } from "./docker";
-import { activate, activeTab, activeViewTab, allTabs, closeTab, editor, languageFor, openFile } from "./editor";
+import { activate, activeTab, activeViewTab, allTabs, closeTab, editor, isDirty, languageFor, metaOf, openFile, reopenClosedTab, save } from "./editor";
 import { symbolPath } from "./breadcrumbs";
 import { snippetsFor } from "./languages/snippets";
 import { replaceInFiles, searchView } from "./search";
@@ -17,7 +17,7 @@ import { continueOperation, openResolver, runGitOp } from "./merge";
 import { stagePatch } from "./difflogic";
 import { api, Channel, invoke, type PtyEvent } from "./ipc";
 import { cachedSymbols, goToImplementation, lspCapabilities, lspReady, request } from "./lsp";
-import { terminals } from "./terminal";
+import { PtyView, terminals } from "./terminal";
 import { buildCommand, configList, dockerUnavailable, editConfigurations, launch, newConfig, runs, safeEnv, validateConfig, type RunConfig } from "./run";
 import { isDarkTheme, isTrusted, loadSettings, setting, toggleTheme, trustProject, updateSetting } from "./settings";
 import { openSettingsWindow } from "./settingsui";
@@ -28,7 +28,7 @@ import { dbSmokeHooks } from "./db";
 import { runRailsGenerator } from "./generators";
 import { loadMigrations } from "./migrations";
 import { railsTreeEl, refreshRailsTree } from "./railsview";
-import { toggleRailsView } from "./tree";
+import { revealInTree, toggleRailsView, treeEl } from "./tree";
 import { gh, refreshAccount, signIn } from "./github";
 import { bottom, rightbar, sidebar } from "./ui";
 
@@ -162,6 +162,8 @@ export async function runSmoke(project: string, withDebug: boolean, openProject:
     await uiChecks(check);
     step("editor features");
     await editorFeatureChecks(check, !!ok);
+    step("rubymine basics");
+    await basicsChecks(check, !!ok);
     step("search popups");
     await searchPopupChecks("trusted", check, !!ok);
     step("git tools");
@@ -428,6 +430,149 @@ async function editorFeatureChecks(check: (n: string, ok: boolean | string) => v
       return activeTab()?.path.endsWith("app/models/post.rb") ? true : (await openFile(base), editor.setPosition({ lineNumber: at.startLineNumber, column: at.startColumn + 2 }), null);
     }, 60000, 1000);
     check("go to implementation: ApplicationRecord -> Post", !!landed);
+  }
+}
+
+/// Encoding-safe save, large files, auto end, tree focus keys, tab menu, terminal find, Parameter Info.
+async function basicsChecks(check: Check, lsp: boolean) {
+  const root = state.project!.root;
+  const sh = (cmd: string) => api.runCapture(root, cmd, 60);
+  const closeAllOf = async (path: string) => {
+    for (const t of allTabs().filter((t) => t.path === path)) await closeTab(t, true);
+  };
+  const latin = `${root}/app/models/garnet_latin1_smoke.rb`;
+  const binary = `${root}/tmp/garnet_binary_smoke.bin`;
+  const big = `${root}/tmp/garnet_big_smoke.log`;
+  const autoEnd = `${root}/app/models/garnet_autoend_smoke.rb`;
+  const sig = `${root}/app/models/garnet_sig_smoke.rb`;
+  try {
+    substep("encoding");
+    await sh(`mkdir -p tmp && printf '# caf\\351 \\251\\r\\nputs "\\374ber"\\r\\n' > ${shellQuote(latin)} && printf 'PNG\\000\\001\\002' > ${shellQuote(binary)}`);
+    const before = await sh(`xxd -p ${shellQuote(latin)}`);
+    await openFile(latin);
+    const lt = activeTab();
+    check("latin-1 file opens decoded, not mangled", (lt?.path === latin && lt.model.getValue().startsWith("# café ©") && !lt.model.getValue().includes("\uFFFD")) || String(lt?.model.getValue()));
+    check("encoding and CRLF shown in the status bar", (document.querySelector(".status-item")?.parentElement?.textContent ?? "").includes("windows-1252") && (document.querySelector(".status-item")?.parentElement?.textContent ?? "").includes("CRLF"));
+    if (lt) {
+      lt.model.pushEditOperations([], [{ range: lt.model.getFullModelRange(), text: lt.model.getValue() + "x" }], () => null);
+      lt.model.undo();
+      await save(lt);
+    }
+    const after = await sh(`xxd -p ${shellQuote(latin)}`);
+    check("latin-1 file saves back byte for byte", (before.trim() !== "" && before === after) || `${before.trim()} -> ${after.trim()}`);
+    check("latin-1 meta kept per buffer", lt ? metaOf(lt.model).encoding === "windows-1252" : "no tab");
+    await closeAllOf(latin);
+    const tabsBefore = allTabs().length;
+    await openFile(binary);
+    check("binary file refused instead of opened as text", allTabs().length === tabsBefore && !allTabs().some((t) => t.path === binary));
+    clearToasts();
+
+    substep("large file");
+    await sh(`head -c 11534336 /dev/zero | tr '\\0' x > ${shellQuote(big)}`);
+    const t0 = performance.now();
+    await openFile(big);
+    const bigMs = Math.round(performance.now() - t0);
+    const bt = activeTab();
+    check("large file opens read-only plain text, first 10 MB only, quickly", (bt?.path === big && editor.getOption(monaco.editor.EditorOption.readOnly) && bt.model.getLanguageId() === "plaintext" && bt.model.getValueLength() === 10485760 && bigMs < 8000) || `${bt?.path} ro=${editor.getOption(monaco.editor.EditorOption.readOnly)} len=${bt?.model.getValueLength()} ${bigMs}ms`);
+    await closeAllOf(big);
+    clearToasts();
+
+    substep("auto end");
+    await api.writeFile(autoEnd, "class GarnetAutoEndSmoke\nend\n");
+    await openFile(autoEnd);
+    await sleep(1000);
+    const am = editor.getModel()!;
+    const ro = editor.getOption(monaco.editor.EditorOption.readOnly);
+    editor.executeEdits("smoke", [{ range: new monaco.Range(1, 25, 1, 25), text: "\n  def go" }]);
+    const typedDef = am.getValue();
+    editor.setPosition({ lineNumber: 2, column: 9 });
+    editor.trigger("keyboard", "type", { text: "\n" });
+    const ended = await until(() => am.getValue().includes("def go\n    \n  end\nend"), 8000);
+    check("Enter after def inserts end, caret stays inside", (!!ended && editor.getPosition()?.lineNumber === 3) || JSON.stringify({ ro, active: activeTab()?.path === autoEnd, typedDef, now: am.getValue() }));
+    await closeAllOf(autoEnd);
+
+    substep("tree focus keys");
+    await openFile(`${root}/app/controllers/posts_controller.rb`);
+    const text = editor.getModel()!.getValue();
+    sidebar.show("project");
+    await revealInTree(`${root}/app/models/post.rb`);
+    treeEl.focus();
+    const key = (k: string, code: string, mods: KeyboardEventInit = {}) => treeEl.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true, ...mods }));
+    key("d", "KeyD", { metaKey: true });
+    key("/", "Slash", { metaKey: true });
+    check("⌘D and ⌘/ in the Project tree leave the open file alone", editor.getModel()!.getValue() === text);
+    const sel = () => treeEl.querySelector(".tree-row.selected .tree-label")?.textContent;
+    const first = sel();
+    key("ArrowDown", "ArrowDown");
+    check("arrow keys move the Project tree selection", (!!first && sel() !== first) || `${first} -> ${sel()}`);
+    key("ArrowUp", "ArrowUp");
+    key("F6", "F6", { shiftKey: true });
+    const renameBox = document.querySelector<HTMLElement>(".qp-title")?.textContent ?? "";
+    check("⇧F6 in the Project tree renames the file", renameBox.startsWith("Rename post.rb") || renameBox);
+    document.querySelector<HTMLElement>(".qp-backdrop")?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    document.getElementById("overlay-root")!.querySelectorAll(".qp-backdrop").forEach((e) => e.remove());
+
+    substep("tab menu");
+    const files = [`${root}/app/models/post.rb`, `${root}/app/controllers/posts_controller.rb`];
+    for (const f of files) await openFile(f);
+    if (allTabs().some(isDirty)) check("tab menu: Close Other Tabs", "skipped: a tab has unsaved changes");
+    else {
+      const el = document.querySelector<HTMLElement>("#tabs .tab.active")!;
+      el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 50, clientY: 30 }));
+      const items = [...document.querySelectorAll<HTMLElement>(".ctx-menu .ctx-label")].map((e) => e.textContent);
+      const want = ["Close", "Close Other Tabs", "Close All Tabs", "Close Unmodified Tabs", "Close Tabs to the Right", "Pin Tab", "Reopen Closed Tab", "Copy Path", "Copy Relative Path", "Reveal in Finder"];
+      check("tab context menu has RubyMine's actions", want.every((w) => items.includes(w)) || items.join(","));
+      [...document.querySelectorAll<HTMLElement>(".ctx-menu .ctx-item")].find((e) => e.textContent?.includes("Close Other Tabs"))?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      const closed = await until(() => allTabs().length === 1, 5000);
+      check("Close Other Tabs leaves only the clicked tab", (!!closed && activeTab()?.path === files[1]) || allTabs().map((t) => t.title).join(","));
+      await reopenClosedTab();
+      check("Reopen Closed Tab brings the last one back", allTabs().length === 2 || allTabs().map((t) => t.title).join(","));
+    }
+
+    substep("terminal find");
+    const item = terminals.add("smoke find", new PtyView({ command: "echo garnet-find-smoke; sleep 2" }));
+    bottom.show("terminal");
+    const printed = await until(() => {
+      const buf = item.view.term.buffer.active;
+      for (let y = 0; y < buf.length; y++) if (buf.getLine(y)?.translateToString(true).includes("garnet-find-smoke")) return true;
+      return false;
+    }, 15000);
+    terminals.select(item);
+    terminals.openFind();
+    terminals.findInput.value = "garnet-find-smoke";
+    const found = terminals.find(1);
+    await sleep(200);
+    check("terminal find highlights a match", (!!printed && found && /1\/\d/.test(terminals.findCount.textContent ?? "")) || `printed=${printed} found=${found} count=${terminals.findCount.textContent}`);
+    terminals.closeFind();
+    terminals.close(item);
+
+    if (lsp) {
+      substep("parameter info");
+      await api.writeFile(sig, "class GarnetSigSmoke\n  def greet(name, greeting)\n  end\n\n  def run\n    greet()\n  end\nend\n");
+      await openFile(sig);
+      const sm = editor.getModel()!;
+      const caps = lspCapabilities();
+      check("ruby-lsp offers signature help, highlights, selection ranges, on-type formatting", (!!caps.signatureHelpProvider && !!caps.documentHighlightProvider && !!caps.selectionRangeProvider && !!caps.documentOnTypeFormattingProvider) || JSON.stringify(Object.keys(caps)));
+      const help = await until(async () => {
+        const r = await request<any>("textDocument/signatureHelp", { textDocument: { uri: sm.uri.toString() }, position: { line: 5, character: 10 }, context: { triggerKind: 1, isRetrigger: false } }).catch(() => null);
+        return r?.signatures?.length ? r : null;
+      }, 30000, 1000);
+      check("Parameter Info (⌘P) shows greet's parameters", JSON.stringify(help?.signatures ?? "").includes("name") || JSON.stringify(help));
+      editor.setPosition({ lineNumber: 6, column: 11 });
+      editor.focus();
+      runCommand("parameterInfo");
+      const widget = await until(() => document.querySelector<HTMLElement>(".parameter-hints-widget.visible"), 8000);
+      check("Parameter Info widget appears in the editor", !!widget || "no .parameter-hints-widget");
+      const hl = await request<any[]>("textDocument/documentHighlight", { textDocument: { uri: sm.uri.toString() }, position: { line: 5, character: 5 } }).catch(() => null);
+      check("Highlight Usages uses ruby-lsp document highlights", (hl?.length ?? 0) >= 2 || JSON.stringify(hl));
+      await closeAllOf(sig);
+    }
+  } catch (e) {
+    check("rubymine basics", String(e));
+  } finally {
+    for (const f of [latin, binary, big, autoEnd, sig]) await api.deletePath(f).catch(() => {});
+    document.getElementById("overlay-root")!.querySelectorAll(".qp-backdrop, .ctx-menu").forEach((e) => e.remove());
+    clearToasts();
   }
 }
 

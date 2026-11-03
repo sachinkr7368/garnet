@@ -5,7 +5,7 @@ import CssWorker from "monaco-editor/language/css/css.worker?worker";
 import HtmlWorker from "monaco-editor/language/html/html.worker?worker";
 import TsWorker from "monaco-editor/language/typescript/ts.worker?worker";
 import { conf as htmlConf, language as htmlLanguage } from "monaco-editor/languages/definitions/html/html";
-import { message } from "@tauri-apps/plugin-dialog";
+import { ask, message } from "@tauri-apps/plugin-dialog";
 import { api } from "./ipc";
 import { hamlConf, hamlLanguage } from "./languages/haml";
 import { erbLanguage, rubyLanguage } from "./languages/ruby";
@@ -15,7 +15,7 @@ import { styleFor } from "./codestyle";
 import { monacoTheme } from "./theme";
 import { globToRegExp, isDarkTheme, loadSettings, onSettingsChange, projectSettingsPath, setting, settingsPath, updateSetting } from "./settings";
 import { basename, rel } from "./state";
-import { fileIcon, h, icon, iconButton, overflowStrip, statusSlot, tip, toast } from "./ui";
+import { contextMenu, fileIcon, h, icon, iconButton, overflowStrip, quickPick, statusSlot, tip, toast } from "./ui";
 
 export { monaco };
 
@@ -122,6 +122,10 @@ export interface Tab {
   readonly?: boolean;
   key?: string;
   label?: string;
+  pinned?: boolean;
+  /// Per-tab soft wrap (View | Active Editor | Soft-Wrap); undefined follows the setting.
+  softWrap?: boolean;
+  usedAt?: number;
   /// Non-text editor tab (database console, table data): its element is shown in the editor area.
   view?: { el: HTMLElement; icon: string; tooltip?: string; onClose?: () => void; onActivate?: () => void };
 }
@@ -185,7 +189,7 @@ function editorOptions(): monaco.editor.IEditorOptions & monaco.editor.IGlobalEd
     fontSize: setting("editor.fontSize"),
     lineHeight: setting("editor.lineHeight"),
     fontLigatures: setting("editor.fontLigatures"),
-    wordWrap: setting("editor.wordWrap"),
+    wordWrap: active?.softWrap === undefined ? setting("editor.wordWrap") : active.softWrap ? "on" : "off",
     minimap: { enabled: setting("editor.minimap") },
     cursorStyle: setting("editor.cursorStyle"),
     cursorBlinking: setting("editor.cursorBlinking"),
@@ -361,26 +365,40 @@ export function isDirty(tab: Tab) {
   return tab.model.getAlternativeVersionId() !== tab.savedVersion;
 }
 
+/// How a file buffer is saved back: the encoding it was read in (or converted to) and its BOM. `large`: only the
+/// first 10 MB were loaded, so the buffer is read-only. `forced`: picked with Reopen with Encoding.
+export interface FileMeta {
+  encoding: string;
+  bom: boolean;
+  large: boolean;
+  forced?: boolean;
+}
+const fileMeta = new WeakMap<monaco.editor.ITextModel, FileMeta>();
+export const metaOf = (model: monaco.editor.ITextModel): FileMeta => fileMeta.get(model) ?? { encoding: "UTF-8", bom: false, large: false };
+
 export async function ensureModel(path: string): Promise<monaco.editor.ITextModel | null> {
   const uri = uriFor(path);
   const existing = monaco.editor.getModel(uri);
   if (existing) return existing;
-  let text: string;
+  let file;
   try {
-    text = await api.readFile(path);
+    file = await api.openText(path);
   } catch (e) {
-    toast(`Cannot open ${rel(path)}: ${e}`, "error");
+    toast(String(e) === "binary file" ? `${rel(path)} is a binary file and can't be opened as text.` : `Cannot open ${rel(path)}: ${e}`, "error");
     return null;
   }
-  return (
-    monaco.editor.getModel(uri) ??
-    monaco.editor.createModel(text, languageFor(path), uri)
-  );
+  const again = monaco.editor.getModel(uri);
+  if (again) return again;
+  const model = monaco.editor.createModel(file.text, file.truncated ? "plaintext" : languageFor(path), uri);
+  fileMeta.set(model, { encoding: file.encoding, bom: file.bom, large: file.truncated });
+  if (file.truncated) toast(`${basename(path)} is ${Math.round(file.size / 1048576)} MB: showing the first 10 MB, read-only, as plain text.`);
+  return model;
 }
 
 function addTab(tab: Tab) {
   const firstUser = modelUsers(tab.model) === 0;
   tabs.push(tab);
+  enforceTabLimit(tab);
   applyCodeStyle(tab);
   if (firstUser) {
     const model = tab.model;
@@ -395,6 +413,15 @@ function addTab(tab: Tab) {
   }
   renderTabs();
   events.tabsChanged.fire();
+}
+
+/// RubyMine's tab limit: past it, the least recently used clean, unpinned tab closes.
+function enforceTabLimit(keep: Tab) {
+  const limit = setting<number>("editor.tabLimit") ?? 0;
+  const open = tabs.filter((t) => t.kind !== "view");
+  if (limit <= 0 || open.length <= limit) return;
+  const victim = open.filter((t) => t !== keep && t !== active && !t.pinned && !isDirty(t)).sort((a, b) => (a.usedAt ?? 0) - (b.usedAt ?? 0))[0];
+  if (victim) void closeTab(victim, true);
 }
 
 export async function openFile(path: string, target?: Target) {
@@ -531,6 +558,31 @@ export const restoreRecentFiles = (paths: string[]) => recentFiles.splice(0, rec
 export const forgetRecentFile = (path: string) => recentFiles.includes(path) && recentFiles.splice(recentFiles.indexOf(path), 1);
 export const recentLocations = () => [...back].reverse();
 
+/// Last Edit Location (⌘⇧⌫) and Next Edit Location walk the places where file buffers were edited.
+const edits: Place[] = [];
+let editAt = 0;
+editor.onDidChangeModelContent((e) => {
+  const model = editor.getModel();
+  if (navigating || !model || active?.kind !== "file" || active.model !== model || !e.changes.length) return;
+  const c = e.changes[0];
+  const p = { path: active.path, line: c.range.startLineNumber, column: c.range.startColumn };
+  const last = edits[edits.length - 1];
+  if (last && last.path === p.path && Math.abs(last.line - p.line) <= 1) edits[edits.length - 1] = p;
+  else edits.push(p);
+  if (edits.length > 100) edits.shift();
+  editAt = edits.length;
+});
+
+export async function goToEdit(delta: -1 | 1) {
+  let i = editAt + delta;
+  const cur = here();
+  if (delta < 0 && editAt === edits.length && cur && edits[i]?.path === cur.path && edits[i]?.line === cur.line) i--;
+  const p = edits[i];
+  if (!p) return;
+  editAt = i;
+  await goTo(p);
+}
+
 editor.onDidChangeCursorPosition((e) => {
   if (e.reason === monaco.editor.CursorChangeReason.Explicit && e.source === "mouse") remember();
 });
@@ -578,6 +630,7 @@ export function activate(tab: Tab | null) {
     tab.view!.onActivate?.();
   } else if (tab?.kind === "file") {
     editor.setModel(tab.model);
+    editor.updateOptions({ readOnly: metaOf(tab.model).large, wordWrap: editorOptions().wordWrap });
     if (tab.viewState) editor.restoreViewState(tab.viewState as monaco.editor.ICodeEditorViewState);
     editor.focus();
     langSlot.textContent = tab.model.getLanguageId();
@@ -595,6 +648,8 @@ export function activate(tab: Tab | null) {
     langSlot.textContent = "";
     cursorSlot.textContent = "";
   }
+  if (tab) tab.usedAt = Date.now();
+  renderFileSlots();
   renderTabs();
   events.activated.fire(tab);
 }
@@ -612,6 +667,10 @@ export async function closeTab(tab: Tab, force = false): Promise<boolean> {
   const i = tabs.indexOf(tab);
   if (i < 0) return true;
   tabs.splice(i, 1);
+  if (tab.kind === "file" && !force) {
+    closedTabs.push(tab.path);
+    if (closedTabs.length > 30) closedTabs.shift();
+  }
   tab.original?.dispose();
   if (tab.view) {
     tab.view.el.remove();
@@ -633,6 +692,135 @@ export async function closeAll(): Promise<boolean> {
   return true;
 }
 
+const closedTabs: string[] = [];
+export async function reopenClosedTab() {
+  const path = closedTabs.pop();
+  if (path) await openFile(path);
+}
+
+/// Tab context menu groups: which tabs each close action closes (pinned tabs stay, except for Close All).
+export function tabsToClose(list: readonly Tab[], target: Tab, action: "others" | "all" | "unmodified" | "right" | "unpinned", dirty: (t: Tab) => boolean): Tab[] {
+  const at = list.indexOf(target);
+  return list.filter((t, i) => {
+    if (action === "all") return true;
+    if (t.pinned) return false;
+    if (action === "others") return t !== target;
+    if (action === "right") return i > at;
+    if (action === "unmodified") return !dirty(t);
+    return true;
+  });
+}
+
+export async function closeTabs(list: Tab[]) {
+  for (const t of list) if (!(await closeTab(t))) return;
+}
+
+export function togglePin(tab: Tab) {
+  tab.pinned = !tab.pinned;
+  renderTabs();
+}
+
+function tabMenu(e: MouseEvent, t: Tab) {
+  const close = (action: Parameters<typeof tabsToClose>[2]) => () => void closeTabs(tabsToClose(tabs, t, action, isDirty));
+  const file = t.kind !== "view";
+  contextMenu(e, [
+    { label: "Close", command: "closeTab", run: () => void closeTab(t) },
+    { label: "Close Other Tabs", run: close("others") },
+    { label: "Close All Tabs", run: close("all") },
+    { label: "Close Unmodified Tabs", run: close("unmodified") },
+    { label: "Close Tabs to the Right", run: close("right"), disabled: tabs.indexOf(t) === tabs.length - 1 },
+    { label: "Close All but Pinned", run: close("unpinned") },
+    { label: "Reopen Closed Tab", command: "reopenClosedTab", run: () => void reopenClosedTab(), disabled: !closedTabs.length },
+    null,
+    { label: t.pinned ? "Unpin Tab" : "Pin Tab", icon: "pin", command: "pinTab", run: () => togglePin(t) },
+    null,
+    { label: "Copy Path", command: "copyPath", run: () => void navigator.clipboard.writeText(t.path), disabled: !file },
+    { label: "Copy Relative Path", run: () => void navigator.clipboard.writeText(rel(t.path)), disabled: !file },
+    { label: "Reveal in Finder", run: () => void api.revealInFinder(t.path), disabled: t.kind !== "file" },
+  ]);
+}
+
+/// View | Active Editor | Soft-Wrap: this tab only.
+export function toggleSoftWrap() {
+  if (active?.kind !== "file") return;
+  active.softWrap = editor.getOption(monaco.editor.EditorOption.wordWrap) === "off";
+  editor.updateOptions({ wordWrap: active.softWrap ? "on" : "off" });
+}
+
+/// Encoding and line separator status bar widgets (RubyMine's status bar)
+
+export const ENCODINGS = ["UTF-8", "UTF-16LE", "UTF-16BE", "windows-1252", "ISO-8859-2", "ISO-8859-15", "windows-1251", "KOI8-R", "Shift_JIS", "EUC-JP", "GBK", "Big5", "EUC-KR"];
+const eolSlot = statusSlot("eol", "right", () => lineSeparatorMenu(), "Line separator");
+const encodingSlot = statusSlot("encoding", "right", () => encodingMenu(), "File encoding");
+
+function renderFileSlots() {
+  const model = active?.kind === "file" ? active.model : null;
+  const meta = model && metaOf(model);
+  eolSlot.textContent = model ? (model.getEOL() === "\r\n" ? "CRLF" : "LF") : "";
+  encodingSlot.textContent = meta ? `${meta.encoding}${meta.bom ? " BOM" : ""}${meta.large ? " (read-only)" : ""}` : "";
+}
+
+export function setLineSeparator(eol: "LF" | "CRLF") {
+  if (active?.kind !== "file" || metaOf(active.model).large) return;
+  active.model.pushEOL(eol === "LF" ? monaco.editor.EndOfLineSequence.LF : monaco.editor.EndOfLineSequence.CRLF);
+  renderFileSlots();
+}
+
+export function lineSeparatorMenu() {
+  if (active?.kind !== "file") return;
+  quickPick({
+    placeholder: "Line separator",
+    items: [
+      { label: "LF", description: "Unix and macOS (\\n)", data: "LF" },
+      { label: "CRLF", description: "Windows (\\r\\n)", data: "CRLF" },
+    ],
+    onAccept: (item) => item && setLineSeparator(item.data as "LF" | "CRLF"),
+  });
+}
+
+/// Rereads the file from disk decoded as `encoding` (unsaved changes are dropped after asking).
+export async function reopenWithEncoding(tab: Tab, encoding: string) {
+  if (isDirty(tab) && !(await ask(`Reopening ${tab.title} as ${encoding} discards unsaved changes.`, { title: "Reopen with Encoding", kind: "warning", okLabel: "Reopen", cancelLabel: "Cancel" }))) return;
+  try {
+    const file = await api.openText(tab.path, encoding);
+    tab.model.setValue(file.text);
+    fileMeta.set(tab.model, { encoding: file.encoding, bom: file.bom, large: file.truncated, forced: true });
+    const version = tab.model.getAlternativeVersionId();
+    for (const t of tabs) if (t.model === tab.model) t.savedVersion = version;
+  } catch (e) {
+    toast(`Cannot reopen ${tab.title} as ${encoding}: ${e}`, "error");
+  }
+  renderTabs();
+  renderFileSlots();
+}
+
+/// Saves the buffer in another encoding; if it can't represent the text, nothing changes.
+export async function convertEncoding(tab: Tab, encoding: string) {
+  const before = metaOf(tab.model);
+  fileMeta.set(tab.model, { ...before, encoding, bom: encoding.startsWith("UTF-16") });
+  if (!(await save(tab))) fileMeta.set(tab.model, before);
+  renderFileSlots();
+}
+
+export function encodingMenu() {
+  const tab = active?.kind === "file" ? active : null;
+  if (!tab) return;
+  const pick = (title: string, run: (enc: string) => unknown) =>
+    quickPick({ placeholder: title, items: ENCODINGS.map((e) => ({ label: e, description: e === metaOf(tab.model).encoding ? "current" : "", data: e })), onAccept: (item) => item && void run(item.data as string) });
+  quickPick({
+    placeholder: `${tab.title}: ${metaOf(tab.model).encoding}`,
+    items: [
+      { label: "Reopen with Encoding…", description: "decode the file on disk differently", data: "reopen" },
+      { label: "Convert to Encoding…", description: "save the text in another encoding", data: "convert", icon: metaOf(tab.model).large ? "lock" : undefined },
+    ],
+    onAccept: (item) => {
+      if (item?.data === "reopen") pick("Reopen with encoding", (enc) => reopenWithEncoding(tab, enc));
+      else if (item?.data === "convert" && !metaOf(tab.model).large) pick("Convert to encoding", (enc) => convertEncoding(tab, enc));
+    },
+  });
+}
+editor.onDidChangeModelContent(() => active?.kind === "file" && renderFileSlots());
+
 function cleanupOnSave(tab: Tab) {
   const model = tab.model;
   const style = styleFor(tab.path, model.getLanguageId());
@@ -653,12 +841,17 @@ function cleanupOnSave(tab: Tab) {
 
 export async function save(tab: Tab): Promise<boolean> {
   if (tab.kind === "view") return true;
+  const meta = metaOf(tab.model);
+  if (meta.large) {
+    toast(`${tab.title} was opened read-only because it is larger than 10 MB.`, "error");
+    return false;
+  }
   if (tab.kind === "file" && tab === active && setting("editor.formatOnSave") && tab.model.getLanguageId() === "ruby") {
     await editor.getAction("editor.action.formatDocument")?.run().catch(() => {});
   }
   cleanupOnSave(tab);
   try {
-    await api.writeFile(tab.path, tab.model.getValue());
+    await api.writeFile(tab.path, tab.model.getValue(), meta.encoding, meta.bom);
   } catch (e) {
     toast(`Save failed: ${e}`, "error");
     return false;
@@ -736,8 +929,12 @@ export async function handleFsChanged(paths: string[]) {
     const model = monaco.editor.getModel(uriFor(path));
     if (!model) continue;
     let text: string;
+    const meta = metaOf(model);
     try {
-      text = await api.readFile(path);
+      const file = await api.openText(path, meta.forced ? meta.encoding : undefined);
+      if (file.truncated) continue;
+      fileMeta.set(model, { ...meta, encoding: file.encoding, bom: file.bom });
+      text = file.text;
     } catch {
       continue;
     }
@@ -787,8 +984,9 @@ function renderTabs() {
       t.el = h(
         "div",
         {
-          class: `tab${t === active ? " active" : ""}${dirty ? " dirty" : ""}`,
+          class: `tab${t === active ? " active" : ""}${dirty ? " dirty" : ""}${t.pinned ? " pinned" : ""}`,
           title: t.view ? (t.view.tooltip ?? t.title) : rel(t.path),
+          oncontextmenu: (e: MouseEvent) => tabMenu(e, t),
           onmousedown: (e: MouseEvent) => {
             if (e.button === 1) {
               e.preventDefault();
@@ -797,6 +995,7 @@ function renderTabs() {
           },
         },
         t.view ? icon(t.view.icon, "view-tab-icon") : t.kind === "diff" ? icon("diff", `lang-${t.model.getLanguageId()}`) : fileIcon(t.path, `lang-${t.model.getLanguageId()}`),
+        t.pinned ? h("span", { class: "codicon codicon-pinned tab-pin", title: "Pinned", "aria-label": "Pinned" }) : null,
         h("span", { class: "tab-title" }, t.title),
         (names.get(t.title) ?? 0) > 1 && parent ? h("span", { class: "tab-desc" }, parent) : null,
         h(

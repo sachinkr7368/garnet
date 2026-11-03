@@ -7,10 +7,25 @@ static GIT: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
 /// A repo's own .git/config can run programs (filters, textconv, hooks, sshCommand), so git stays off until the
 /// project is trusted. Reset on every project open.
 pub static TRUSTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// GIT and TRUSTED are process-wide; tests that touch them take this lock.
+#[cfg(test)]
+pub(crate) static GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+pub fn trusted() -> bool {
+    TRUSTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The project's shell environment and Ruby run project code (rbenv/asdf/mise, .envrc, bundler), so they are only
+/// captured once the project is trusted.
 #[tauri::command]
-pub fn git_set_trusted(trusted: bool) {
+pub fn git_set_trusted(index: tauri::State<'_, crate::index::Index>, trusted: bool) {
     TRUSTED.store(trusted, std::sync::atomic::Ordering::SeqCst);
+    if let (true, Ok(root)) = (trusted, index.root()) {
+        std::thread::spawn(move || {
+            crate::env::shell_env(&root);
+            crate::fsops::ruby_roots(&root);
+        });
+    }
 }
 
 #[tauri::command]
@@ -43,6 +58,7 @@ fn run_git(root: &str, args: &[&str], stdin: Option<&str>) -> Result<std::proces
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
+        .env("GIT_TEST_DISALLOW_ABBREVIATED_OPTIONS", "1")
         .stdin(if stdin.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -181,8 +197,13 @@ const RUN_ALLOWED: &[(&str, &[&str])] = &[
     ("tag", &[]),
     ("worktree", &["-b", "--porcelain", "--force"]),
 ];
-/// Options whose next argument is a value (it may start with '-', like a `-wip` message).
-const RUN_VALUES: &[(&str, &str)] = &[("stash", "-m"), ("cherry-pick", "-m"), ("revert", "-m"), ("checkout", "-b"), ("worktree", "-b")];
+/// Options whose next argument is a value (it may start with '-', like a `-wip` message), keyed by subcommand and
+/// action ("" for any). `stash list` forwards its options to git log, where -m takes no value.
+const RUN_VALUES: &[(&str, &str, &str)] = &[("stash", "push", "-m"), ("cherry-pick", "", "-m"), ("revert", "", "-m"), ("checkout", "", "-b"), ("worktree", "add", "-b")];
+
+fn takes_value(sub: &str, action: &str, name: &str) -> bool {
+    RUN_VALUES.iter().any(|&(s, a, o)| s == sub && (a.is_empty() || a == action) && o == name)
+}
 /// Subcommands whose arguments after `--` are pathspecs (git_run passes --literal-pathspecs, so any text is a path).
 const RUN_PATHSPECS: &[&str] = &["add", "rm", "checkout", "stash"];
 const NETWORK: &[&str] = &["fetch", "pull", "push"];
@@ -232,7 +253,7 @@ fn check_run_args(args: &[String], remotes: &[String]) -> Result<(), String> {
             return Err(format!("git {sub} argument {a} is not allowed here"));
         }
         options.push(name);
-        if RUN_VALUES.contains(&(sub, name)) {
+        if takes_value(sub, second, name) {
             i += 1;
         }
     }
@@ -255,6 +276,9 @@ fn check_run_args(args: &[String], remotes: &[String]) -> Result<(), String> {
     if sub == "stash" && has("--index") && !matches!(second, "pop" | "apply") {
         return Err("--index is only for stash pop/apply".into());
     }
+    if sub == "stash" && has("-m") && second != "push" {
+        return Err("-m is only for stash push".into());
+    }
     if sub == "worktree" {
         if has("--force") && second != "remove" || has("-b") && second != "add" || has("--porcelain") && second != "list" {
             return Err(format!("git worktree {second}: option not allowed"));
@@ -264,6 +288,28 @@ fn check_run_args(args: &[String], remotes: &[String]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Passes each checked option value glued to its flag (`-m<msg>`), so git can never read the value as an option.
+fn stuck_values(args: &[String]) -> Vec<String> {
+    let (sub, second) = (args.first().map(String::as_str).unwrap_or(""), args.get(1).map(String::as_str).unwrap_or(""));
+    let mut out = Vec::with_capacity(args.len());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            out.push(a.clone());
+            out.extend(it.cloned());
+            break;
+        }
+        match it.clone().next().filter(|v| !v.is_empty() && takes_value(sub, second, a)) {
+            Some(v) => {
+                out.push(format!("{a}{v}"));
+                it.next();
+            }
+            None => out.push(a.clone()),
+        }
+    }
+    out
 }
 
 /// A new worktree goes into a folder that does not exist yet, under an existing parent, and outside any repository.
@@ -294,6 +340,7 @@ pub async fn git_run(root: String, args: Vec<String>) -> Result<String, String> 
         };
         check_run_args(&args, &remotes)?;
         let mut full = vec!["-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=user", "--literal-pathspecs"];
+        let args = stuck_values(&args);
         full.extend(args.iter().map(String::as_str));
         git(&root, &full)
     })
@@ -843,9 +890,6 @@ pub async fn git_blame_line(root: String, path: String, line: u32) -> Result<Bla
 mod tests {
     use super::*;
 
-    /// GIT and TRUSTED are process-wide; tests that touch them take this lock.
-    static GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn git_path_must_be_absolute_executable() {
         let _g = GLOBALS.lock().unwrap();
@@ -1120,6 +1164,7 @@ mod tests {
             &["push", "origin", "+main"], &["push", "origin", "+main:main"], &["fetch", "origin", "^x"], &["checkout", "HEAD", "--", "."], &["checkout", "HEAD", "."], &["checkout", "--", "."],
             &["stash", "list", "--", "x"], &["stash", "drop", "--index"], &["stash", "push", "-x"], &["log", "--", "x"], &["worktree", "move", "/a", "/b"], &["worktree", "add", "--force", "/nonexistent-garnet-wt"],
             &["worktree", "add", "-b", "x", "/tmp"], &["worktree", "add", "relative", "main"], &["worktree", "add", "/no-such-parent/x/y"], &["worktree", "list", "--force"],
+            &["stash", "list", "-m", "--output=x"], &["stash", "pop", "-m", "--output=x"], &["stash", "list", "--out=x"], &["log", "--out=x"], &["stash", "push", "--include-untr"],
         ] {
             assert!(check_run_args(&s(bad), &s(&["origin"])).is_err(), "{bad:?}");
         }
@@ -1138,6 +1183,25 @@ mod tests {
         assert!(block(git_run(root.clone(), s(&["fetch", "origin"]))).is_ok(), "configured remotes work");
         assert!(!dir.join("pwned").exists());
         std::fs::remove_dir_all(&other).unwrap();
+        TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn stash_message_is_glued_to_its_flag_and_abbreviations_are_refused() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(stuck_values(&s(&["stash", "push", "-m", "-wip", "--", "-m", "x"])), s(&["stash", "push", "-m-wip", "--", "-m", "x"]));
+        assert_eq!(stuck_values(&s(&["stash", "list", "-m"])), s(&["stash", "list", "-m"]));
+        assert_eq!(stuck_values(&s(&["checkout", "-b", "x", "--track", "origin/x"])), s(&["checkout", "-bx", "--track", "origin/x"]));
+        let _g = GLOBALS.lock().unwrap();
+        let (dir, root, sh) = repo("stashmsg");
+        sh("echo a > a.rb && git add a.rb && git commit -qm init && echo b >> a.rb");
+        TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(block(git_run(root.clone(), s(&["stash", "push", "-m", "--output=x"]))).is_ok());
+        assert!(block(git_run(root.clone(), s(&["stash", "list", "--format=%s"]))).unwrap().contains("--output=x"));
+        assert!(block(git_run(root.clone(), s(&["stash", "list", "-m", "--output=x"]))).is_err());
+        assert!(git(&root, &["branch", "--lis"]).unwrap_err().contains("abbreviated"), "GIT_TEST_DISALLOW_ABBREVIATED_OPTIONS is set");
+        assert!(!dir.join("x").exists());
         TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
         std::fs::remove_dir_all(&dir).unwrap();
     }

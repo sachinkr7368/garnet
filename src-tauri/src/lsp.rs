@@ -112,6 +112,9 @@ pub async fn lsp_start(
     launcher: Option<bool>,
     on_event: Channel<RpcEvent>,
 ) -> Result<Launch, String> {
+    if !crate::git::trusted() {
+        return Err("Trust project to start Ruby LSP".into());
+    }
     let gen = state.begin();
     let root = Path::new(&root);
     let (argv, detection, prefix) = match command.filter(|c| !c.trim().is_empty()) {

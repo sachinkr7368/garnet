@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 vi.mock("../editor", async () => await import("./fakeEditor"));
 
-import { bottom, clampPanels, contextMenu, dragWidth, fileIconName, iconButton, menuIconFor, modal, quickPick, setShortcutResolver, tip, h } from "../ui";
+import { bottom, clampPanels, contextMenu, dragWidth, fileIconName, fitTabs, iconButton, menuIconFor, modal, overflowStrip, quickPick, setShortcutResolver, tip, h } from "../ui";
 
 Element.prototype.scrollIntoView ??= () => {};
 (globalThis as any).Worker ??= class {
@@ -96,15 +96,17 @@ describe("panels on a small window", () => {
     expect(document.getElementById("bottom")!.style.maxHeight).toBe("880px");
   });
 
-  it("scrolls the active bottom tab into view when the strip overflows", () => {
-    const seen: string[] = [];
-    const spy = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (this: Element) {
-      seen.push((this as HTMLElement).dataset.view ?? "");
-    });
-    bottom.add({ id: "far", title: "LSP Log", icon: "output", el: h("div") });
+  it("keeps the active bottom tab visible when the strip overflows, the rest go to the » menu", () => {
+    for (const id of ["a", "b", "c", "far"]) bottom.add({ id, title: id, icon: "output", el: h("div") });
+    const head = document.getElementById("bottom-head")!;
+    Object.defineProperty(head, "clientWidth", { value: 130, configurable: true });
+    for (const el of head.children) Object.defineProperty(el, "offsetWidth", { value: el.classList.contains("tab-overflow") ? 20 : 50, configurable: true });
     bottom.show("far");
-    expect(seen).toContain("far");
-    spy.mockRestore();
+    const tab = (id: string) => head.querySelector<HTMLElement>(`.dock-tab[data-view="${id}"]`)!;
+    expect(tab("far").hidden).toBe(false);
+    expect(tab("far").classList.contains("active")).toBe(true);
+    expect(head.querySelector<HTMLElement>(".tab-overflow")!.hidden).toBe(false);
+    expect(head.lastElementChild?.classList.contains("tab-overflow")).toBe(true);
     bottom.hide();
   });
 });
@@ -341,5 +343,53 @@ describe("panel resizers", () => {
     handle.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
     window.dispatchEvent(new Event("blur"));
     expect(document.body.classList.contains("resizing")).toBe(false);
+  });
+});
+
+describe("tab strip overflow", () => {
+  it("keeps every tab when they fit", () => {
+    expect(fitTabs([50, 50, 50], 150, 20, 2)).toEqual([0, 1, 2]);
+  });
+
+  it("keeps the tabs that fit next to the » button, in order", () => {
+    expect(fitTabs([50, 50, 50, 50], 150, 20, 0)).toEqual([0, 1]);
+  });
+
+  it("always keeps the active tab, even when it is last", () => {
+    expect(fitTabs([50, 50, 50, 50], 150, 20, 3)).toEqual([0, 3]);
+  });
+
+  it("stops at the first tab that doesn't fit so the order never skips", () => {
+    expect(fitTabs([50, 90, 10, 10], 100, 20, 0)).toEqual([0]);
+  });
+
+  it("keeps only the active tab when nothing else fits, and copes with no active tab", () => {
+    expect(fitTabs([80, 80, 80], 90, 20, 1)).toEqual([1]);
+    expect(fitTabs([40, 40, 40], 100, 20, -1)).toEqual([0, 1]);
+  });
+
+  it("hides overflowing tabs and lists them in the » menu with their tooltips", () => {
+    const strip = h("div", {});
+    const picked: string[] = [];
+    const tabs = ["Terminal", "Run", "Git"].map((t, i) => h("button", { class: i === 2 ? "active" : "", title: `${t} tip` }, h("span", { class: "codicon codicon-terminal" }), t));
+    strip.append(...tabs);
+    const { more, fit } = overflowStrip(strip, "More tool windows", (t) => t.textContent ?? "", (t) => picked.push(t.textContent!));
+    document.body.append(strip);
+    Object.defineProperty(strip, "clientWidth", { value: 130, configurable: true });
+    for (const el of [...tabs, more]) Object.defineProperty(el, "offsetWidth", { value: el === more ? 20 : 50, configurable: true });
+    fit();
+    expect(tabs.map((t) => t.hidden)).toEqual([false, true, false]);
+    expect(more.hidden).toBe(false);
+    expect(more.title).toBe("More tool windows");
+    more.click();
+    const row = overlay().querySelector<HTMLElement>(".ctx-item")!;
+    expect(row.textContent).toBe("Run");
+    expect(row.title).toBe("Run tip");
+    row.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    expect(picked).toEqual(["Run"]);
+    Object.defineProperty(strip, "clientWidth", { value: 400, configurable: true });
+    fit();
+    expect(tabs.every((t) => !t.hidden) && more.hidden).toBe(true);
+    strip.remove();
   });
 });

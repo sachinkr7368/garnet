@@ -189,6 +189,9 @@ body:not(.has-project) #run-widget {
   color: var(--dim);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 #sidebar-body,
@@ -419,6 +422,15 @@ body:not(.has-project) #run-widget {
   color: var(--dim);
   font-size: 11px;
 }
+#switchers .switcher:last-child {
+  flex-shrink: 0.2;
+}
+@media (max-width: 1100px) {
+  .switcher .tag,
+  .switcher .counts {
+    display: none;
+  }
+}
 #run-widget {
   display: flex;
   align-items: center;
@@ -446,15 +458,11 @@ body:not(.has-project) #run-widget {
   display: flex;
   flex: 1;
   min-width: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
-}
-#tabs::-webkit-scrollbar {
-  display: none;
+  overflow: hidden;
 }
 
 .tab {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -573,7 +581,12 @@ body:not(.has-project) #run-widget {
   flex-direction: column;
   align-items: center;
   gap: 10px;
-  min-width: 360px;
+  width: min(420px, calc(100% - 32px));
+  max-height: 100%;
+  overflow-y: auto;
+}
+.welcome-inner.hints {
+  width: min(320px, calc(100% - 32px));
 }
 .welcome-logo {
   width: 72px;
@@ -589,8 +602,19 @@ body:not(.has-project) #run-widget {
 .welcome-key {
   display: flex;
   justify-content: space-between;
-  width: 320px;
+  gap: 12px;
+  width: 100%;
   color: var(--dim);
+}
+.welcome-key > span,
+.welcome-recent > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.welcome-key > kbd {
+  flex: none;
 }
 kbd {
   font: 12px ui-monospace, Menlo, monospace;
@@ -664,17 +688,32 @@ kbd {
   padding: 3px 6px;
   border-bottom: 1px solid var(--border);
   flex: none;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-#bottom-head::-webkit-scrollbar {
-  display: none;
+  overflow: hidden;
 }
 #bottom-head .dock-tab {
   padding: 3px 9px;
   font-size: 12px;
   flex: none;
   white-space: nowrap;
+}
+.tab-overflow {
+  flex: none;
+  border: 0;
+  background: none;
+  color: var(--dim);
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 0 8px;
+  font-size: 14px;
+}
+.tab-overflow:hover,
+.tab-overflow:focus-visible {
+  background: var(--hover);
+  color: var(--text);
+}
+#tabs > .tab-overflow {
+  border-radius: 0;
+  padding: 0 10px;
 }
 
 .search-bar {
@@ -697,10 +736,11 @@ kbd {
 }
 .search-input {
   flex: 1;
-  min-width: 160px;
+  min-width: 60px;
 }
 .search-include {
-  width: 220px;
+  flex: 0 1 220px;
+  min-width: 60px;
 }
 .search-input:focus,
 .search-include:focus,
@@ -729,6 +769,12 @@ kbd {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.search-bar,
+.view-toolbar {
+  min-width: 0;
 }
 
 .results,
@@ -873,6 +919,19 @@ mark {
   font-size: 12px;
   color: var(--dim);
   padding-left: 4px;
+  min-width: 64px;
+}
+.commit-branch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.icon-btn.overflowed {
+  display: none;
+}
+.toolbar-overflow {
+  font-size: 14px;
 }
 .change-head {
   display: flex;
@@ -891,7 +950,32 @@ mark {
   white-space: nowrap;
 }
 .change-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.change-row > *:not(.change-name, .change-dir, .spacer) {
   flex: none;
+}
+.change-row > .codicon:first-child,
+.change-row > .icon-btn:first-child,
+.change-row > .twisty-space:first-child {
+  width: 16px;
+}
+.change-row {
+  position: relative;
+}
+.row-actions {
+  display: none;
+  position: absolute;
+  right: 4px;
+  background: inherit;
+  border-radius: 5px;
+}
+.change-row:hover > .row-actions,
+.change-row.selected > .row-actions {
+  display: inline-flex;
 }
 .change-dir {
   color: var(--dim);
@@ -907,7 +991,8 @@ mark {
 .change-row .icon-btn {
   visibility: hidden;
 }
-.change-row:hover .icon-btn {
+.change-row:hover .icon-btn,
+.change-row.selected .icon-btn {
   visibility: visible;
 }
 .commit-box {
@@ -930,7 +1015,8 @@ mark {
 .commit-actions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 .commit-actions .amend {
   display: flex;
@@ -956,12 +1042,6 @@ mark {
 .btn:disabled {
   opacity: 0.5;
   cursor: default;
-}
-.worktree-row .change-name {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .changes:focus {
   outline: none;
@@ -1006,10 +1086,28 @@ mark {
   cursor: pointer;
   font-size: 14px !important;
 }
-.glyph-bp {
-  color: var(--breakpoint);
+.monaco-editor .line-numbers.glyph-bp {
+  color: transparent !important;
   cursor: pointer;
-  font-size: 12px !important;
+}
+.line-numbers.glyph-bp::after {
+  content: "\ea71";
+  font: normal normal normal 15px/1 codicon;
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--breakpoint);
+}
+.line-numbers.glyph-bp.conditional::after {
+  content: "\eaa7";
+}
+.line-numbers.glyph-bp.logpoint::after {
+  content: "\eaab";
+  color: var(--warn);
+}
+.line-numbers.glyph-bp.disabled::after {
+  color: var(--dim);
 }
 .glyph-frame {
   color: var(--warn);
@@ -1134,14 +1232,14 @@ mark {
   flex: 1;
 }
 .status-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
+  display: block;
+  line-height: 23px;
   padding: 0 7px;
   height: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 40vw;
+  min-width: 0;
 }
 .status-item:empty {
   display: none;
@@ -1155,6 +1253,8 @@ mark {
 }
 .status-item .codicon {
   font-size: 13px;
+  vertical-align: -2px;
+  margin-right: 3px;
 }
 .lsp.ok .codicon {
   color: var(--accent);
@@ -1429,6 +1529,20 @@ mark {
   font-size: 12px;
   color: var(--dim);
   white-space: nowrap;
+  min-width: 24px;
+}
+.exc-filter > input {
+  flex: none;
+}
+.exc-filter > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.exc-filters {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
 }
 .watch-row {
   display: flex;
@@ -1452,12 +1566,6 @@ mark {
   color: var(--warn) !important;
   font-style: italic;
   opacity: 0.85;
-}
-.glyph-bp.conditional {
-  color: var(--breakpoint);
-}
-.glyph-bp.logpoint {
-  color: var(--warn);
 }
 
 body.sidebar-right #main {
@@ -1730,7 +1838,6 @@ body.sidebar-right #rightstrip {
   font-size: 11px;
   text-transform: none;
 }
-.glyph-bp.disabled,
 .bp-icon.disabled {
   color: var(--dim);
 }
@@ -1761,14 +1868,20 @@ body.sidebar-right #rightstrip {
 
 .tests-view .search-bar {
   flex-wrap: nowrap;
+  container-type: inline-size;
 }
 .tr-progress {
-  width: 140px;
+  flex: 0 1 140px;
+  min-width: 40px;
   height: 6px;
   border-radius: 3px;
   background: var(--border);
   overflow: hidden;
-  flex-shrink: 0;
+}
+@container (max-width: 520px) {
+  .tr-progress {
+    display: none;
+  }
 }
 .tr-bar {
   height: 100%;
@@ -1895,7 +2008,7 @@ body.sidebar-right #rightstrip {
   margin: 6px 8px 2px;
 }
 .twisty-space {
-  width: 24px;
+  width: 16px;
   flex: none;
 }
 .dir-row .codicon-folder {
@@ -2066,7 +2179,15 @@ body.sidebar-right #rightstrip {
   display: none;
 }
 .log-filter {
-  width: 130px;
+  flex: 0 1 130px;
+  min-width: 40px;
+}
+.log-filters > select {
+  flex: 0 1 auto;
+  min-width: 56px;
+}
+.segs {
+  flex: none;
 }
 .log-split {
   flex: 1;
@@ -2075,6 +2196,8 @@ body.sidebar-right #rightstrip {
 }
 .log-list {
   flex: 3;
+  min-width: 0;
+  container-type: inline-size;
   overflow: auto;
   position: relative;
   outline: none;
@@ -2128,8 +2251,24 @@ body.sidebar-right #rightstrip {
 .log-date {
   color: var(--dim);
   width: 100px;
+  flex: none;
   font-size: 12px;
   text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.log-author {
+  flex: none;
+}
+@container (max-width: 520px) {
+  .log-author {
+    display: none;
+  }
+}
+@container (max-width: 340px) {
+  .log-date {
+    display: none;
+  }
 }
 .ref-chip {
   display: inline-flex;

@@ -153,7 +153,7 @@ function renderFilters() {
     ...exceptionFilters.map((f) => {
       const box = h("input", { type: "checkbox", checked: enabledFilters.has(f.filter) });
       box.onchange = () => setExceptionFilter(f.filter, box.checked);
-      return h("label", { class: "exc-filter", title: "Pause when an exception is raised" }, box, `Break on ${f.label.replace(/^rescue /, "")}`);
+      return h("label", { class: "exc-filter", title: "Pause when an exception is raised" }, box, h("span", {}, `Break on ${f.label.replace(/^rescue /, "")}`));
     }),
   );
 }
@@ -207,13 +207,18 @@ function out(s: Session, text: string) {
 
 const fileModel = (path: string) => monaco.editor.getModel(monaco.Uri.file(path));
 
-function glyph(bp: Breakpoint): monaco.editor.IModelDecorationOptions {
+function bpIcon(bp: Breakpoint) {
   const kind = bp.logMessage ? "-log" : bp.condition || bp.hitCount ? "-conditional" : "";
-  const name = bp.enabled ? (kind ? `debug-breakpoint${kind}` : "circle-filled") : `debug-breakpoint${kind}-disabled`;
+  return bp.enabled ? (kind ? `debug-breakpoint${kind}` : "circle-filled") : `debug-breakpoint${kind}-disabled`;
+}
+
+/// RubyMine's New UI draws a breakpoint over its line number.
+function glyph(bp: Breakpoint): monaco.editor.IModelDecorationOptions {
+  const kind = bp.logMessage ? " logpoint" : bp.condition || bp.hitCount ? " conditional" : "";
   const hover = [bp.logMessage ? `Logpoint: ${bp.logMessage}` : "Breakpoint", describe(bp), "right-click to edit, ⌘⇧F8 for all"].filter(Boolean).join(" · ");
   return {
-    glyphMarginClassName: `codicon codicon-${name} glyph-bp${bp.logMessage ? " logpoint" : ""}${bp.enabled ? "" : " disabled"}`,
-    glyphMarginHoverMessage: { value: hover },
+    lineNumberClassName: `glyph-bp${kind}${bp.enabled ? "" : " disabled"}`,
+    lineNumberHoverMessage: { value: hover },
     stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
   };
 }
@@ -314,14 +319,16 @@ async function editBreakpoint(path: string, line: number, kind: "condition" | "l
   setBreakpoint(path, line, { ...bp, [kind]: kind === "hitCount" ? (Number(v) > 1 ? Number(v) : undefined) : v || undefined });
 }
 
+const inGutter = (t: monaco.editor.MouseTargetType) => t === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN || t === monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS;
+
 editor.onMouseDown((e) => {
-  if (e.target.type !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN || e.event.rightButton) return;
+  if (!inGutter(e.target.type) || e.event.rightButton) return;
   const line = e.target.position?.lineNumber;
-  if (line && !isRunGlyph(line)) toggleBreakpoint(line);
+  if (line && (e.target.type === monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS || !isRunGlyph(line))) toggleBreakpoint(line);
 });
 
 editor.onContextMenu((e) => {
-  if (e.target.type !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) return;
+  if (!inGutter(e.target.type)) return;
   const line = e.target.position?.lineNumber;
   const t = activeTab();
   if (!line || !t) return;
@@ -825,7 +832,7 @@ export function viewBreakpoints(focusPath?: string, focusLine?: number) {
             onclick: () => ((current = { path, line: bp.line }), render()),
             ondblclick: () => (close(), openFile(path, { line: bp.line })),
           },
-          h("span", { class: "bp-item-head" }, box, icon(glyph(bp).glyphMarginClassName!.split(" ")[1].replace("codicon-", ""), bp.enabled ? "bp-icon" : "bp-icon disabled"), ` ${rel(path).split("/").pop()}:${bp.line}`),
+          h("span", { class: "bp-item-head" }, box, icon(bpIcon(bp), bp.enabled ? "bp-icon" : "bp-icon disabled"), ` ${rel(path).split("/").pop()}:${bp.line}`),
           h("small", { class: "dim" }, [describe(bp), hits ? `${hits} hit${hits > 1 ? "s" : ""}` : ""].filter(Boolean).join(" · ")),
         );
         return header ? [header, row] : [row];

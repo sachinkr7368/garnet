@@ -15,7 +15,7 @@ import { styleFor } from "./codestyle";
 import { monacoTheme } from "./theme";
 import { globToRegExp, isDarkTheme, loadSettings, onSettingsChange, projectSettingsPath, setting, settingsPath, updateSetting } from "./settings";
 import { basename, rel } from "./state";
-import { fileIcon, h, icon, iconButton, statusSlot, tip, toast } from "./ui";
+import { fileIcon, h, icon, iconButton, overflowStrip, statusSlot, tip, toast } from "./ui";
 
 export { monaco };
 
@@ -151,6 +151,10 @@ export const events = {
 };
 
 const tabsEl = document.getElementById("tabs")!;
+const tabOverflow = overflowStrip(tabsEl, "Show Hidden Tabs", (el) => el.querySelector(".tab-title")?.textContent ?? "", (el) => {
+  const t = tabs.find((x) => x.el === el);
+  if (t) activate(t);
+});
 const editorEl = document.getElementById("editor")!;
 const diffEl = document.getElementById("diff-editor")!;
 const welcomeEl = document.getElementById("welcome")!;
@@ -194,6 +198,7 @@ export const editor = monaco.editor.create(editorEl, {
   ...editorOptions(),
   automaticLayout: true,
   glyphMargin: true,
+  lineNumbersMinChars: 3,
   bracketPairColorization: { enabled: true },
   fixedOverflowWidgets: true,
   padding: { top: 6 },
@@ -579,7 +584,6 @@ export function activate(tab: Tab | null) {
     cursorSlot.textContent = "";
   }
   renderTabs();
-  tab?.el.scrollIntoView({ block: "nearest", inline: "nearest" });
   events.activated.fire(tab);
 }
 
@@ -793,5 +797,7 @@ function renderTabs() {
       );
       return t.el;
     }),
+    tabOverflow.more,
   );
+  tabOverflow.fit();
 }

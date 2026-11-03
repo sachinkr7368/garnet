@@ -155,8 +155,8 @@ export const testResultsView = h(
     iconButton("run-errors", "Rerun Failed Tests", () => rerunFailed()),
     iconButton("debug-stop", "Stop", () => current && !current.exited && stopRun(current.item)),
     h("span", { class: "debug-toolbar-sep" }),
-    h("label", { class: "exc-filter", title: "Show passed tests" }, passedBox, "Passed"),
-    h("label", { class: "exc-filter", title: "Show ignored (pending / skipped) tests" }, pendingBox, "Ignored"),
+    h("label", { class: "exc-filter", title: "Show passed tests" }, passedBox, h("span", {}, "Passed")),
+    h("label", { class: "exc-filter", title: "Show ignored (pending / skipped) tests" }, pendingBox, h("span", {}, "Ignored")),
     iconButton("expand-all", "Expand All", () => (collapsed.clear(), render())),
     iconButton("collapse-all", "Collapse All", () => {
       const walk = (ns: TreeNode[]) => ns.forEach((n) => n.children.length && (collapsed.add(n.key), walk(n.children)));

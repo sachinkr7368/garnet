@@ -4,7 +4,7 @@ All notable changes to Garnet are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Garnet uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.4] - 2026-11-03
 
 ### Added
 - Zoom IDE: View › Appearance › Zoom In IDE (⌃⌥=), Zoom Out IDE (⌃⌥-) and Reset IDE Zoom (⌃⌥0), RubyMine's macOS defaults. Settings › Keymap › Standard macOS zoom keys switches ⌘= ⌘- ⌘0 to zoom instead.
@@ -13,9 +13,22 @@ All notable changes to Garnet are documented here. The format follows
 - Theme menu in the toolbar and View › Theme: System, Light or Dark with a checkmark on the current one.
 - Full macOS menu bar: File, Edit, View, Navigate, Code, Refactor, Run, Git, Window and Help, with shortcuts from the live keymap, Open Recent, New Window, Close Window (⇧⌘W), Bring All to Front and the window list.
 - Distraction Free Mode, Presentation Mode, and toggles for the toolbar, status bar and tool window bars.
+- Automatic `end` after def, class, module, do, if and other block openers.
+- Tab context menu (close others, all, unmodified, to the right, pinned), Reopen Closed Tab, and an optional tab limit.
+- Parameter Info (⌘P), Extend / Shrink Selection by syntax (⌥↑ / ⌥↓), Highlight Usages (⇧⌘F7), Last / Next Edit Location (⇧⌘⌫), Run to Cursor (⌥F9).
+- Extract Variable / Method / Constant on ⌥⌘V / ⌥⌘M / ⌥⌘C, Toggle Case (⇧⌘U), Insert Live Template (⌘J), Unselect Occurrence (⌃⇧G), Copy Path (⇧⌘C) and Copy Reference (⌥⇧⌘C).
+- Find in terminal and Run console (⌘F), Compare with Clipboard, Compare File With, Mute Breakpoints, Soft-Wrap and Show Whitespaces toggles.
+- Full keyboard navigation in the Project tree, with tree shortcuts for delete (to Trash), rename, copy, paste and Open in Terminal.
+- File encoding and line separator in the status bar, with Reopen with Encoding, Convert to Encoding and LF / CRLF switching.
 - Drop a folder on the window or the Dock icon to open it. The window's size and position are restored on relaunch.
 
 ### Fixed
+- Saving a file that is not UTF-8 no longer corrupts it: Garnet detects the encoding, keeps it and saves back byte for byte. Binary files are refused instead of mangled, and a file that cannot be decoded cleanly opens read-only.
+- Files over 10 MB open read-only instead of freezing the window.
+- Editor shortcuts no longer act on the open file while the Project tree has focus.
+- Deleting from the Project tree or the Commit window moves files to the Trash after a confirmation that defaults to Cancel.
+- Refactorings and git rollback keep a file's encoding; partial staging refuses non-UTF-8 files instead of writing garbled text to the index.
+- A filename containing control characters is no longer pasted when dropped on the terminal.
 - Zoom scaled the page with CSS zoom, which put clicks in the editor on the wrong line and column; it now uses the web view's page zoom.
 - Going back to System after pinning Light or Dark kept the old theme when macOS had changed appearance in the meantime.
 - The toolbar theme button only toggled Light and Dark, so System could only be restored from Settings.
@@ -88,6 +101,7 @@ All notable changes to Garnet are documented here. The format follows
 - First release: project tree, editor tabs, Go to File, Find in Files, integrated terminals, ruby-lsp intelligence, git panel with branch and worktree switchers, run configurations, rdbg debugger, Rails navigation, and the JetBrains macOS keymap with import.
 - Project trust: opening a folder never runs its code until you trust it.
 
+[0.2.4]: https://github.com/sachinkr7368/garnet/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/sachinkr7368/garnet/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/sachinkr7368/garnet/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/sachinkr7368/garnet/compare/v0.2.0...v0.2.1

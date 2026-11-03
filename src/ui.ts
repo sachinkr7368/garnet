@@ -7,6 +7,12 @@ export function h<K extends keyof HTMLElementTagNameMap>(
   ...children: Child[]
 ): HTMLElementTagNameMap[K] {
   const el = document.createElement(tag);
+  // Code, paths, branch names and queries: no spell check, autocorrect or autocapitalize unless a field opts in.
+  if ((tag === "input" || tag === "textarea") && !("spellcheck" in props)) {
+    (el as HTMLInputElement).spellcheck = false;
+    el.setAttribute("autocorrect", "off");
+    el.setAttribute("autocapitalize", "off");
+  }
   for (const [k, v] of Object.entries(props)) {
     if (v === undefined || v === null || v === false) continue;
     if (k === "class") el.className = String(v);

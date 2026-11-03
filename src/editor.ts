@@ -335,6 +335,40 @@ onSettingsChange(() => {
   for (const t of tabs) applyCodeStyle(t);
 });
 
+window.addEventListener("garnet:zoom", () => requestAnimationFrame(() => monaco.editor.remeasureFonts()));
+
+/// ⌘ + mouse wheel and trackpad pinch change the font size in all editors when Settings › Editor › Font allows it
+/// (off by default, as in RubyMine).
+export const wheelFontSize = (size: number, deltaY: number) => Math.min(32, Math.max(8, size + (deltaY < 0 ? 1 : -1)));
+let wheelDelta = 0;
+editorArea.addEventListener(
+  "wheel",
+  (e) => {
+    if (!setting("editor.mouseWheelZoom") || !(e.metaKey || e.ctrlKey)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    wheelDelta += e.deltaY;
+    if (Math.abs(wheelDelta) < 30) return;
+    const size = wheelFontSize(setting<number>("editor.fontSize"), wheelDelta);
+    wheelDelta = 0;
+    if (size !== setting<number>("editor.fontSize")) void updateSetting("editor.fontSize", size);
+  },
+  { capture: true, passive: false },
+);
+let pinchFrom = 0;
+editorArea.addEventListener("gesturestart", (e) => setting("editor.mouseWheelZoom") && (e.preventDefault(), (pinchFrom = setting<number>("editor.fontSize"))));
+editorArea.addEventListener("gesturechange", (e) => {
+  if (!pinchFrom) return;
+  e.preventDefault();
+  editor.updateOptions({ fontSize: Math.min(32, Math.max(8, Math.round(pinchFrom * (e as unknown as { scale: number }).scale))) });
+});
+editorArea.addEventListener("gestureend", (e) => {
+  if (!pinchFrom) return;
+  e.preventDefault();
+  pinchFrom = 0;
+  void updateSetting("editor.fontSize", editor.getOption(monaco.editor.EditorOption.fontSize));
+});
+
 monaco.editor.registerEditorOpener({
   openCodeEditor(_source, resource, selection) {
     if (resource.scheme !== "file") return false;

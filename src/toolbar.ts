@@ -4,9 +4,10 @@ import { refreshGit } from "./git";
 import { cloneDialog, createPullRequest } from "./github";
 import { api, invoke } from "./ipc";
 import { runGitOp } from "./merge";
-import { isDarkTheme, isTrusted, onSettingsChange, recentProjects, toggleTheme } from "./settings";
+import { isDarkTheme, isTrusted, onSettingsChange, recentProjects, setAppearance, setting } from "./settings";
 import { basename, dirname, root, state } from "./state";
-import { h, icon, iconButton, inputBox, quickPick, toast, withTip, type PickItem } from "./ui";
+import { APPEARANCES } from "./theme";
+import { contextMenu, h, icon, iconButton, inputBox, quickPick, toast, withTip, type PickItem } from "./ui";
 
 const switchers = document.getElementById("switchers")!;
 const projectBtn = withTip(h("button", { class: "switcher" }), "Projects", "projects");
@@ -14,10 +15,25 @@ const worktreeBtn = withTip(h("button", { class: "switcher" }), "Git worktrees",
 const branchBtn = withTip(h("button", { class: "switcher" }), "Git branches", "branches");
 switchers.append(projectBtn, worktreeBtn, branchBtn);
 
-const themeBtn = iconButton("color-mode", "", () => toggleTheme());
+/// Theme menu: System (follows macOS), Light, Dark, the same choice as Settings › Appearance › Theme.
+export function showThemeMenu() {
+  const r = themeBtn.getBoundingClientRect();
+  const current = setting<string>("appearance.theme");
+  themeBtn.setAttribute("aria-expanded", "true");
+  const { menu } = contextMenu({ clientX: r.left, clientY: r.bottom, preventDefault() {} } as MouseEvent, APPEARANCES.map(([value, label]) => ({ label, icon: "blank", checked: current === value, title: value === "system" ? "Follow macOS (System Settings › Appearance)" : undefined, run: () => void setAppearance(value) })));
+  new MutationObserver((_, watch) => !menu.isConnected && (themeBtn.setAttribute("aria-expanded", "false"), watch.disconnect())).observe(document.getElementById("overlay-root")!, { childList: true });
+}
+const themeBtn = iconButton("color-mode", "", () => showThemeMenu());
 themeBtn.id = "theme-toggle";
+themeBtn.setAttribute("aria-haspopup", "menu");
+themeBtn.setAttribute("aria-expanded", "false");
 document.getElementById("toolbar")!.append(themeBtn);
-const labelThemeBtn = () => (themeBtn.title = `Toggle theme (now ${isDarkTheme() ? "dark" : "light"})`);
+const labelThemeBtn = () => {
+  const pref = setting<string>("appearance.theme");
+  const name = APPEARANCES.find(([v]) => v === pref)?.[1] ?? "System";
+  themeBtn.title = `Theme: ${name}${pref === "system" ? ` (${isDarkTheme() ? "dark" : "light"} now)` : ""}`;
+  themeBtn.setAttribute("aria-label", "Theme");
+};
 labelThemeBtn();
 onSettingsChange(labelThemeBtn);
 

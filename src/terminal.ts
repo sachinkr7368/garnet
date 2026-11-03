@@ -61,6 +61,8 @@ export class PtyView {
         callback(links);
       },
     });
+    // Edit › Select All targets xterm's hidden textarea, so ⌘A selects the terminal buffer here.
+    this.term.attachCustomKeyEventHandler((e) => !(e.type === "keydown" && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.code === "KeyA" && (this.term.selectAll(), true)));
     this.observer = new ResizeObserver(() => this.fitSoon());
     views.add(this);
   }

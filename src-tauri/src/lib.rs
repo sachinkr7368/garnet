@@ -1,3 +1,4 @@
+mod appmenu;
 mod dap;
 mod db;
 mod env;
@@ -13,75 +14,8 @@ mod ruby;
 mod search;
 mod watch;
 
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
-
-fn menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
-    let item = |id: &str, label: &str, accel: Option<&str>| MenuItem::with_id(app, id, label, true, accel);
-    Menu::with_items(
-        app,
-        &[
-            &Submenu::with_items(
-                app,
-                "Garnet",
-                true,
-                &[
-                    &PredefinedMenuItem::about(app, None, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &item("settings", "Settings…", None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::hide(app, None)?,
-                    &PredefinedMenuItem::hide_others(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &item("quit", "Quit Garnet", Some("CmdOrCtrl+Q"))?,
-                ],
-            )?,
-            &Submenu::with_items(
-                app,
-                "File",
-                true,
-                &[
-                    &item("openFolder", "Open Folder…", None)?,
-                    &item("openRecent", "Open Recent…", None)?,
-                    &item("commandPalette", "Find Action…", None)?,
-                ],
-            )?,
-            &Submenu::with_items(
-                app,
-                "Edit",
-                true,
-                &[
-                    &PredefinedMenuItem::undo(app, None)?,
-                    &PredefinedMenuItem::redo(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::cut(app, None)?,
-                    &PredefinedMenuItem::copy(app, None)?,
-                    &PredefinedMenuItem::paste(app, None)?,
-                    &PredefinedMenuItem::select_all(app, None)?,
-                ],
-            )?,
-            &Submenu::with_items(
-                app,
-                "Window",
-                true,
-                &[
-                    &PredefinedMenuItem::minimize(app, None)?,
-                    &PredefinedMenuItem::fullscreen(app, None)?,
-                ],
-            )?,
-            &Submenu::with_items(
-                app,
-                "Help",
-                true,
-                &[
-                    &item("keymapReference", "Keymap Reference", None)?,
-                    &item("importKeymap", "Import JetBrains Keymap…", None)?,
-                ],
-            )?,
-        ],
-    )
-}
 
 /// Close/quit requests go to the frontend (unsaved changes prompt), which acknowledges each one and answers with
 /// `quit_now`. Only a request the frontend never acknowledged for 5s (dead or not yet loaded webview) is let through;
@@ -233,21 +167,24 @@ pub fn run() {
         .manage(dap::Dap::default())
         .manage(watch::Watch::default())
         .manage(db::Db::default())
-        .menu(menu)
+        .menu(appmenu::menu)
         .setup(|app| {
-            let window = project::main_window(app.config().app.windows[0].clone(), project::smoke_target().is_some());
+            let mut window = project::main_window(app.config().app.windows[0].clone(), project::smoke_target().is_some());
+            appmenu::restore_frame(app.handle(), &mut window);
             tauri::WebviewWindowBuilder::from_config(app.handle(), &window)?.build()?;
             project::smoke_watchdog(app.handle().clone());
             #[cfg(target_os = "macos")]
             terminate::install(app.handle());
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. } => {
                 if !request_close(window.app_handle()) {
                     api.prevent_close();
                 }
             }
+            WindowEvent::Moved(_) | WindowEvent::Resized(_) => appmenu::track_frame(window),
+            _ => {}
         })
         .on_menu_event(|app, event| {
             // Quit goes through the close gate, so it still works when the webview's JS is dead.
@@ -343,6 +280,13 @@ pub fn run() {
             quit_now,
             frontend_ready,
             close_ack,
+            appmenu::set_menu_state,
+            appmenu::take_opened_paths,
+            appmenu::close_window,
+            appmenu::restored_frame,
+            appmenu::smoke_appearance,
+            appmenu::smoke_menu,
+            appmenu::smoke_snapshot,
         ])
         .build(tauri::generate_context!())
         .expect("failed to start Garnet");
@@ -353,7 +297,12 @@ pub fn run() {
                 api.prevent_exit();
             }
         }
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        if let RunEvent::Opened { urls } = &event {
+            appmenu::opened(app, urls);
+        }
         if let RunEvent::Exit = event {
+            appmenu::save_frame(app);
             app.state::<pty::Ptys>().kill_all();
             app.state::<lsp::Lsp>().stop();
             app.state::<dap::Dap>().stop();

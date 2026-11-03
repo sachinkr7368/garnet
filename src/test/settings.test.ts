@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { checkTrust, editableSettingsPath, globalOnly, globToRegExp, isTrusted, loadSettings, loadSession, modifyConfig, saveSession, setting, trustProject, updateSetting } from "../settings";
+import { appliedZoomFactor, checkTrust, editableSettingsPath, globalOnly, globToRegExp, isTrusted, loadSettings, loadSession, modifyConfig, nextZoom, saveSession, setting, setViewMode, trustProject, updateSetting, zoomIDE } from "../settings";
 import { api, fake } from "./fakeIpc";
 
 const ROOT = "/work/blog";
@@ -187,4 +187,42 @@ describe("globToRegExp", () => {
     [".env*", ".env.local", true],
     ["a+b.rb", "a+b.rb", true],
   ])("%s ~ %s → %s", (glob, path, ok) => expect(globToRegExp(glob).test(path)).toBe(ok));
+});
+
+describe("IDE zoom", () => {
+  it("steps through the zoom levels and stops at the ends", () => {
+    expect(nextZoom(100, 1)).toBe(110);
+    expect(nextZoom(100, -1)).toBe(90);
+    expect(nextZoom(125, 1)).toBe(150);
+    expect(nextZoom(80, -1)).toBe(75);
+    expect(nextZoom(200, 1)).toBe(200);
+    expect(nextZoom(50, -1)).toBe(50);
+    expect(nextZoom(103, -1)).toBe(100);
+  });
+
+  it("Zoom In/Out/Reset IDE persist appearance.zoom and scale the page", async () => {
+    fake.reset();
+    await loadSettings(null);
+    await zoomIDE(1);
+    await zoomIDE(1);
+    expect(setting("appearance.zoom")).toBe(125);
+    expect(appliedZoomFactor()).toBe(1.25);
+    await zoomIDE(0);
+    expect(setting("appearance.zoom")).toBe(100);
+    expect(JSON.parse(fake.config.get("settings.json") ?? "{}")["appearance.zoom"]).toBeUndefined();
+    expect(appliedZoomFactor()).toBe(1);
+  });
+
+  it("chrome toggles and Distraction Free hide the bars", async () => {
+    await updateSetting("appearance.showStatusBar", false);
+    expect(document.body.classList.contains("no-statusbar")).toBe(true);
+    expect(document.body.classList.contains("no-toolbar")).toBe(false);
+    setViewMode("presentation");
+    expect(document.body.classList.contains("no-toolbar")).toBe(true);
+    expect(setting("editor.fontSize")).toBe(24);
+    setViewMode("");
+    expect(setting("editor.fontSize")).toBe(13);
+    await updateSetting("appearance.showStatusBar", undefined);
+    expect(document.body.classList.contains("no-statusbar")).toBe(false);
+  });
 });

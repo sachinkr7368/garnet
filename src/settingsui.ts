@@ -332,6 +332,7 @@ function keymapPage(scope: Scope, state: KeymapState): HTMLElement[] {
   return [
     h("div", { class: "st-title" }, "Keymap"),
     h("div", { class: "st-row" }, h("div", { class: "st-label" }, h("span", {}, "Preset")), preset),
+    row(SCHEMA.find((d) => d.key === "keymap.macZoomKeys")!, scope),
     h("div", { class: "search-bar st-keys-bar" }, filter, byKey, h("button", { class: "btn", onclick: async () => (await updateSetting("keymap.bindings", undefined, scope), updateSetting("keymap.removed", undefined, scope)) }, "Reset customizations"), h("button", { class: "btn", onclick: () => runCommand("importKeymap") }, "Import JetBrains XML…")),
     list,
   ];

@@ -2416,3 +2416,12 @@ body.sidebar-right #rightstrip {
   font-weight: 700;
   padding-left: 4px;
 }
+
+body.no-toolbar #toolbar,
+body.no-statusbar #statusbar,
+body.no-toolstrips #toolstrip,
+body.no-toolstrips #rightstrip,
+body.distraction-free #topbar,
+body.distraction-free .breadcrumbs {
+  display: none;
+}

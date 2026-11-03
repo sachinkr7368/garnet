@@ -12,38 +12,43 @@ export const resolveTheme = (pref: string, systemDark: boolean): Theme =>
 export const toggledAppearance = (current: Theme): Appearance => (current === "dark" ? "light" : "dark");
 
 /// macOS appearance, from the web view's prefers-color-scheme and the Tauri window theme.
-let systemDark = matchMedia("(prefers-color-scheme: dark)").matches;
+const media = matchMedia("(prefers-color-scheme: dark)");
+let systemDark = media.matches;
 export const systemPrefersDark = () => systemDark;
+let systemChanged = () => {};
+const setSystemDark = (dark: boolean) => {
+  if (dark === systemDark) return;
+  systemDark = dark;
+  systemChanged();
+};
 
 /// Calls `onChange` when the OS appearance changes while `following()` (the setting is "system").
 export function watchSystemTheme(following: () => boolean, onChange: () => void) {
-  const set = (dark: boolean) => {
-    if (dark === systemDark) return;
-    systemDark = dark;
-    if (following()) onChange();
-  };
-  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => following() && set(e.matches));
+  systemChanged = () => following() && onChange();
+  media.addEventListener("change", (e) => following() && setSystemDark(e.matches));
   try {
     const win = getCurrentWindow();
-    win.theme().then((t) => t && following() && set(t === "dark")).catch(() => {});
-    win.onThemeChanged(({ payload }) => following() && set(payload === "dark")).catch(() => {});
+    win.theme().then((t) => t && following() && setSystemDark(t === "dark")).catch(() => {});
+    win.onThemeChanged(({ payload }) => following() && setSystemDark(payload === "dark")).catch(() => {});
   } catch {
     // no Tauri window (tests, plain browser): prefers-color-scheme alone
   }
 }
 
-/// Native title bar and vibrancy follow the setting; null hands control back to macOS.
+/// Native title bar and vibrancy follow the setting; null hands control back to macOS. Changes made while the theme
+/// was pinned were ignored, so going back to System re-reads what the web view now sees and repaints if it differs.
 export function applyWindowTheme(pref: string) {
+  const resync = () => pref === "system" && setSystemDark(media.matches);
   try {
     getCurrentWindow()
       .setTheme(pref === "light" || pref === "dark" ? pref : null)
-      .then(() => (pref === "system" ? getCurrentWindow().theme() : null))
-      .then((t) => t && (systemDark = t === "dark"))
-      .catch(() => {});
+      .then(resync, resync);
   } catch {
-    // no Tauri window
+    resync();
   }
 }
+
+export const APPEARANCES: [Appearance, string][] = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
 
 /// Palettes. Every text color is checked for WCAG contrast in src/test/theme.test.ts.
 

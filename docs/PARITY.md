@@ -162,7 +162,7 @@ partial row is meant to become a GitHub issue.
 | Settings window (searchable tree, global + `.garnet/settings.json` overrides, JSON stays editable) | done | |
 | JetBrains macOS default keymap for every implemented action; keymap editor (search, rebind, conflict prompt, find by shortcut), VS Code preset, JetBrains keymap XML import, Help › Keymap Reference | done | XML import skips two-keystroke shortcuts and actions Garnet does not have |
 | Command palette, recent projects, session restore, multiple windows (one process per window) | done | |
-| Light / dark / system theme, UI font size, zoom | done | System (default) follows macOS live; Toggle Theme in the toolbar and palette; chrome, editor, diff, terminal ANSI and semantic-token colors switch without restart; contrast checked by tests (text ≥ 4.5:1) |
+| Light / dark / system theme, UI font size, zoom | done | System (default) follows macOS live; theme menu in the toolbar and View › Theme; Zoom IDE ⌃⌥= / ⌃⌥- / ⌃⌥0 (web view page zoom); chrome, editor, diff, terminal ANSI and semantic-token colors switch without restart; contrast checked by tests (text ≥ 4.5:1) |
 | Signed and notarized releases | partial | workflow supports it once Apple secrets are added |
 | Update check (opt-in, Settings › Updates): at most once a day against GitHub Releases, notice with a link, never downloads | done | |
 | Plugin API | planned | |

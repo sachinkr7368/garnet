@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it } from "vitest";
-import { isDarkTheme, loadSettings, onSettingsChange, setting, toggleTheme, updateSetting } from "../settings";
+import { isDarkTheme, loadSettings, onSettingsChange, setAppearance, setting, toggleTheme, updateSetting } from "../settings";
 import { contrast, EDITOR_BG, monacoTheme, resolveTheme, SYNTAX, TERMINAL, toggledAppearance } from "../theme";
 import { fake } from "./fakeIpc";
 import { emitWindowTheme, setSystemDark, windowTheme } from "./setup";
@@ -50,6 +50,20 @@ describe("appearance setting", () => {
     expect(document.documentElement.dataset.theme).toBe("dark");
     await updateSetting("appearance.theme", "system");
     expect(windowTheme.set.at(-1)).toBeNull();
+    await settle();
+    expect(isDarkTheme()).toBe(false);
+  });
+
+  it("going back to System picks up a macOS change made while the theme was pinned", async () => {
+    await updateSetting("appearance.theme", "light");
+    setSystemDark(true);
+    expect(isDarkTheme()).toBe(false);
+    await setAppearance("system");
+    await settle();
+    expect(isDarkTheme()).toBe(true);
+    await setAppearance("light");
+    setSystemDark(false);
+    await setAppearance("system");
     await settle();
     expect(isDarkTheme()).toBe(false);
   });

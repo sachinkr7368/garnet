@@ -111,6 +111,16 @@ describe("trust gating", () => {
     expect(fake.calls).not.toContain("api.writeFile");
   });
 
+  it("stores no defaults while untrusted, so trusting shows the project's run.json without shadow copies", async () => {
+    fake.files.set(`${ROOT}/.garnet/run.json`, JSON.stringify({ configurations: [{ name: "Rails server", type: "rails-server" }] }));
+    await loadRunConfigs();
+    expect(fake.config.has("run-configs.json")).toBe(false);
+    await trustProject(ROOT, true);
+    await loadRunConfigs();
+    expect(configList().map((c) => [c.name, c.shared])).toEqual([["Rails server", true]]);
+    expect(fake.config.has("run-configs.json")).toBe(false);
+  });
+
   it("reads a trusted project's run.json and skips invalid entries", async () => {
     await trustProject(ROOT, true);
     fake.files.set(`${ROOT}/.garnet/run.json`, JSON.stringify({ selected: "Web", configurations: [{ name: "Web", type: "rails-server" }, { name: 3 }] }));

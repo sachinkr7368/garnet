@@ -7,7 +7,7 @@ import { attachToProcess, debugView, evaluateSelection, flushBreakpoints, gotoBr
 import { rerunAll, rerunFailed, testResultsView } from "./testresults";
 import {
   activeTab, allTabs, closeActive, closeAll, cycleTab, diffActive, events, goToDiff, handleFsChanged, monaco, navigateBack, navigateForward, openFile,
-  dirtyBuffers, focusActiveTab, recentFileList, recentLocations, restoreBuffer, saveActive, saveAll, targetEditor, unsavedTitles,
+  dirtyBuffers, focusActiveTab, recentFileList, recentLocations, restoreBuffer, restoreRecentFiles, saveActive, saveAll, targetEditor, unsavedTitles,
 } from "./editor";
 import {
   blameCurrentLine, commitView, compareWithBranch, diffActiveFile, gitOpState, goToChange, onGitChanged, refreshGit, rollbackLines, showChangeAtCaret, stageHunkAtCaret,
@@ -27,7 +27,7 @@ import { importJetBrainsKeymap, showKeymapReference, welcomeHints } from "./keym
 import { editConfigurations, launch, loadRunConfigs, newConfig, pickConfiguration, rakeTask, rerun, runs, runTests, selected } from "./run";
 import { findInFiles, replaceInFiles, searchView } from "./search";
 import { loadCodeStyle } from "./codestyle";
-import { addRecentProject, askTrust, checkTrust, editableSettingsPath, isTrusted, loadSession, onSettingsChange, trustProject, loadSettings, recentProjects, saveSession, setting, toggleTheme, updateSetting } from "./settings";
+import { addRecentProject, askTrust, checkTrust, editableSettingsPath, isTrusted, loadSession, onSettingsChange, loadSettings, recentProjects, saveSession, setting, toggleTheme, updateSetting } from "./settings";
 import { offerRestore, backupUnsaved } from "./hotexit";
 import { listenForQuit, quitFlow, type QuitHooks } from "./quit";
 import { openSettingsWindow } from "./settingsui";
@@ -129,14 +129,27 @@ function recentLocationsPopup() {
 
 function searchEverywhere() {
   if (!state.project) return showPalette();
-  quickPick({
+  // Files and actions render at once; workspace symbols are added when ruby-lsp answers (it can be busy indexing).
+  const symbols = new Map<string, Json[]>();
+  let inflight: monaco.CancellationTokenSource | null = null;
+  const picker = quickPick({
     placeholder: "Search everywhere: files, actions, symbols",
     items: async (q): Promise<PickItem[]> => {
       if (!q.trim()) return recentFileList().slice(0, 20).map((p) => ({ label: p.split("/").pop()!, description: rel(p), icon: fileIconName(p), data: { file: p } }));
-      const [files, symbols] = await Promise.all([
-        api.findFiles(q, 30),
-        lspReady() ? request<Json[] | null>("workspace/symbol", { query: q }).catch(() => null) : Promise.resolve(null),
-      ]);
+      if (lspReady() && !symbols.has(q)) {
+        symbols.set(q, []);
+        inflight?.cancel();
+        inflight = new monaco.CancellationTokenSource();
+        request<Json[] | null>("workspace/symbol", { query: q }, inflight.token).then(
+          (res) => {
+            if (!res?.length) return;
+            symbols.set(q, res);
+            void picker.refresh();
+          },
+          () => symbols.delete(q),
+        );
+      }
+      const files = await api.findFiles(q, 30);
       const actions = allCommands()
         .map((c) => ({ c, s: fuzzyScore(q, c.title) }))
         .filter((x) => x.s !== null)
@@ -144,7 +157,7 @@ function searchEverywhere() {
         .slice(0, 8);
       return [
         ...files.map((p) => ({ label: p.split("/").pop()!, description: p, icon: fileIconName(p), data: { file: abs(p) } })),
-        ...(symbols ?? []).slice(0, 30).map((s) => ({ label: s.name, description: s.containerName ?? "", detail: rel(monaco.Uri.parse(s.location.uri).fsPath), icon: "symbol-class", data: { loc: s.location } })),
+        ...(symbols.get(q) ?? []).slice(0, 30).map((s) => ({ label: s.name, description: s.containerName ?? "", detail: rel(monaco.Uri.parse(s.location.uri).fsPath), icon: "symbol-class", data: { loc: s.location } })),
         ...actions.map(({ c }) => ({ label: c.title, detail: keyLabel(c), icon: commandIcon(c), data: { cmd: c.id } })),
       ];
     },
@@ -404,7 +417,7 @@ onSettingsChange(() => void renderWelcome());
 async function persistNow(): Promise<boolean> {
   if (!state.project) return true;
   const tabs = allTabs().filter((t) => t.kind === "file");
-  return saveSession(state.project.root, { tabs: tabs.map((t) => t.path), active: activeTab()?.path, expanded: expandedPaths(), bottom: bottom.active });
+  return saveSession(state.project.root, { tabs: tabs.map((t) => t.path), active: activeTab()?.path, expanded: expandedPaths(), bottom: bottom.active, recent: recentFileList() });
 }
 const persistSession = debounce(() => void persistNow(), 500);
 
@@ -432,7 +445,6 @@ async function openProject(path: string) {
   }
   state.project = info;
   const smoke = await invoke<[string, boolean] | null>("smoke_target");
-  if (smoke && !(await checkTrust(info.root))) await trustProject(info.root, true);
   await Promise.all([loadSettings(info.root), loadCodeStyle(info.root), checkTrust(info.root)]);
   document.body.classList.add("has-project");
   getCurrentWindow().setTitle(`${info.name} — Garnet`).catch(() => {});
@@ -448,10 +460,11 @@ async function openProject(path: string) {
   if (isTrusted()) {
     loadRunConfigs();
     if (setting("ruby.lspEnabled")) startLsp();
-  } else if (!(await askTrust())) loadRunConfigs();
+  } else if (smoke || !(await askTrust())) loadRunConfigs();
   if (isTrusted() && session?.bottom && setting("appearance.restoreBottomPanel")) bottom.show(session.bottom);
   for (const p of session?.tabs ?? []) await openFile(p).catch(() => {});
   if (session?.active) await openFile(session.active).catch(() => {});
+  if (session?.recent?.length) restoreRecentFiles(session.recent);
   void offerRestore(info.root, restoreBuffer);
   events.tabsChanged.on(persistSession);
   events.activated.on(persistSession);

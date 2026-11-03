@@ -151,7 +151,8 @@ export async function loadRunConfigs() {
   sharedLoaded = splitConfigs(mergeConfigs([], shared)).shared;
   if (!local && !projectRaw) {
     configs = defaults();
-    if (configs.length) await saveRunConfigs();
+    // Untrusted, .garnet/run.json was not read: storing defaults now would shadow its configurations once trusted.
+    if (configs.length && isTrusted()) await saveRunConfigs();
   } else {
     configs = mergeConfigs(local ? validList(local.configurations, "Run configurations") : [], shared);
     selectedName = local?.selected || sharedSelected;

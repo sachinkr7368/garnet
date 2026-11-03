@@ -512,6 +512,7 @@ export async function navigateForward() {
 }
 
 export const recentFileList = () => [...recentFiles];
+export const restoreRecentFiles = (paths: string[]) => recentFiles.splice(0, recentFiles.length, ...paths.slice(0, 50));
 export const recentLocations = () => [...back].reverse();
 
 editor.onDidChangeCursorPosition((e) => {
@@ -688,9 +689,12 @@ export const activeViewTab = () => (active?.kind === "view" ? active : null);
 /// The Monaco editor that should receive editor commands: the one with keyboard focus (a SQL console, a diff side,
 /// the main editor), else the main editor when a file tab is showing; null when nothing editable is showing.
 export function targetEditor(): monaco.editor.ICodeEditor | null {
-  const focused = monaco.editor.getEditors().find((e) => e.hasTextFocus());
+  const editors = monaco.editor.getEditors();
+  const focused = editors.find((e) => e.hasTextFocus()) ?? editors.find((e) => e.getContainerDomNode().contains(document.activeElement));
   if (focused) return focused;
-  return active?.kind === "file" ? editor : null;
+  if (active?.kind === "file") return editor;
+  const el = active?.view?.el;
+  return (el && editors.find((e) => el.contains(e.getContainerDomNode()))) || null;
 }
 
 /// Puts focus back in what the active tab shows: the main editor, the diff, or a view tab's own editor/element.

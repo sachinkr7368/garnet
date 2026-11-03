@@ -706,11 +706,14 @@ export async function fileStructurePopup() {
 
 export function workspaceSymbolsPopup(kinds?: number[]) {
   if (!ready) return toast("Ruby LSP is not running.");
+  let inflight: monaco.CancellationTokenSource | null = null;
   quickPick({
     placeholder: kinds ? "Go to class or module" : "Go to symbol in project (classes, modules, methods)",
     items: async (query): Promise<PickItem[]> => {
+      inflight?.cancel();
       if (!query.trim()) return [];
-      const res: Json[] | null = await request("workspace/symbol", { query }).catch(() => null);
+      inflight = new monaco.CancellationTokenSource();
+      const res: Json[] | null = await request("workspace/symbol", { query }, inflight.token).catch(() => null);
       return (res ?? []).filter((s) => !kinds || kinds.includes(s.kind)).slice(0, 200).map((s) => ({
         label: s.name,
         description: s.containerName ?? "",

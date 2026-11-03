@@ -1187,6 +1187,37 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// src/test/gitrunargv.test.ts checks that every git_run caller in the UI has its argv shape in this fixture.
+    #[test]
+    fn every_ui_git_run_argv_passes_the_allowlist() {
+        let wt = std::env::temp_dir().join(format!("garnet-argv-wt-{}", std::process::id()));
+        let fixture: Vec<Vec<String>> = serde_json::from_str(include_str!("../../src/test/fixtures/git-run-argv.json")).unwrap();
+        for argv in fixture {
+            let argv: Vec<String> = argv.into_iter().map(|a| if a == "$WT" { wt.to_string_lossy().into_owned() } else { a }).collect();
+            assert_eq!(check_run_args(&argv, &["origin".to_string()]), Ok(()), "{argv:?}");
+            let stuck = stuck_values(&argv);
+            assert!(stuck.len() <= argv.len() && stuck[0] == argv[0], "{argv:?} -> {stuck:?}");
+        }
+    }
+
+    #[test]
+    fn shelve_and_unshelve_through_git_run() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let _g = GLOBALS.lock().unwrap();
+        let (dir, root, sh) = repo("shelve");
+        sh("echo a > a.rb && echo b > b.rb && git add . && git commit -qm init && echo a2 > a.rb && echo b2 > b.rb && git add a.rb");
+        TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let run = |v: &[&str]| block(git_run(root.clone(), s(v)));
+        run(&["stash", "push", "--include-untracked", "-m", "-m shelf", "--", "a.rb"]).unwrap();
+        assert_eq!(run(&["stash", "list", "--format=%gd%x1f%s"]).unwrap().trim(), "stash@{0}\x1fOn main: -m shelf");
+        assert_eq!(std::fs::read_to_string(dir.join("b.rb")).unwrap(), "b2\n", "only the selected path is shelved");
+        run(&["stash", "pop", "--index", "stash@{0}"]).unwrap();
+        assert_eq!(run(&["stash", "list"]).unwrap(), "");
+        assert_eq!(run(&["status", "--porcelain", "--untracked-files=no"]).unwrap(), "M  a.rb\n M b.rb\n");
+        TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn stash_message_is_glued_to_its_flag_and_abbreviations_are_refused() {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();

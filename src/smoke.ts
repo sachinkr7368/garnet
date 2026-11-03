@@ -18,7 +18,7 @@ import { stagePatch } from "./difflogic";
 import { api, Channel, invoke, type PtyEvent } from "./ipc";
 import { cachedSymbols, goToImplementation, lspCapabilities, lspReady, request } from "./lsp";
 import { buildCommand, configList, dockerUnavailable, editConfigurations, launch, newConfig, runs, safeEnv, validateConfig, type RunConfig } from "./run";
-import { isDarkTheme, isTrusted, loadSettings, setting, toggleTheme, updateSetting } from "./settings";
+import { isDarkTheme, isTrusted, loadSettings, setting, toggleTheme, trustProject, updateSetting } from "./settings";
 import { openSettingsWindow } from "./settingsui";
 import { refreshToolbar } from "./toolbar";
 import { monaco } from "./editor";
@@ -75,6 +75,8 @@ export async function runSmoke(project: string, withDebug: boolean, openProject:
     report.webviewMsBeforeSmoke = Math.round(t0);
     await Promise.race([indexReady, sleep(10000)]);
     report.indexReadyMs = Math.round(indexMs);
+    step("trust");
+    await trustFlowChecks(report, check);
 
     step("go to file and find in files");
     const goto: number[] = [];
@@ -159,6 +161,8 @@ export async function runSmoke(project: string, withDebug: boolean, openProject:
     await uiChecks(check);
     step("editor features");
     await editorFeatureChecks(check, !!ok);
+    step("search popups");
+    await searchPopupChecks("trusted", check, !!ok);
     step("git tools");
     await gitChecks(controller, check);
     step("breakpoints");
@@ -462,6 +466,8 @@ async function runToEnd(cfg: RunConfig, mode: "run" | "debug" = "run") {
 async function testTreeChecks(report: Report, check: (n: string, ok: boolean | string) => void) {
   const root = state.project!.root;
   const spec = `${root}/spec/calc_spec.rb`;
+  const missing = (await Promise.all(["spec/calc_spec.rb", "test/models/smoke_calc_test.rb"].map((f) => api.readFile(`${root}/${f}`).then(() => "", () => f)))).filter(Boolean);
+  check("sample app has the test tree fixtures", !missing.length || `missing ${missing.join(", ")}`);
   const rspec = { ...newConfig("rspec", "Smoke specs", "spec/calc_spec.rb"), bundler: false };
   substep("rspec");
   const r = await runToEnd(rspec);
@@ -682,7 +688,7 @@ async function vcsWorkflowChecks(dir: string, sh: (cmd: string) => Promise<strin
   await until(() => logState().stashes.length === 1, 5000);
   check("Shelf tab lists the shelved changes", logState().stashes[0]?.message.includes("smoke shelf") || JSON.stringify(logState().stashes));
   document.querySelector<HTMLElement>('.gitlog-view .log-row [title^="Unshelve"]')?.click();
-  await until(async () => (await read("r.rb")) === "shelved\n", 5000);
+  await until(async () => (await read("r.rb")) === "shelved\n" && logState().stashes.length === 0, 5000);
   check("unshelve restores the changes and empties the shelf", ((await read("r.rb")) === "shelved\n" && !(await api.git(dir, "stash", "list")).trim()) || String(await read("r.rb")));
   const restaged = await until(async () => (await api.gitStatus(dir)).find((e) => e.path === "r.rb")?.index === "M", 3000);
   check("unshelve keeps the staged state (--index)", !!restaged || JSON.stringify(await api.gitStatus(dir)));
@@ -1010,4 +1016,133 @@ async function githubChecks(report: Report, check: Check) {
   if (!s.signedIn) return check("github: signed-in account", "skipped: not signed in to Garnet");
   const me = await gh<{ login: string }>("GET", "/user").catch((e) => ({ login: String(e) }));
   check("github: signed-in account", (!!s.login && me.login === s.login && !!document.querySelector(".status-item.clickable")?.parentElement?.textContent?.includes(s.login)) || JSON.stringify({ login: s.login, me }));
+}
+
+/// Trust the way a user does: a new project opens untrusted (Safe Mode) and is trusted with Trust Project, with no
+/// restart; a project trusted in an earlier run (the second smoke run) is trusted at launch.
+async function trustFlowChecks(report: Report, check: Check) {
+  const root = state.project!.root;
+  report.trust = isTrusted() ? "saved" : "trust dialog";
+  if (!isTrusted()) {
+    check("untrusted: git and Ruby LSP stay off", (await invoke("git_run", { root, args: ["status"] }).then(() => false, (e) => String(e).includes("Trust project"))) && !lspReady());
+    await searchPopupChecks("untrusted", check, false);
+    await trustProject(root);
+  }
+  check("trusted: git runs right away", await api.gitBranch(root).then((b) => b !== "", (e) => String(e)));
+  const want = (await api.readFile(`${root}/.ruby-version`).catch(() => "")).trim().replace(/^ruby-/, "");
+  const ruby = await api.runCapture(root, "ruby -e 'print RUBY_VERSION'", 60).catch((e) => String(e));
+  check("trusted: commands run with the login shell's Ruby", !want || ruby === want || ruby);
+}
+
+const keystroke = (target: EventTarget, init: KeyboardEventInit) => {
+  for (const type of ["keydown", "keyup"]) target.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, ...init }));
+};
+const popupRows = () => [...document.querySelectorAll<HTMLElement>("#overlay-root .qp-item:not(.qp-error)")].filter((r) => r.getBoundingClientRect().height > 0);
+const rowText = (r: HTMLElement) => `${r.querySelector(".qp-label")?.textContent ?? ""} ${r.querySelector(".qp-desc")?.textContent ?? ""}`;
+const rowsText = () => popupRows().map(rowText).join(" | ") || "no rows";
+const selectedRow = () => popupRows().findIndex((r) => r.classList.contains("selected"));
+
+/// Search Everywhere, Go to File, Find Action, Go to Symbol and Recent Files driven by keystrokes from the editor and
+/// typed queries, like a user.
+async function searchPopupChecks(phase: string, check: Check, lsp: boolean) {
+  const root = state.project!.root;
+  const model = `${root}/app/models/post.rb`;
+  const controller = `${root}/app/controllers/posts_controller.rb`;
+  const c = (name: string, ok: boolean | string) => check(`${phase}: ${name}`, ok);
+  const fromEditor = (init: KeyboardEventInit) => {
+    editor.focus();
+    keystroke(editor.getDomNode()!.querySelector("textarea")!, init);
+  };
+  const open = (keys: () => void, placeholder: string) => {
+    keys();
+    return until(() => {
+      const i = document.querySelector<HTMLInputElement>("#overlay-root .qp-input");
+      return i && document.activeElement === i && i.placeholder.startsWith(placeholder) ? i : null;
+    }, 3000);
+  };
+  const type = async (input: HTMLInputElement, q: string) => {
+    input.value = "";
+    for (const ch of q) {
+      input.value += ch;
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: ch, inputType: "insertText" }));
+      await sleep(20);
+    }
+  };
+  const row = (match: (t: string) => boolean, ms = 10000) => until(() => popupRows().find((r) => match(rowText(r))), ms);
+  const enterOpens = async (input: HTMLInputElement, file: string) => {
+    keystroke(input, { key: "Enter", code: "Enter" });
+    return !!(await until(() => activeTab()?.path === file, 5000)) || String(activeTab()?.path);
+  };
+  const close = (input: HTMLInputElement | null) => {
+    if (input?.isConnected) keystroke(input, { key: "Escape", code: "Escape" });
+    document.querySelector("#overlay-root .qp-backdrop")?.remove();
+  };
+  const shift = { key: "Shift", code: "ShiftLeft", shiftKey: true };
+
+  await openFile(model);
+  await openFile(controller);
+  let input = await open(() => (fromEditor(shift), fromEditor(shift)), "Search everywhere");
+  c("double Shift opens Search Everywhere", !!input);
+  if (input) {
+    await type(input, "posts_controller");
+    c("Search Everywhere: posts_controller finds the controller", !!(await row((t) => t.includes("app/controllers/posts_controller.rb"))) || rowsText());
+    await type(input, "Post");
+    c("Search Everywhere: Post finds the model", !!(await row((t) => t.includes("app/models/post.rb"))) || rowsText());
+    await type(input, "recent files");
+    c("Search Everywhere: finds actions", !!(await row((t) => t.includes("Recent Files"))) || rowsText());
+    if (lsp) {
+      await type(input, "PostsController");
+      c("Search Everywhere: finds symbols", !!(await until(() => popupRows().find((r) => r.querySelector(".codicon-symbol-class") && rowText(r).startsWith("PostsController")), 30000)) || rowsText());
+    }
+    await type(input, "post");
+    await until(() => popupRows().length >= 2, 5000);
+    const before = selectedRow();
+    keystroke(input, { key: "ArrowDown", code: "ArrowDown" });
+    const down = selectedRow();
+    keystroke(input, { key: "ArrowUp", code: "ArrowUp" });
+    c("Search Everywhere: arrow keys move the selection", (before === 0 && down === 1 && selectedRow() === 0) || JSON.stringify({ before, down, up: selectedRow() }));
+    await type(input, "models/post.rb");
+    const top = await until(() => (popupRows()[0] && rowText(popupRows()[0]).includes("app/models/post.rb") ? popupRows()[0] : null), 10000);
+    c("Search Everywhere: Enter opens the selected file", top ? await enterOpens(input, model) : rowsText());
+  }
+  close(input);
+
+  input = await open(() => fromEditor({ key: "O", code: "KeyO", metaKey: true, shiftKey: true }), "Go to file");
+  c("⌘⇧O opens Go to File", !!input);
+  if (input) {
+    await type(input, "postsc");
+    const top = await until(() => (popupRows()[0] && rowText(popupRows()[0]).startsWith("posts_controller.rb") ? popupRows()[0] : null), 10000);
+    c("Go to File: Enter opens the match", top ? await enterOpens(input, controller) : rowsText());
+  }
+  close(input);
+
+  input = await open(() => fromEditor({ key: "A", code: "KeyA", metaKey: true, shiftKey: true }), "Type a command");
+  c("⌘⇧A opens Find Action", !!input);
+  if (input) {
+    await type(input, "recent files");
+    c("Find Action: finds Recent Files", !!(await row((t) => t.includes("Navigate: Recent Files"))) || rowsText());
+  }
+  close(input);
+
+  if (lsp) {
+    input = await open(() => fromEditor({ key: "o", code: "KeyO", metaKey: true, altKey: true }), "Go to symbol");
+    c("⌘⌥O opens Go to Symbol", !!input);
+    if (input) {
+      await type(input, "PostsController");
+      c("Go to Symbol: finds PostsController", !!(await row((t) => t.startsWith("PostsController"), 30000)) || rowsText());
+    }
+    close(input);
+  }
+
+  input = await open(() => fromEditor({ key: "e", code: "KeyE", metaKey: true }), "Recent files");
+  c("⌘E opens Recent Files", !!input);
+  if (input) {
+    const labels = popupRows().map((r) => r.querySelector(".qp-label")?.textContent ?? "");
+    c("Recent Files: lists the files opened earlier, current file first or second", (labels.slice(0, 2).includes("posts_controller.rb") && labels.includes("post.rb")) || rowsText());
+    c("Recent Files: the previous file is selected", popupRows()[selectedRow()]?.querySelector(".qp-label")?.textContent === "post.rb" || rowsText());
+    await type(input, "post.rb");
+    const top = await until(() => (popupRows()[0] && rowText(popupRows()[0]).startsWith("post.rb") ? popupRows()[0] : null), 5000);
+    c("Recent Files: typing filters and Enter opens", top ? await enterOpens(input, model) : rowsText());
+  }
+  close(input);
 }

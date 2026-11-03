@@ -22,7 +22,7 @@ pub fn shell_env(cwd: &Path) -> HashMap<String, String> {
             return env.clone();
         }
     }
-    let mut env = trusted.then(|| capture(cwd)).flatten().unwrap_or_else(|| std::env::vars().collect());
+    let mut env = trusted.then(|| capture(cwd)).flatten().unwrap_or_else(|| std::env::vars().filter(|(k, _)| !is_parent_shell_state(k)).collect());
     env.entry("LANG".into()).or_insert_with(|| "en_US.UTF-8".into());
     if trusted {
         *cache = Some((cwd.to_path_buf(), env.clone()));
@@ -30,11 +30,28 @@ pub fn shell_env(cwd: &Path) -> HashMap<String, String> {
     env
 }
 
+/// Session state the launching shell exported (mise's `__MISE_*` record of its own PATH changes). A login shell that
+/// inherits it believes mise already ran and leaves the system Ruby first on PATH.
+fn is_parent_shell_state(key: &str) -> bool {
+    key.starts_with("__MISE_")
+}
+
+pub fn parent_shell_state() -> Vec<String> {
+    std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()).filter(|k| is_parent_shell_state(k)).collect()
+}
+
+fn login_shell(cwd: &Path, script: &str) -> Command {
+    let mut cmd = Command::new(user_shell());
+    cmd.args(["-ilc", script]).current_dir(cwd);
+    for key in parent_shell_state() {
+        cmd.env_remove(key);
+    }
+    cmd
+}
+
 fn capture(cwd: &Path) -> Option<HashMap<String, String>> {
     const MARK: &str = "__GARNET_ENV__";
-    let mut child = Command::new(user_shell())
-        .args(["-ilc", &format!("printf '{MARK}'; env -0")])
-        .current_dir(cwd)
+    let mut child = login_shell(cwd, &format!("printf '{MARK}'; env -0"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -99,6 +116,25 @@ mod tests {
         assert!(which(&dir, "definitely-not-a-program-xyz").is_none());
         let out = command(&dir, "/bin/sh").args(["-c", "pwd -P"]).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), std::fs::canonicalize(&dir).unwrap().to_string_lossy());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn login_shell_runs_only_after_trust_and_drops_the_parent_shells_mise_state() {
+        let _g = crate::git::GLOBALS.lock().unwrap();
+        let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("garnet-env-trust-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let in_dir = |env: &HashMap<String, String>| env.get("PWD").and_then(|p| std::fs::canonicalize(p).ok()).as_deref() == Some(dir.as_path());
+        crate::git::TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(!in_dir(&shell_env(&dir)), "no login shell before trust");
+        crate::git::TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(in_dir(&shell_env(&dir)), "trusting refreshes the environment from the login shell");
+        crate::git::TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(!in_dir(&shell_env(&dir)), "the trusted capture is not served after trust is revoked");
+        std::env::set_var("__MISE_GARNET_TEST", "1");
+        let removed: Vec<_> = login_shell(&dir, "true").get_envs().filter(|(_, v)| v.is_none()).map(|(k, _)| k.to_owned()).collect();
+        std::env::remove_var("__MISE_GARNET_TEST");
+        assert!(removed.iter().any(|k| k == "__MISE_GARNET_TEST"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -121,6 +121,9 @@ pub fn pty_spawn(
         None => cmd.arg("-l"),
     }
     cmd.cwd(&cwd);
+    for key in crate::env::parent_shell_state() {
+        cmd.env_remove(key);
+    }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERM_PROGRAM", "Garnet");

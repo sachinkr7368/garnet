@@ -83,6 +83,13 @@ const JETBRAINS_ACTIONS: Record<string, string> = {
   ActivateVersionControlToolWindow: "gitLogView", "Vcs.ShowTabbedFileHistory": "fileHistory", "Vcs.RollbackChangedLines": "rollbackLines",
   VcsShowNextChangeMarker: "nextChange", VcsShowPrevChangeMarker: "prevChange", "Git.Stash": "stash", "Git.Unstash": "unstash",
   "Git.ResolveConflicts": "resolveConflicts", NextDiff: "diffNext", PreviousDiff: "diffPrev",
+  ReopenClosedTab: "reopenClosedTab", PinActiveTabToggle: "pinTab", CloseAllEditorsButActive: "closeOtherTabs", CloseAllEditors: "closeAllTabs",
+  CloseAllUnmodifiedEditors: "closeUnmodifiedTabs", CloseAllToTheRight: "closeTabsToRight", JumpToLastChange: "lastEditLocation",
+  JumpToNextChange: "nextEditLocation", RunToCursor: "runToCursor", "XDebugger.MuteBreakpoints": "muteBreakpoints", IntroduceVariable: "extractVariable",
+  ExtractMethod: "extractMethod", IntroduceConstant: "extractConstant", EditorToggleCase: "toggleCase", InsertLiveTemplate: "insertLiveTemplate",
+  UnselectPreviousOccurrence: "unselectOccurrence", CopyReference: "copyReference", CopyPaths: "copyPath", "Terminal.OpenInTerminal": "openInTerminal",
+  CompareClipboardWithSelection: "compareClipboard", CompareTwoFiles: "compareWith", EditorToggleUseSoftWraps: "toggleSoftWrap",
+  EditorToggleShowWhitespaces: "toggleWhitespace", ParameterInfo: "parameterInfo", HighlightUsagesInFile: "highlightUsages",
 };
 
 const KEY_NAMES: Record<string, string> = {

@@ -455,20 +455,34 @@ fn check_rev(rev: &str) -> Result<(), String> {
 }
 
 /// File content at `rev` (a commit, `:2` for a merge stage, "" for the index); None when it does not exist there.
+/// Decoded like the editor decodes the file (BOM, UTF-8, else Windows-1252), or in `encoding` (the buffer's), so
+/// diffs and Rollback Lines see the same characters the buffer has.
 #[tauri::command]
-pub async fn git_file_at(root: String, rev: String, path: String) -> Result<Option<String>, String> {
+pub async fn git_file_at(root: String, rev: String, path: String, encoding: Option<String>) -> Result<Option<String>, String> {
     off(move || {
         check_rev(&rev)?;
-        let spec = format!("{rev}:{}", rel(&root, &path));
-        let mut args = vec!["show"];
-        args.extend(NO_EXT);
-        args.extend([spec.as_str(), "--"]);
-        match run_git(&root, &args, None)? {
-            out if out.status.success() => Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned())),
-            _ => Ok(None),
-        }
+        Ok(file_bytes_at(&root, &rev, &rel(&root, &path))?.map(|bytes| match crate::fsops::decode(&bytes, encoding.as_deref(), false) {
+            Ok((text, ..)) => text,
+            Err(_) => String::from_utf8_lossy(&bytes).into_owned(),
+        }))
     })
     .await
+}
+
+fn file_bytes_at(root: &str, rev: &str, rel: &str) -> Result<Option<Vec<u8>>, String> {
+    let spec = format!("{rev}:{rel}");
+    let mut args = vec!["show"];
+    args.extend(NO_EXT);
+    args.extend([spec.as_str(), "--"]);
+    match run_git(root, &args, None)? {
+        out if out.status.success() => Ok(Some(out.stdout)),
+        _ => Ok(None),
+    }
+}
+
+/// Hunk patches are built from text, so they can only be applied byte for byte to plain UTF-8 files.
+pub(crate) fn utf8_patchable(bytes: &[u8]) -> bool {
+    !bytes.starts_with(b"\xEF\xBB\xBF") && std::str::from_utf8(bytes).is_ok()
 }
 
 #[derive(Serialize, PartialEq, Debug, Clone)]
@@ -753,11 +767,17 @@ fn filter_of(root: &str, rel: &str) -> Result<Option<String>, String> {
 /// Applies a zero-context patch of selected hunks to the index (hunk staging/unstaging). Files with a clean
 /// filter are refused so their content never reaches the index unfiltered.
 #[tauri::command]
-pub async fn git_stage_patch(root: String, path: String, patch: String) -> Result<(), String> {
+pub async fn git_stage_patch(root: String, path: String, patch: String, encoding: Option<String>) -> Result<(), String> {
     off(move || {
         let rel = rel(&root, &path);
         if let Some(name) = filter_of(&root, &rel)? {
             return Err(format!("This file uses the '{name}' filter; stage the whole file instead"));
+        }
+        let index = file_bytes_at(&root, "", &rel)?.unwrap_or_default();
+        let work = std::fs::read(Path::new(&root).join(&rel)).unwrap_or_default();
+        let utf8_buffer = encoding.as_deref().map_or(true, |e| e.eq_ignore_ascii_case("UTF-8"));
+        if !utf8_buffer || !utf8_patchable(&index) || !utf8_patchable(&work) {
+            return Err("Partial staging works on UTF-8 files only; stage the whole file instead".into());
         }
         git_in(&root, &["apply", "--cached", "--unidiff-zero", "--whitespace=nowarn", "-"], Some(&patch)).map(|_| ())
     })
@@ -894,6 +914,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_plain_utf8_files_take_hunk_patches() {
+        assert!(utf8_patchable("puts 'ok ✓'\n".as_bytes()));
+        assert!(!utf8_patchable(b"caf\xe9\n"));
+        assert!(!utf8_patchable(b"\xEF\xBB\xBFputs 1\n"));
+        assert!(!utf8_patchable(&[0xFF, 0xFE, b'a', 0]));
+    }
+
+    #[test]
     fn git_path_must_be_absolute_executable() {
         let _g = GLOBALS.lock().unwrap();
         assert!(git_set_path("git".into()).is_ok());
@@ -1003,13 +1031,15 @@ mod tests {
 
         // Hunk staging applies a zero-context patch to the index only.
         let patch = "diff --git a/f.rb b/f.rb\n--- a/f.rb\n+++ b/f.rb\n@@ -2 +2 @@\n-OURS\n+STAGED\n@@ -3,0 +4 @@\n+d\n";
-        block(git_stage_patch(root.clone(), format!("{root}/f.rb"), patch.into())).unwrap();
-        assert_eq!(block(git_file_at(root.clone(), String::new(), "f.rb".into())).unwrap().as_deref(), Some("a\nSTAGED\nc\nd\n"));
+        let err = block(git_stage_patch(root.clone(), format!("{root}/f.rb"), patch.into(), Some("windows-1252".into()))).unwrap_err();
+        assert!(err.starts_with("Partial staging works on UTF-8 files only"));
+        block(git_stage_patch(root.clone(), format!("{root}/f.rb"), patch.into(), Some("UTF-8".into()))).unwrap();
+        assert_eq!(block(git_file_at(root.clone(), String::new(), "f.rb".into(), None)).unwrap().as_deref(), Some("a\nSTAGED\nc\nd\n"));
         assert_eq!(std::fs::read_to_string(dir.join("f.rb")).unwrap(), "a\nOURS\nc\n");
         sh("git reset -q");
         // Filtered files (git-crypt, LFS) are never hunk-staged.
         sh("echo 'secret.env filter=crypt' > .gitattributes && echo x > secret.env");
-        let err = block(git_stage_patch(root.clone(), format!("{root}/secret.env"), "diff --git a/secret.env b/secret.env\n".into())).unwrap_err();
+        let err = block(git_stage_patch(root.clone(), format!("{root}/secret.env"), "diff --git a/secret.env b/secret.env\n".into(), None)).unwrap_err();
         assert_eq!(err, "This file uses the 'crypt' filter; stage the whole file instead");
         sh("rm .gitattributes secret.env");
 

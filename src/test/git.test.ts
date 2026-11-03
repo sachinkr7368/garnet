@@ -15,6 +15,7 @@ const ed = vi.hoisted(() => ({
   openTextDiff: vi.fn(),
   openDiffTab: vi.fn(),
   handleFsChanged: vi.fn(async () => {}),
+  meta: undefined as undefined | { encoding: string; bom: boolean },
 }));
 vi.mock("../editor", async () => {
   const fake = await import("./fakeEditor");
@@ -24,6 +25,7 @@ vi.mock("../editor", async () => {
     openTextDiff: ed.openTextDiff,
     openDiffTab: ed.openDiffTab,
     handleFsChanged: ed.handleFsChanged,
+    bufferMeta: () => ed.meta,
     editor: new Proxy(fake.editor, { get: (t, k) => (k === "getSelection" ? () => ed.selection : k === "getSelections" ? () => [] : t[k as never]) }),
   };
 });
@@ -284,6 +286,24 @@ describe("Stage Hunk in the Commit panel (B31)", () => {
     const patches = inv("git_stage_patch").map((i) => i.args.patch);
     expect(patches[0]).toContain("@@ -0,0 +1,1 @@\n+x\n");
     expect(patches[1]).toContain("@@ -3,0 +4,1 @@\n+y\n");
+  });
+
+  it("refuses buffers that are not plain UTF-8, so mojibake never reaches the index", async () => {
+    repo.status = [{ path: "g.rb", index: " ", worktree: "M" }];
+    repo.files.set(":/repo/g.rb", "a\n");
+    fake.files.set("/repo/g.rb", "a\nb\n");
+    const before = inv("git_stage_patch").length;
+    await git.refreshGit();
+    row("g.rb").querySelector<HTMLElement>('[title^="Show hunks"]')!.click();
+    await settle();
+    for (const meta of [{ encoding: "windows-1252", bom: false }, { encoding: "UTF-8", bom: true }]) {
+      ed.meta = meta;
+      document.querySelector<HTMLButtonElement>(".hunk-head button")!.click();
+      await settle();
+    }
+    ed.meta = undefined;
+    expect(inv("git_stage_patch")).toHaveLength(before);
+    expect(toasts().filter((t) => t.startsWith("Partial staging works on UTF-8 files only"))).toHaveLength(2);
   });
 });
 

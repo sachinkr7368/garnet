@@ -35,6 +35,8 @@ export const handleFsChanged = async (_paths: string[]) => {};
 export const uriFor = (p: string) => ({ toString: () => `file://${p}` });
 export const saveAll = async () => {};
 export const languageFor = () => "plaintext";
+export const encodingOf = (_path: string): string | undefined => undefined;
+export const bufferMeta = (_path: string): { encoding: string; bom: boolean } | undefined => undefined;
 export const diffEditorOptions = () => ({});
 export const viewTabs: { key: string; title: string; view: { el: HTMLElement; onClose?: () => void } }[] = [];
 export const findViewTab = (key: string) => viewTabs.find((t) => t.key === key);

@@ -1,5 +1,5 @@
 import { allTabs, editor, ensureModel, events, handlePathMoved, monaco, openFile, uriFor, activeTab } from "./editor";
-import { api, Channel, invoke, onSearchSuperseded, type RpcEvent } from "./ipc";
+import { api, Channel, invoke, onSearchSuperseded, type RpcEvent, type TextFile } from "./ipc";
 import { runInPanel } from "./run";
 import { symbolPath } from "./breadcrumbs";
 import { constantName, implementationPattern } from "./implementations";
@@ -315,6 +315,10 @@ function initializeParams() {
         },
         inlayHint: {},
         references: {},
+        documentHighlight: {},
+        selectionRange: {},
+        signatureHelp: { signatureInformation: { documentationFormat: ["markdown", "plaintext"], parameterInformation: { labelOffsetSupport: true } }, contextSupport: true },
+        onTypeFormatting: {},
         documentSymbol: { hierarchicalDocumentSymbolSupport: true },
         formatting: {},
         rename: { prepareSupport: true },
@@ -335,6 +339,42 @@ function initializeParams() {
       linters: setting("inspections.rubocop") ? ["rubocop"] : [],
     },
   };
+}
+
+/// LSP SelectionRange (innermost first, linked by `parent`) → Monaco's list for one position.
+export function selectionChain(r: Json): monaco.languages.SelectionRange[] {
+  const out: monaco.languages.SelectionRange[] = [];
+  for (let cur = r; cur; cur = cur.parent) out.push({ range: toRange(cur.range) });
+  return out;
+}
+
+export function signatureHelp(res: Json): monaco.languages.SignatureHelp {
+  return {
+    activeSignature: res.activeSignature ?? 0,
+    activeParameter: res.activeParameter ?? 0,
+    signatures: res.signatures.map((sig: Json) => ({
+      label: sig.label,
+      documentation: markdown(sig.documentation),
+      parameters: (sig.parameters ?? []).map((p: Json) => ({ label: p.label, documentation: markdown(p.documentation) })),
+      activeParameter: sig.activeParameter,
+    })),
+  };
+}
+
+/// textDocument/onTypeFormatting for a typed character, when ruby-lsp offers it for that character; null otherwise.
+export async function onTypeEdits(model: monaco.editor.ITextModel, position: monaco.IPosition, ch: string): Promise<monaco.editor.IIdentifiedSingleEditOperation[] | null> {
+  const p = capabilities.documentOnTypeFormattingProvider;
+  if (!live(model) || !p || (p.firstTriggerCharacter !== ch && !p.moreTriggerCharacter?.includes(ch))) return null;
+  const opts = model.getOptions();
+  const res: TextEdit[] | null = await request("textDocument/onTypeFormatting", { ...docPos(model, position), ch, options: { tabSize: opts.tabSize, insertSpaces: opts.insertSpaces } }).catch(() => null);
+  return (res ?? []).filter((e) => e.newText !== "$0").map((e) => ({ range: toRange(e.range), text: e.newText }));
+}
+
+/// Edits to a file that is not open: applied to its text and saved back in its own encoding and BOM. A file that
+/// was not loaded whole or did not decode cleanly is refused rather than damaged.
+export function closedFileEdit(file: TextFile, edits: TextEdit[]): { text: string; encoding: string; bom: boolean } {
+  if (file.truncated || file.lossy) throw new Error("the file is too large or not valid text; open it and edit it by hand");
+  return { text: applyTextEdits(file.text, edits), encoding: file.encoding, bom: file.bom };
 }
 
 /// Document sync
@@ -469,8 +509,8 @@ export async function applyWorkspaceEdit(edit: Json, collect = false): Promise<m
       if (collect) for (const e of edits) forMonaco.push({ resource: model.uri, textEdit: { range: toRange(e.range), text: e.newText }, versionId: undefined });
       else model.pushEditOperations([], edits.map((e) => ({ range: toRange(e.range), text: e.newText })), () => null);
     } else {
-      const text = await api.readFile(parsed.fsPath);
-      await api.writeFile(parsed.fsPath, applyTextEdits(text, edits));
+      const out = closedFileEdit(await api.openText(parsed.fsPath), edits);
+      await api.writeFile(parsed.fsPath, out.text, out.encoding, out.bom);
     }
   }
   for (const [from, to] of renames) {
@@ -482,13 +522,26 @@ export async function applyWorkspaceEdit(edit: Json, collect = false): Promise<m
 }
 
 const CMD_APPLY_ACTION = "garnet.applyCodeAction";
-monaco.editor.registerCommand(CMD_APPLY_ACTION, async (_accessor, action: Json) => {
+async function applyCodeAction(action: Json) {
   let a = action;
   if (!a.edit && !a.command && capabilities.codeActionProvider?.resolveProvider) a = await request("codeAction/resolve", a);
   if (a.edit) await applyWorkspaceEdit(a.edit);
   const cmd = typeof a.command === "string" ? a : a.command;
   if (cmd?.command) await request("workspace/executeCommand", { command: cmd.command, arguments: cmd.arguments }).catch((e) => toast(String(e), "error"));
-});
+}
+monaco.editor.registerCommand(CMD_APPLY_ACTION, (_accessor, action: Json) => applyCodeAction(action));
+
+/// Extract Variable / Method (⌥⌘V / ⌥⌘M): ruby-lsp's refactor.extract code action for the selection.
+export async function extractRefactor(kind: "Variable" | "Method") {
+  const model = editor.getModel();
+  const sel = editor.getSelection();
+  if (!model || !sel || !live(model)) return toast(`Extract ${kind} needs Ruby LSP running on a Ruby file.`);
+  if (sel.isEmpty()) return toast(`Select the ${kind === "Variable" ? "expression" : "statements"} to extract first (⌥↑ extends the selection).`);
+  const actions: Json[] | null = await request("textDocument/codeAction", { textDocument: docId(model), range: lspRange(sel), context: { diagnostics: [], only: ["refactor.extract"] } }).catch(() => null);
+  const action = actions?.find((x) => new RegExp(`extract ${kind}`, "i").test(x.title));
+  if (!action) return toast(`Ruby LSP can't extract a ${kind.toLowerCase()} from this selection.`);
+  await applyCodeAction(action);
+}
 
 /// Monaco providers
 
@@ -585,6 +638,37 @@ for (const lang of LANGS) {
       return locations(
         await request("textDocument/references", { ...docPos(model, position), context: { includeDeclaration: context.includeDeclaration } }, token).catch(() => null),
       );
+    },
+  });
+
+  monaco.languages.registerDocumentHighlightProvider(lang, {
+    async provideDocumentHighlights(model, position, token) {
+      if (!live(model) || !capabilities.documentHighlightProvider) return null;
+      const res: Json[] | null = await request("textDocument/documentHighlight", docPos(model, position), token).catch(() => null);
+      return res?.map((d) => ({ range: toRange(d.range), kind: (d.kind ?? 1) - 1 })) ?? null;
+    },
+  });
+
+  monaco.languages.registerSelectionRangeProvider(lang, {
+    async provideSelectionRanges(model, positions, token) {
+      if (!live(model) || !capabilities.selectionRangeProvider) return null;
+      const res: Json[] | null = await request("textDocument/selectionRange", { textDocument: docId(model), positions: positions.map(lspPos) }, token).catch(() => null);
+      return res?.map(selectionChain) ?? null;
+    },
+  });
+
+  monaco.languages.registerSignatureHelpProvider(lang, {
+    signatureHelpTriggerCharacters: ["(", ","],
+    signatureHelpRetriggerCharacters: [")"],
+    async provideSignatureHelp(model, position, token, context) {
+      if (!live(model) || !capabilities.signatureHelpProvider) return null;
+      const res = await request(
+        "textDocument/signatureHelp",
+        { ...docPos(model, position), context: { triggerKind: context.triggerKind, triggerCharacter: context.triggerCharacter, isRetrigger: context.isRetrigger } },
+        token,
+      ).catch(() => null);
+      if (!res?.signatures?.length) return null;
+      return { value: signatureHelp(res), dispose() {} };
     },
   });
 

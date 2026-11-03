@@ -132,6 +132,16 @@ export function captureNextKey(fn: (key: string) => void, invalid?: (key: string
   capturing = { fn, invalid };
 }
 
+/// Editor commands act only when focus is in an editor or nowhere in particular (the tab strip, the editor area).
+/// With focus in the Project tree, a tool window or a field, the key goes there instead (⌘⌫ deletes the selected
+/// file in the tree, not a line of the open file).
+export function editorHasFocus(t: HTMLElement | null): boolean {
+  if (!t || t === document.body || t === document.documentElement) return true;
+  if (t.closest?.(".monaco-editor")) return true;
+  if (t.matches?.("input, textarea, select, [contenteditable]")) return false;
+  return !!t.closest?.("#editor-area, #tabs");
+}
+
 export function installKeyHandler() {
   window.addEventListener(
     "keydown",
@@ -164,8 +174,7 @@ export function installKeyHandler() {
       if (document.querySelector("#overlay-root > [data-modal]")) return;
       const id = keymap().get(key);
       if (!id) return;
-      const t = e.target as HTMLElement;
-      if (registry.get(id)?.editor && t?.matches?.("input, textarea, select") && !t.closest(".monaco-editor")) return;
+      if (registry.get(id)?.editor && !editorHasFocus(e.target as HTMLElement)) return;
       e.preventDefault();
       e.stopPropagation();
       runCommand(id);

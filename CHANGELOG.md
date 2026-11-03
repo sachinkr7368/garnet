@@ -4,7 +4,7 @@ All notable changes to Garnet are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Garnet uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] (0.2.3)
+## [0.2.3] - 2026-11-03
 
 ### Added
 - Responsive layout: editor tabs, the bottom tool-window strip and the Terminal/Run subtabs move tabs that do not fit into a `»` menu, and tool-window toolbars do the same with icons. Truncated text shows in full on hover.
@@ -71,7 +71,7 @@ All notable changes to Garnet are documented here. The format follows
 - First release: project tree, editor tabs, Go to File, Find in Files, integrated terminals, ruby-lsp intelligence, git panel with branch and worktree switchers, run configurations, rdbg debugger, Rails navigation, and the JetBrains macOS keymap with import.
 - Project trust: opening a folder never runs its code until you trust it.
 
-[Unreleased]: https://github.com/sachinkr7368/garnet/compare/v0.2.2...HEAD
+[0.2.3]: https://github.com/sachinkr7368/garnet/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/sachinkr7368/garnet/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/sachinkr7368/garnet/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/sachinkr7368/garnet/compare/v0.1.0...v0.2.0

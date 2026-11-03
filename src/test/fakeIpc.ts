@@ -50,6 +50,8 @@ export const api = new Proxy(
   {
     readFile: (path: string) => (fake.files.has(path) ? Promise.resolve(fake.files.get(path)!) : missing(path)),
     writeFile: async (path: string, content: string) => void fake.files.set(path, content),
+    openText: (path: string) =>
+      fake.files.has(path) ? Promise.resolve({ text: fake.files.get(path)!, encoding: "UTF-8", bom: false, size: fake.files.get(path)!.length, truncated: false, lossy: false }) : missing(path),
     createPath: async () => {},
     deletePath: async (path: string) => void fake.files.delete(path),
     configRead: async (name: string) => fake.config.get(name) ?? null,

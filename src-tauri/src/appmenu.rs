@@ -99,7 +99,7 @@ pub fn menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             p(PredefinedMenuItem::select_all(app, None))?,
             p(PredefinedMenuItem::separator(app))?,
         ],
-        &[sub("Find", vec![I("find", "Find…"), I("replace", "Replace…"), I("findNext", "Find Next"), I("findPrevious", "Find Previous"), S, I("findInFiles", "Find in Files…"), I("replaceInFiles", "Replace in Files…")])],
+        &[sub("Find", vec![I("find", "Find…"), I("replace", "Replace…"), I("findNext", "Find Next"), I("findPrevious", "Find Previous"), S, I("findInFiles", "Find in Files…"), I("replaceInFiles", "Replace in Files…")]), S, I("toggleCase", "Toggle Case")],
         vec![],
     )?;
     let view = submenu(
@@ -135,6 +135,9 @@ pub fn menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
                     C("toggleToolWindowBars", "Tool Window Bars"),
                     C("toggleStatusBar", "Status Bar"),
                     C("toggleBreadcrumbs", "Breadcrumbs"),
+                    S,
+                    I("toggleSoftWrap", "Soft-Wrap"),
+                    I("toggleWhitespace", "Show Whitespaces"),
                 ],
             ),
             sub("Theme", vec![C("themeSystem", "System"), C("themeLight", "Light"), C("themeDark", "Dark")]),
@@ -151,6 +154,8 @@ pub fn menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         &[
             I("back", "Back"),
             I("forward", "Forward"),
+            I("lastEditLocation", "Last Edit Location"),
+            I("nextEditLocation", "Next Edit Location"),
             S,
             I("searchEverywhere", "Search Everywhere"),
             I("goToClass", "Class…"),
@@ -219,6 +224,7 @@ pub fn menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             S,
             I("toggleBreakpoint", "Toggle Line Breakpoint"),
             I("viewBreakpoints", "View Breakpoints…"),
+            I("muteBreakpoints", "Mute Breakpoints"),
         ],
     )?;
     let git = submenu(
@@ -250,7 +256,7 @@ pub fn menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             p(PredefinedMenuItem::fullscreen(app, None))?,
             p(PredefinedMenuItem::separator(app))?,
         ],
-        &[I("nextTab", "Select Next Tab"), I("prevTab", "Select Previous Tab"), I("hideAll", "Hide All Tool Windows"), I("lastToolWindow", "Jump to Last Tool Window"), S],
+        &[I("reopenClosedTab", "Reopen Closed Tab"), I("nextTab", "Select Next Tab"), I("prevTab", "Select Previous Tab"), I("hideAll", "Hide All Tool Windows"), I("lastToolWindow", "Jump to Last Tool Window"), S],
         vec![p(PredefinedMenuItem::bring_all_to_front(app, None))?],
     )?;
     let help = submenu(

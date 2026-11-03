@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
-import { allCommands, commandIcon, commands, installKeyHandler, keyLabel, keysFor, lastKeyCommand, runCommand, runEditorAction, showPalette } from "./commands";
+import { allCommands, commandIcon, commands, editorHasFocus, installKeyHandler, keyLabel, keysFor, lastKeyCommand, runCommand, runEditorAction, showPalette } from "./commands";
 import { attachToProcess, debugView, evaluateSelection, flushBreakpoints, gotoBreakpoint, loadBreakpoints, restartDebug, resume, step, stopAllSessions, stopDebug, toggleBreakpoint, toggleBreakpointEnabled, viewBreakpoints } from "./debug";
 import { rerunAll, rerunFailed, testResultsView } from "./testresults";
 import {
@@ -21,6 +21,7 @@ import { symbolSearch } from "./symbolsearch";
 import { goToTest, loadRoutes, routesView, showRelated } from "./rails";
 import { dbProjectOpened } from "./db";
 import "./railsprovider";
+import "./basics";
 import { runRailsGenerator } from "./generators";
 import { loadMigrations, migrationsView } from "./migrations";
 import { sendToRailsConsole } from "./railsconsole";
@@ -552,10 +553,10 @@ window.addEventListener("keydown", (e) => {
   void toggleViewMode(currentViewMode() as Exclude<ViewMode, "">);
 });
 
-/// A focused text field outside the editor (terminal, tool window inputs, commit message) keeps editor shortcuts:
-/// the menu would otherwise send ⌘F/⌘G to the editor behind it.
+/// Editor actions from the menu follow the key handler's focus rule: with focus in a field, the terminal or the
+/// Project tree, ⌘F/⌘G stay there instead of reaching the editor behind it.
 export const menuBlockedByFocus = (id: string, el = document.activeElement) =>
-  !!allCommands().find((c) => c.id === id)?.editor && !!el?.closest("input, textarea, select, .xterm") && !el.closest(".monaco-editor");
+  !!allCommands().find((c) => c.id === id)?.editor && !editorHasFocus(el as HTMLElement | null);
 
 /// Native menu bar: items are command ids, plus "recent:<path>". A shortcut the key handler already ran also
 /// reaches the menu when the web view passes it on, so that echo is dropped; dialogs block the menu like they

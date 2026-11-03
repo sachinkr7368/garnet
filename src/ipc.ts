@@ -97,6 +97,15 @@ export interface OpState {
   conflicts: string[];
 }
 
+export interface TextFile {
+  text: string;
+  encoding: string;
+  bom: boolean;
+  size: number;
+  truncated: boolean;
+  lossy: boolean;
+}
+
 export interface MergeInput {
   symlink: boolean;
   nonUtf8?: boolean;
@@ -109,7 +118,10 @@ export interface MergeInput {
 export const api = {
   listDir: (path: string) => invoke<DirEntry[]>("list_dir", { path }),
   readFile: (path: string) => invoke<string>("read_file", { path }),
-  writeFile: (path: string, content: string) => invoke<void>("write_file", { path, content }),
+  writeFile: (path: string, content: string, encoding?: string, bom?: boolean) => invoke<void>("write_file", { path, content, encoding, bom }),
+  openText: (path: string, encoding?: string) => invoke<TextFile>("open_text", { path, encoding }),
+  copyPath: (from: string, to: string) => invoke<void>("copy_path", { from, to }),
+  trashPath: (path: string) => invoke<void>("trash_path", { path }),
   createPath: (path: string, dir: boolean) => invoke<void>("create_path", { path, dir }),
   renamePath: (from: string, to: string) => invoke<void>("rename_path", { from, to }),
   deletePath: (path: string) => invoke<void>("delete_path", { path }),
@@ -128,11 +140,11 @@ export const api = {
   gitStatus: (root: string) => invoke<GitStatusEntry[]>("git_status", { root }),
   gitBranch: (root: string) => invoke<string>("git_branch", { root }),
   gitShow: (root: string, path: string, rev: string) => invoke<string>("git_show", { root, path, rev }),
-  gitFileAt: (root: string, rev: string, path: string) => invoke<string | null>("git_file_at", { root, rev, path }),
+  gitFileAt: (root: string, rev: string, path: string, encoding?: string) => invoke<string | null>("git_file_at", { root, rev, path, encoding }),
   gitLog: (root: string, opts: LogOpts) => invoke<LogCommit[]>("git_log", { root, opts }),
   gitDiffFiles: (root: string, spec: string[]) => invoke<ChangedFile[]>("git_diff_files", { root, spec }),
   gitCommitDetails: (root: string, rev: string) => invoke<CommitDetails>("git_commit_details", { root, rev }),
-  gitStagePatch: (root: string, path: string, patch: string) => invoke<void>("git_stage_patch", { root, path, patch }),
+  gitStagePatch: (root: string, path: string, patch: string, encoding?: string) => invoke<void>("git_stage_patch", { root, path, patch, encoding }),
   gitOpState: (root: string) => invoke<OpState>("git_op_state", { root }),
   gitMergeInput: (root: string, path: string) => invoke<MergeInput>("git_merge_input", { root, path }),
   git: (root: string, ...args: string[]) => invoke<string>("git_run", { root, args }),

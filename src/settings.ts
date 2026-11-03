@@ -49,6 +49,8 @@ export const SCHEMA: SettingDef[] = [
   { key: "editor.semanticHighlighting", page: "Editor/General", label: "Semantic highlighting (ruby-lsp)", type: "boolean", default: true, description: "Colors methods, parameters, locals and constants from ruby-lsp's analysis." },
   { key: "editor.inlayHints", page: "Editor/General", label: "Inlay hints (ruby-lsp)", type: "boolean", default: true, description: "Shows implicit rescue classes and hash shorthand values." },
   { key: "editor.liveTemplates", page: "Editor/General", label: "Live templates (Ruby, RSpec, ERB snippets)", type: "boolean", default: true },
+  { key: "editor.autoInsertEnd", page: "Editor/General", label: "Insert 'end' after def, class, do, if… on Enter", type: "boolean", default: true },
+  { key: "editor.tabLimit", page: "Editor/General", label: "Tab limit (0 = no limit)", type: "number", min: 0, max: 100, default: 0, description: "Past the limit, the least recently used unmodified, unpinned tab closes. RubyMine uses 10." },
   { key: "editor.trimTrailingWhitespace", page: "Editor/General", label: "Strip trailing whitespace on save", type: "boolean", default: true },
   { key: "editor.insertFinalNewline", page: "Editor/General", label: "Ensure a final newline on save", type: "boolean", default: true },
   { key: "editor.formatOnSave", page: "Editor/General", label: "Reformat Ruby files on save (RuboCop via ruby-lsp)", type: "boolean", default: false },

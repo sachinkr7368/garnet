@@ -1,9 +1,9 @@
-import { ask } from "@tauri-apps/plugin-dialog";
 import { handlePathMoved, openFile } from "./editor";
 import { api, type DirEntry } from "./ipc";
 import { globToRegExp, setting } from "./settings";
 import { basename, dirname, rel, state } from "./state";
-import { contextMenu, fileIcon, h, icon, iconButton, inputBox, toast } from "./ui";
+import { bottom, contextMenu, fileIcon, h, icon, iconButton, inputBox, modal, toast } from "./ui";
+import { newTerminal } from "./terminal";
 import { railsTreeEl, refreshRailsTree } from "./railsview";
 
 interface Node {
@@ -15,7 +15,7 @@ interface Node {
   childBox: HTMLElement;
 }
 
-export const treeEl = h("div", { class: "tree", tabIndex: 0 });
+export const treeEl = h("div", { class: "tree", tabIndex: 0, role: "tree", "aria-label": "Project" });
 const railsToggle = iconButton("list-tree", "Rails View (Models, Controllers, Views, …)", () => toggleRailsView());
 let railsMode = false;
 railsToggle.hidden = true;
@@ -52,11 +52,13 @@ let gitDecor = new Map<string, string>();
 function createNode(entry: DirEntry, depth: number): Node {
   const row = h("div", { class: "tree-row", style: `padding-left:${depth * 14 + 6}px` });
   const node: Node = { entry, depth, expanded: false, children: null, row, childBox: h("div", { class: "tree-children" }) };
+  // Like RubyMine's single-click open: focus stays in the tree (keys keep working); double-click goes to the editor.
   row.addEventListener("click", () => {
     select(entry.path);
     if (entry.dir) toggle(node);
-    else openFile(entry.path);
+    else void openFile(entry.path).then(() => treeEl.focus({ preventScroll: true }));
   });
+  row.addEventListener("dblclick", () => !entry.dir && void openFile(entry.path));
   row.addEventListener("contextmenu", (e) => showMenu(e, node));
   nodes.set(entry.path, node);
   paintRow(node);
@@ -67,6 +69,9 @@ function paintRow(node: Node) {
   const { entry } = node;
   const status = gitDecor.get(entry.path);
   node.row.className = `tree-row${selected === entry.path ? " selected" : ""}${status ? ` git-${status}` : ""}`;
+  node.row.setAttribute("role", "treeitem");
+  node.row.setAttribute("aria-selected", String(selected === entry.path));
+  if (entry.dir) node.row.setAttribute("aria-expanded", String(node.expanded));
   node.row.replaceChildren(
     entry.dir ? icon(node.expanded ? "chevron-down" : "chevron-right", "twisty") : h("span", { class: "twisty" }),
     entry.dir ? icon(node.expanded ? "folder-opened" : "folder", "file-icon dir") : fileIcon(entry.name),
@@ -210,16 +215,35 @@ async function renameNode(node: Node) {
   }
 }
 
-async function deleteNode(node: Node) {
-  const ok = await ask(`Delete ${rel(node.entry.path)}${node.entry.dir ? " and everything in it" : ""}? This cannot be undone.`, {
-    title: "Delete",
-    kind: "warning",
-    okLabel: "Delete",
-    cancelLabel: "Cancel",
+/// RubyMine's Delete… dialog: Cancel has focus, so Enter or Escape keeps the file.
+export function confirmTrash(what: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let backdrop: HTMLElement | null = null;
+    const done = (yes: boolean) => {
+      backdrop?.remove();
+      backdrop = null;
+      treeEl.focus({ preventScroll: true });
+      resolve(yes);
+    };
+    const cancel = h("button", { class: "btn primary", onclick: () => done(false) }, "Cancel");
+    backdrop = modal(
+      h(
+        "div",
+        { class: "st-dialog trash-dialog" },
+        h("div", { class: "rc-title" }, icon("trash"), " Delete"),
+        h("div", { class: "st-page" }, `Move ${what} to the Trash?`),
+        h("div", { class: "rc-actions" }, h("button", { class: "btn", onclick: () => done(true) }, "Move to Trash"), cancel),
+      ),
+      () => done(false),
+      { autofocus: cancel },
+    );
   });
-  if (!ok) return;
+}
+
+async function deleteNode(node: Node) {
+  if (!(await confirmTrash(`${rel(node.entry.path)}${node.entry.dir ? " and everything in it" : ""}`))) return;
   try {
-    await api.deletePath(node.entry.path);
+    await api.trashPath(node.entry.path);
     handlePathMoved(node.entry.path, null);
     await refreshTree([node.entry.path]);
   } catch (e) {
@@ -227,15 +251,111 @@ async function deleteNode(node: Node) {
   }
 }
 
+/// Project tree clipboard (⌘C / ⌘V copies files, as in RubyMine).
+let copied: string | null = null;
+
+function copyNode(node: Node) {
+  copied = node.entry.path;
+  void navigator.clipboard.writeText(node.entry.path).catch(() => {});
+}
+
+export const copyName = (name: string) => (name.lastIndexOf(".") > 0 ? `${name.slice(0, name.lastIndexOf("."))}_copy${name.slice(name.lastIndexOf("."))}` : `${name}_copy`);
+
+async function pasteInto(node?: Node) {
+  const from = copied;
+  if (!from) return toast("Copy a file in the Project tree first (⌘C).");
+  const dir = targetDir(node);
+  const name = basename(from);
+  const proposal = nodes.has(`${dir}/${name}`) ? copyName(name) : name;
+  const dot = proposal.lastIndexOf(".");
+  const next = await inputBox(`Copy ${name} to ${rel(dir) || "/"}`, proposal, dot > 0 ? dot : undefined);
+  if (!next) return;
+  const to = `${dir}/${next}`;
+  try {
+    await api.copyPath(from, to);
+    await refreshTree([to]);
+    await revealInTree(to);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+export function openInTerminal(path = selected ?? state.project?.root) {
+  if (!path) return;
+  const node = nodes.get(path);
+  newTerminal(node && !node.entry.dir ? dirname(path) : path);
+  bottom.show("terminal");
+}
+
+export const selectedTreePath = () => selected;
+
+/// Rows in display order: the keyboard walks these.
+export function visibleNodes(): Node[] {
+  const out: Node[] = [];
+  const walk = (n: Node) => {
+    for (const c of n.children ?? []) {
+      out.push(c);
+      if (c.expanded) walk(c);
+    }
+  };
+  if (rootNode) walk(rootNode);
+  return out;
+}
+
+let typed = "";
+let typedAt = 0;
+
+/// RubyMine Project view keys: arrows, ←/→ collapse/expand, Enter/F4 open, type to select, ⌘⌫ delete,
+/// ⇧F6/F2 rename, ⌘C/⌘V copy and paste files. ⌘⌫ moves to the Trash after a confirm that defaults to Cancel.
+treeEl.addEventListener("keydown", (e) => {
+  const list = visibleNodes();
+  const i = list.findIndex((n) => n.entry.path === selected);
+  const cur = list[i];
+  const move = (j: number) => {
+    const n = list[Math.max(0, Math.min(list.length - 1, j))];
+    if (!n) return;
+    select(n.entry.path);
+    n.row.scrollIntoView({ block: "nearest" });
+  };
+  const mods = e.metaKey || e.ctrlKey || e.altKey;
+  const k = e.key;
+  if (k === "ArrowDown" && !mods) move(i + 1);
+  else if (k === "ArrowUp" && !mods) move(i < 0 ? 0 : i - 1);
+  else if (k === "Home") move(0);
+  else if (k === "End") move(list.length - 1);
+  else if (k === "ArrowRight" && cur) cur.entry.dir && !cur.expanded ? void toggle(cur, true) : cur.entry.dir && move(i + 1);
+  else if (k === "ArrowLeft" && cur) {
+    if (cur.entry.dir && cur.expanded) void toggle(cur, false);
+    else move(list.indexOf(nodes.get(dirname(cur.entry.path))!));
+  } else if ((k === "Enter" || k === "F4") && !mods && cur) cur.entry.dir ? void toggle(cur) : void openFile(cur.entry.path);
+  else if (k === "Backspace" && e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && cur) void deleteNode(cur);
+  else if (((k === "F6" && e.shiftKey) || (k === "F2" && !e.shiftKey)) && !mods && cur) void renameNode(cur);
+  else if (e.metaKey && !e.shiftKey && !e.altKey && e.code === "KeyC" && cur) copyNode(cur);
+  else if (e.metaKey && !e.shiftKey && !e.altKey && e.code === "KeyV") void pasteInto(cur);
+  else if (k === "Escape" && typed) typed = "";
+  else if (k.length === 1 && !mods && k !== " ") {
+    typed = Date.now() - typedAt > 800 ? k.toLowerCase() : typed + k.toLowerCase();
+    typedAt = Date.now();
+    const order = [...list.slice(Math.max(i, 0)), ...list.slice(0, Math.max(i, 0))];
+    const hit = order.find((n) => n.entry.name.toLowerCase().startsWith(typed));
+    if (hit) move(list.indexOf(hit));
+  } else return;
+  e.preventDefault();
+  e.stopPropagation();
+});
+
 function showMenu(e: MouseEvent, node: Node) {
   select(node.entry.path);
   contextMenu(e, [
     { label: "New File…", run: () => newPath(false, node) },
     { label: "New Folder…", run: () => newPath(true, node) },
     null,
-    { label: "Rename…", run: () => renameNode(node) },
-    { label: "Delete…", run: () => deleteNode(node) },
+    { label: "Copy", shortcut: "⌘C", run: () => copyNode(node) },
+    { label: "Paste", shortcut: "⌘V", run: () => void pasteInto(node), disabled: !copied },
+    { label: "Rename…", shortcut: "⇧F6", run: () => renameNode(node) },
+    { label: "Delete…", shortcut: "⌘⌫", run: () => deleteNode(node) },
     null,
+    { label: "Open in Terminal", icon: "terminal", command: "openInTerminal", run: () => openInTerminal(node.entry.path) },
     { label: "Copy Path", run: () => navigator.clipboard.writeText(node.entry.path) },
     { label: "Copy Relative Path", run: () => navigator.clipboard.writeText(rel(node.entry.path)) },
     { label: "Reveal in Finder", run: () => api.revealInFinder(node.entry.path) },

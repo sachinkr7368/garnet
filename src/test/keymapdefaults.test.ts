@@ -127,6 +127,16 @@ const RUBYMINE_MACOS: [string, string, string][] = [
   ["Collapse code block", "collapseRegion", "cmd+-"],
   ["Expand all", "expandAll", "cmd+shift+="],
   ["Collapse all", "collapseAll", "cmd+shift+-"],
+  ["Last Edit Location", "lastEditLocation", "cmd+shift+backspace"],
+  ["Run To Cursor", "runToCursor", "alt+f9"],
+  ["Introduce Variable", "extractVariable", "cmd+alt+v"],
+  ["Extract Method", "extractMethod", "cmd+alt+m"],
+  ["Toggle Case", "toggleCase", "cmd+shift+u"],
+  ["Deselect Last Occurrence", "unselectOccurrence", "ctrl+shift+g"],
+  ["Copy Paths", "copyPath", "cmd+shift+c"],
+  ["Copy Reference", "copyReference", "cmd+alt+shift+c"],
+  ["Introduce Constant (extract-constant.html)", "extractConstant", "cmd+alt+c"],
+  ["Insert Live Template (using-live-templates.html)", "insertLiveTemplate", "cmd+j"],
 ];
 
 describe("RubyMine macOS default keymap", () => {
@@ -193,6 +203,10 @@ describe("RubyMine macOS default keymap", () => {
     expect(menuBlockedByFocus("find", monacoInput)).toBe(false);
     expect(menuBlockedByFocus("find", document.body)).toBe(false);
     expect(menuBlockedByFocus("saveAll", input)).toBe(false);
+    const tree = document.createElement("div");
+    tree.id = "tree";
+    tree.tabIndex = 0;
+    expect(menuBlockedByFocus("find", tree)).toBe(true);
   });
 
   it("only unbinds Monaco defaults on keys Garnet owns", () => {

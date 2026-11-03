@@ -64,6 +64,39 @@ export function diffLines(a: string[], b: string[], maxD = 4000): LineHunk[] {
   return hunks;
 }
 
+const noCR = (l: string) => (l.endsWith("\r") ? l.slice(0, -1) : l);
+/// Gutter diff of HEAD vs a buffer, ignoring CRLF vs LF (an eol=crlf checkout must not look like a whole-file change).
+export const gutterDiff = (head: string, buffer: string) => diffLines(splitLines(head).map(noCR), splitLines(buffer).map(noCR));
+
+/// `text` with CRLF turned into LF when `base` (index content) has none, so hunk staging never writes CRLF into an LF index.
+export const matchEol = (base: string, text: string) => (base.includes("\r\n") ? text : text.replace(/\r\n/g, "\n"));
+
+/// A model edit with 1-based lines and columns.
+export interface LineEdit {
+  startLine: number;
+  startCol: number;
+  endLine: number;
+  endCol: number;
+  text: string;
+}
+
+/// Edits that put back the HEAD lines of every hunk touching buffer lines [r0, r1) (0-based), diffed from the current
+/// texts so stale gutter state can never rewrite the wrong lines. Apply them together as one undoable edit.
+export function rollbackEdits(head: string, buffer: string, r0: number, r1: number, eol: string): LineEdit[] {
+  const old = splitLines(head).map(noCR);
+  const cur = splitLines(buffer).map(noCR);
+  const count = cur.length;
+  const col = (line: number) => cur[line - 1].length + 1;
+  return diffLines(old, cur)
+    .filter((hk) => overlapsNew(hk, r0, r1))
+    .map((hk) => {
+      const lines = old.slice(hk.a0, hk.a1);
+      if (hk.b1 < count) return { startLine: hk.b0 + 1, startCol: 1, endLine: hk.b1 + 1, endCol: 1, text: lines.map((l) => l + eol).join("") };
+      if (hk.b0 > 0) return { startLine: hk.b0, startCol: col(hk.b0), endLine: count, endCol: col(count), text: lines.map((l) => eol + l).join("") };
+      return { startLine: 1, startCol: 1, endLine: count, endCol: col(count), text: lines.join(eol) };
+    });
+}
+
 export const hunkKind = (h: LineHunk) => (h.a0 === h.a1 ? "added" : h.b0 === h.b1 ? "deleted" : "modified");
 
 /// True when hunk h touches lines [r0, r1) of the new text (empty ranges count when they touch).
@@ -132,6 +165,13 @@ export function buildPatch(path: string, oldText: string, newText: string, chose
 export function stagePatch(path: string, index: string, work: string, r0: number, r1: number): string | null {
   const chosen = patchHunks(index, work).filter((h) => overlapsNew(h, r0, r1));
   return chosen.length ? buildPatch(path, index, work, chosen) : null;
+}
+
+/// Patch unstaging the part of `index` that replaced HEAD lines [a0, a1); null when nothing there is staged. Keyed on the
+/// HEAD side, which stays put while other hunks are unstaged.
+export function unstagePatch(path: string, head: string, index: string, a0: number, a1: number): string | null {
+  const chosen = patchHunks(head, index).filter((h) => overlapsNew(swapHunk(h), a0, a1));
+  return chosen.length ? buildPatch(path, index, head, chosen.map(swapHunk)) : null;
 }
 
 /// Conflict file segments from a diff3-style merge: plain lines, or a conflict with the three sides.

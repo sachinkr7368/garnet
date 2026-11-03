@@ -396,6 +396,12 @@ body:not(.has-project) #run-widget {
 }
 .switcher .name {
   font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.switcher > :not(.name) {
+  flex: none;
 }
 .switcher .codicon-chevron-down {
   color: var(--dim);
@@ -923,7 +929,52 @@ mark {
 }
 .commit-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+}
+.commit-actions .amend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--dim);
+}
+.split-btn {
+  display: flex;
+}
+.split-btn > .btn:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.split-btn > .btn.split {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  padding: 0 4px;
+  width: auto;
+  height: auto;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.worktree-row .change-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.changes:focus {
+  outline: none;
+}
+.rollback-dialog .qp-list {
+  max-height: 260px;
+}
+.rollback-note,
+.rollback-delete {
+  padding: 6px 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .git-gutter-added,

@@ -298,6 +298,7 @@ pub fn run() {
             git::git_stage,
             git::git_unstage,
             git::git_commit,
+            git::git_rollback,
             git::git_fetch,
             git::git_run,
             github::github_signed_in,

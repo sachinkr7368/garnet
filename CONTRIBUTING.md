@@ -22,10 +22,16 @@ judged on two things: does it fully work, and does it keep the app fast.
 
 ## Development
 
+Requirements: macOS 11+, Rust (stable), Node 22+, pnpm 10, Xcode command line
+tools.
+
 ```sh
 pnpm install
-pnpm tauri dev
+pnpm tauri dev      # development app with Vite hot reload
+pnpm tauri build    # Garnet.app and a .dmg under src-tauri/target/release/bundle/
 ```
+
+Report security problems privately, as described in [SECURITY.md](SECURITY.md).
 
 ## Tests
 
@@ -39,8 +45,11 @@ pnpm test                          # vitest, frontend logic (jsdom)
 pnpm test:watch                    # vitest in watch mode
 cd src-tauri
 cargo clippy --all-targets -- -D warnings
-cargo test                         # Rust: search, index, git, shell env, config
+cargo test                         # Rust: search, index, git, shell env, config, database
 ```
+
+PostgreSQL and MySQL integration tests run only when `GARNET_TEST_PG_URL` /
+`GARNET_TEST_MYSQL_URL` are set, and are skipped otherwise.
 
 - Frontend tests live in `src/test/*.test.ts`. `src/test/setup.ts` loads
   `index.html` into jsdom and replaces the Tauri backend with an in-memory fake
@@ -65,6 +74,11 @@ GARNET_SMOKE=/tmp/report.json GARNET_SMOKE_DEBUG=1 \
 cat /tmp/report.json
 ```
 
+The general form is `GARNET_SMOKE=<report.json> <app binary> <rails app>`;
+`GARNET_SMOKE_DEBUG=1` is optional and adds the debugger checks below. Run it
+against a throwaway app, since the checks create and delete temporary files and
+rows.
+
 The harness ships in release builds, so the same command verifies a CI-built or
 installed app: unpack `Garnet_universal.app.tar.gz` from the release (or use
 `/Applications/Garnet.app`) and run its `Contents/MacOS/garnet` binary. Only
@@ -81,6 +95,7 @@ the `GARNET_SMOKE*` variables switch it on; without them none of it runs.
   the report and quits. Keep it below any outer timeout you wrap the run in.
 - A check passes when its value is `true`; anything else is the failure detail,
   or `skipped: …` when the machine can't run it (no Docker, not signed in).
+- The `layout` step resizes the window (800, 1024, 1280 and 1440 wide, with default and minimum panels), opens every tool window and dialog, and fails on page scroll, clipped elements or a hidden active bottom tab. It needs the `core:window:allow-set-size` capability.
 - Smoke-only hooks: CSV/JSON exports skip the save dialog and are written to
   `<report>.export.csv` (Rust, only when `GARNET_SMOKE` is set), and the SQL
   console's dangerous-statement confirmation is answered by `dbSmokeHooks.ask`
@@ -121,3 +136,4 @@ mounted at `/app`) is used for the compose run check.
 - No telemetry and no network calls the user didn't trigger.
 - Minimal comments; code should read clearly. Match the surrounding style.
 - Don't commit build output, screenshots or scratch files.
+- Pull requests use the template in `.github/pull_request_template.md`; user-facing changes also get a line under Unreleased in `CHANGELOG.md`.

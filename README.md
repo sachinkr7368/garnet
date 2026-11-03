@@ -1,8 +1,18 @@
 # Garnet
 
-Garnet is a fast, open-source Ruby and Rails IDE for macOS. It covers the daily
-workflow of a full Ruby IDE (navigation, Ruby intelligence, run configurations,
-a real debugger, git) in a native-feeling app that starts in about half a second.
+[![Latest release](https://img.shields.io/github/v/release/sachinkr7368/garnet)](https://github.com/sachinkr7368/garnet/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/sachinkr7368/garnet)](LICENSE)
+[![CI](https://github.com/sachinkr7368/garnet/actions/workflows/ci.yml/badge.svg)](https://github.com/sachinkr7368/garnet/actions/workflows/ci.yml)
+![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
+
+Garnet is a free, open-source Ruby and Rails IDE for macOS. It starts in about
+half a second and gives you a RubyMine-style workflow: run configurations, a
+real debugger, git and GitHub, Rails tools and a database console. No account,
+no subscription, no telemetry.
+
+**[Download the latest release](https://github.com/sachinkr7368/garnet/releases/latest)** (universal DMG for Apple Silicon and Intel), then see [Install](#install).
+
+<!-- screenshots -->
 
 Built with Tauri 2 (Rust) + TypeScript, Monaco for editing, xterm.js for
 terminals, [ruby-lsp](https://github.com/Shopify/ruby-lsp) for Ruby
@@ -65,24 +75,42 @@ Feature status compared with RubyMine. The full checklist lives in
 | Run configurations (Rails server/console, RSpec, Minitest, Rake, Ruby script, Sidekiq, custom) with env vars, .env files, version manager, bundler | Done |
 | Debugger (rdbg over DAP): breakpoints, conditional breakpoints, logpoints, break on exceptions, step, frames, variables, watches, evaluate, inline values, attach to process/Docker | Done |
 | Tests: gutter run/debug icons on `it`/`describe`/`test`, run file/test/all, clickable `file:line` output | Done |
-| Git: changes panel, stage/unstage, commit, diff view, gutter markers, blame, branch/worktree switchers, fetch/pull/push | Done |
-| GitHub: sign in (gh token or PAT, Keychain), create PR, open on GitHub, gists, clone | Done |
-| GitHub PR list/review panel, OAuth device flow | Planned |
+| Git: Commit tool window with include checkboxes and amend, stage/unstage, diff view, gutter markers, blame, log, branch/worktree switchers, fetch/pull/push, merge conflict resolver | Done |
+| Rollback (⌥⌘Z) of files, folders or all changes, gutter Rollback Lines, Shelve/Unshelve (git stash). Rollback restores HEAD; it is not RubyMine's Local History | Done |
+| GitHub: sign in (gh token, OAuth device flow or PAT; token in Keychain), create PR, open on GitHub, gists, clone | Done |
+| Pull Requests tool window: list, inline review comments, resolve threads, checkout, merge | Done |
+| Edit PR title/description, reviewers and labels, PR timeline, suggested changes | Planned |
 | Rails: related files, routes browser, generators dialog, partial / i18n / route / association navigation, Rails project view, migrations panel, send to Rails console | Done |
-| Database tool window (PostgreSQL, MySQL, SQLite): database.yml connections, schema browser, table viewer, SQL console with read-only and destructive-statement safety | Done |
-| Settings window (searchable, global + per-project), keymap editor with presets, command palette, recent projects, session restore | Done |
+| Database tool window, docked on the right (PostgreSQL, MySQL, SQLite): database.yml connections, schema browser, table data and SQL consoles as editor tabs, cell editing with a confirmation step, read-only and destructive-statement safety | Done |
+| Database: ER diagram, manual transaction mode | Planned |
+| Settings window (searchable, global + per-project), command palette, recent projects, session restore | Done |
+| RubyMine macOS keymap, rebindable in Settings › Keymap (VS Code preset, JetBrains XML import) | Done |
+| Icons and keymap-aware tooltips on toolbars and tool windows | Done |
+| Prompt for unsaved files on quit and logout; hot exit restores unsaved buffers after a crash or force quit | Done |
+| Responsive layout: tabs and toolbar icons that do not fit move into `»` overflow menus | Done |
+| Search Everywhere and Recent Files fixes (case-insensitive file match, results shown while ruby-lsp is busy, Recent Files kept across restarts) and trust-gated terminals (0.2.3) | Done |
 | Light / Dark / System theme (follows macOS live), Toggle Theme in the toolbar | Done |
-| Refactorings beyond rename | Planned |
+| Refactorings beyond rename, spell checking | Planned |
 
 ## Install
 
 1. Download `Garnet_<version>_universal.dmg` (Apple Silicon and Intel) from the
-   GitHub Releases page.
+   [latest release](https://github.com/sachinkr7368/garnet/releases/latest).
 2. Open the DMG and drag Garnet to Applications.
-3. Release builds are ad-hoc signed unless the maintainer has configured a
-   Developer ID. macOS will refuse to open such an app on first launch: right-click
-   Garnet in Applications, choose **Open**, then confirm **Open** in the
-   dialog. You only need to do this once.
+3. Garnet is not notarized, so macOS blocks it on first launch. Open System
+   Settings › Privacy & Security, scroll to the message about Garnet and click
+   **Open Anyway**. Alternatively, clear the quarantine flag:
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/Garnet.app
+   ```
+
+Requirements: macOS 11 or later, and Ruby installed through rbenv, asdf, mise,
+chruby or rvm. Install the language server and debugger gems for your Ruby:
+
+```sh
+gem install ruby-lsp debug
+```
 
 Open a project from the welcome screen, with ⌘O, or from a terminal:
 
@@ -90,8 +118,7 @@ Open a project from the welcome screen, with ⌘O, or from a terminal:
 open -a Garnet --args /path/to/your/rails/app
 ```
 
-For Ruby intelligence install ruby-lsp for your Ruby (Garnet offers a one-click
-install if it is missing): `gem install ruby-lsp`. Like the official VS Code
+Garnet offers a one-click `gem install ruby-lsp` if the server is missing. Like the official VS Code
 extension, Garnet runs the global `ruby-lsp` (not `bundle exec`) with the
 project's Ruby, picked from mise, rbenv, asdf, chruby or rvm by the project's
 `mise.toml`, `.tool-versions` or `.ruby-version` (override it in Settings ›
@@ -104,7 +131,7 @@ Run configurations are stored in Garnet's own settings, not in your repository.
 Tick "Store as project file (share via VCS)" on a configuration to write it to
 `.garnet/run.json` for your team.
 
-## Build from source
+## Building from source
 
 Requirements: macOS 11+, Rust (stable), Node 22+, pnpm 10, Xcode command line tools.
 
@@ -116,9 +143,11 @@ pnpm tauri build    # produces Garnet.app and a .dmg under src-tauri/target/rele
 
 ## Keyboard shortcuts
 
-The default keymap follows the JetBrains macOS keymap for every action Garnet
-implements; actions Garnet does not have are left unbound. Help › Keymap
-Reference lists every action with its current shortcut.
+The default keymap is the RubyMine macOS keymap for every action Garnet
+implements; actions Garnet does not have are left unbound. A VS Code preset is
+available, and every shortcut is rebindable in Settings › Keymap. Help › Keymap
+Reference lists every action with its current shortcut. Some function-key
+shortcuts (such as ⌥F12) need fn on a default macOS keyboard.
 
 | Action | Shortcut |
 | --- | --- |
@@ -136,7 +165,7 @@ Reference lists every action with its current shortcut.
 | Step over / into / out, resume | F8 / F7 / ⇧F8, F9 or ⌘⌥R |
 | Toggle / view breakpoints, evaluate | ⌘F8 / ⌘⇧F8, ⌥F8 |
 | Commit / push / update project / VCS popup | ⌘K / ⌘⇧K / ⌘T / ⌃V |
-| Tool windows | ⌘1 project, ⌘3 find, ⌘4 run, ⌘5 debug, ⌘6 problems, ⌘7 structure, ⌘9 commit, ⌥F12 terminal |
+| Tool windows | ⌘1 project, ⌘3 find, ⌘4 run, ⌘5 debug, ⌘6 problems, ⌘7 structure, ⌘9 git log, ⌥F12 terminal |
 | Tabs / switcher / hide all tool windows | ⌘W, ⌘⇧[ / ⌘⇧], ⌃⇥, ⌘⇧F12 |
 | Settings | ⌘, |
 

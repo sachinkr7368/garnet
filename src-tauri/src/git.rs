@@ -767,7 +767,7 @@ fn filter_of(root: &str, rel: &str) -> Result<Option<String>, String> {
 /// Applies a zero-context patch of selected hunks to the index (hunk staging/unstaging). Files with a clean
 /// filter are refused so their content never reaches the index unfiltered.
 #[tauri::command]
-pub async fn git_stage_patch(root: String, path: String, patch: String) -> Result<(), String> {
+pub async fn git_stage_patch(root: String, path: String, patch: String, encoding: Option<String>) -> Result<(), String> {
     off(move || {
         let rel = rel(&root, &path);
         if let Some(name) = filter_of(&root, &rel)? {
@@ -775,7 +775,8 @@ pub async fn git_stage_patch(root: String, path: String, patch: String) -> Resul
         }
         let index = file_bytes_at(&root, "", &rel)?.unwrap_or_default();
         let work = std::fs::read(Path::new(&root).join(&rel)).unwrap_or_default();
-        if !utf8_patchable(&index) || !utf8_patchable(&work) {
+        let utf8_buffer = encoding.as_deref().map_or(true, |e| e.eq_ignore_ascii_case("UTF-8"));
+        if !utf8_buffer || !utf8_patchable(&index) || !utf8_patchable(&work) {
             return Err("Partial staging works on UTF-8 files only; stage the whole file instead".into());
         }
         git_in(&root, &["apply", "--cached", "--unidiff-zero", "--whitespace=nowarn", "-"], Some(&patch)).map(|_| ())
@@ -1030,13 +1031,15 @@ mod tests {
 
         // Hunk staging applies a zero-context patch to the index only.
         let patch = "diff --git a/f.rb b/f.rb\n--- a/f.rb\n+++ b/f.rb\n@@ -2 +2 @@\n-OURS\n+STAGED\n@@ -3,0 +4 @@\n+d\n";
-        block(git_stage_patch(root.clone(), format!("{root}/f.rb"), patch.into())).unwrap();
+        let err = block(git_stage_patch(root.clone(), format!("{root}/f.rb"), patch.into(), Some("windows-1252".into()))).unwrap_err();
+        assert!(err.starts_with("Partial staging works on UTF-8 files only"));
+        block(git_stage_patch(root.clone(), format!("{root}/f.rb"), patch.into(), Some("UTF-8".into()))).unwrap();
         assert_eq!(block(git_file_at(root.clone(), String::new(), "f.rb".into(), None)).unwrap().as_deref(), Some("a\nSTAGED\nc\nd\n"));
         assert_eq!(std::fs::read_to_string(dir.join("f.rb")).unwrap(), "a\nOURS\nc\n");
         sh("git reset -q");
         // Filtered files (git-crypt, LFS) are never hunk-staged.
         sh("echo 'secret.env filter=crypt' > .gitattributes && echo x > secret.env");
-        let err = block(git_stage_patch(root.clone(), format!("{root}/secret.env"), "diff --git a/secret.env b/secret.env\n".into())).unwrap_err();
+        let err = block(git_stage_patch(root.clone(), format!("{root}/secret.env"), "diff --git a/secret.env b/secret.env\n".into(), None)).unwrap_err();
         assert_eq!(err, "This file uses the 'crypt' filter; stage the whole file instead");
         sh("rm .gitattributes secret.env");
 

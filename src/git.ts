@@ -1,11 +1,11 @@
 import { ask } from "@tauri-apps/plugin-dialog";
 import DiffWorker from "./diffworker?worker";
-import { activeTab, editor, encodingOf, events, handleFsChanged, handlePathMoved, monaco, openDiffTab, openFile, openTextDiff } from "./editor";
+import { activeTab, bufferMeta, editor, encodingOf, events, handleFsChanged, handlePathMoved, monaco, openDiffTab, openFile, openTextDiff } from "./editor";
 import { buildTree, displayLine, filterPaths, hunkKind, matchEol, patchHunks, patchLines, rollbackEdits, splitLines, stagePatch, unstagePatch, type LineHunk } from "./difflogic";
 import { api, invoke, type ChangedFile, type GitStatusEntry, type OpState } from "./ipc";
 import { abortOperation, acceptSide, continueOperation, openResolver, showConflicts } from "./merge";
 import { abs, basename, debounce, rel, root, state } from "./state";
-import { setGitDecorations } from "./tree";
+import { confirmTrash, setGitDecorations } from "./tree";
 import { askTrust, isTrusted, onSettingsChange, setting, updateSetting } from "./settings";
 import { branches, dropNewStash, headLabel, listWorktrees, stashTop, newWorktree, openWorktree, pushCurrent, removeWorktree, type Worktree } from "./toolbar";
 import { contextMenu, fileIcon, h, icon, iconButton, inputBox, modal, quickPick, statusSlot, tip, toast } from "./ui";
@@ -456,8 +456,8 @@ async function addToGitignore(paths: string[]) {
 async function deleteFiles(paths: string[]) {
   const files = paths.filter((p) => entryFor(p)?.worktree !== "D" && entryFor(p)?.index !== "D");
   if (!files.length) return toast("The selected files are already deleted.");
-  if (!(await ask(`Delete ${files.length === 1 ? files[0] : `${files.length} files`}? This cannot be undone.`, { title: "Delete", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" }))) return;
-  for (const p of files) await api.deletePath(abs(p)).then(() => handlePathMoved(abs(p), null), (e) => toast(String(e), "error"));
+  if (!(await confirmTrash(files.length === 1 ? files[0] : `${files.length} files`))) return;
+  for (const p of files) await api.trashPath(abs(p)).then(() => handlePathMoved(abs(p), null), (e) => toast(String(e), "error"));
   selection.clear();
   refreshGit();
 }
@@ -482,6 +482,14 @@ window.addEventListener(
 
 /// A path's content at a revision, decoded like its open buffer (so diffs and Rollback Lines match the editor).
 const fileAt = (rev: string, path: string) => api.gitFileAt(root(), rev, path, encodingOf(path));
+
+const UTF8_ONLY = "Partial staging works on UTF-8 files only; stage the whole file instead";
+/// Hunk patches are built from decoded text, so only plain UTF-8 buffers round-trip to the index bytes.
+async function applyPatch(path: string, patch: string) {
+  const m = bufferMeta(path);
+  if (m && (m.encoding !== "UTF-8" || m.bom)) throw UTF8_ONLY;
+  await api.gitStagePatch(root(), path, patch, m?.encoding);
+}
 
 /// Partial staging: hunks of index→working copy (stage) or HEAD→index (unstage)
 
@@ -524,7 +532,7 @@ async function renderHunks(box: HTMLElement, r: Row) {
                     const [a2, b2] = await hunkTexts(r);
                     const patch = r.staged ? unstagePatch(r.path, a2, b2, hk.a0, hk.a1) : stagePatch(r.path, a2, b2, hk.b0, hk.b1);
                     if (patch === null) toast(r.staged ? "This change is not staged any more." : "This change is already staged.");
-                    else await api.gitStagePatch(root(), path, patch);
+                    else await applyPatch(path, patch);
                   } catch (err) {
                     toast(String(err), "error");
                   }
@@ -930,7 +938,7 @@ async function stageHunk(hk: LineHunk) {
     if (index === null) return toast("The file is not tracked yet; stage the whole file from the Commit tool window.");
     const patch = stagePatch(rel(t.path), index, matchEol(index, t.model.getValue()), hk.b0, hk.b1);
     if (patch === null) return toast("This change is already staged.");
-    await api.gitStagePatch(root(), t.path, patch);
+    await applyPatch(t.path, patch);
     toast("Hunk staged.");
     refreshGit();
   } catch (e) {

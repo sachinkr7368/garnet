@@ -381,10 +381,11 @@ export const metaOf = (model: monaco.editor.ITextModel): FileMeta => fileMeta.ge
 export const lockedReason = (m: FileMeta) => (m.large ? "it is larger than 10 MB" : m.lossy ? `it is not valid ${m.encoding}; reopen it with the right encoding` : null);
 const metaFrom = (file: TextFile, forced?: boolean): FileMeta => ({ encoding: file.encoding, bom: file.bom, large: file.truncated, lossy: file.lossy, forced });
 /// The encoding of an open file's buffer, for reading other versions of it (git) the same way.
-export const encodingOf = (path: string) => {
+export const bufferMeta = (path: string) => {
   const model = monaco.editor.getModel(uriFor(path));
-  return model ? fileMeta.get(model)?.encoding : undefined;
+  return model ? fileMeta.get(model) : undefined;
 };
+export const encodingOf = (path: string) => bufferMeta(path)?.encoding;
 
 export async function ensureModel(path: string): Promise<monaco.editor.ITextModel | null> {
   const uri = uriFor(path);

@@ -23,6 +23,7 @@ const emitter = () => ({ on: () => {}, emit: () => {} });
 export const events = new Proxy({} as Record<string, ReturnType<typeof emitter>>, { get: () => emitter() });
 export const editor = deep("editor");
 export const activeTab = () => null;
+export const activeViewTab = (): { key: string } | null => null;
 export const allTabs = () => [];
 export const openFile = async () => {};
 export const ensureModel = async () => null;

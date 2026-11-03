@@ -1,0 +1,368 @@
+[
+  {
+    "sql": "SELECT 1 /*M!; COMMIT; SET SESSION TRANSACTION READ WRITE; DELETE FROM t */",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "MariaDB executable comment hides statements"
+  },
+  {
+    "sql": "SELECT 1 /*M!100000 ; DELETE FROM t */",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "versioned MariaDB comment"
+  },
+  {
+    "sql": "SELECT 1 /*!; DROP TABLE t */",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "MySQL executable comment"
+  },
+  {
+    "sql": "/*!99999 SELECT 1, */ DROP TABLE t",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "gated comment fools the first keyword"
+  },
+  {
+    "sql": "/*!50000 DELETE FROM t */",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "gated DELETE"
+  },
+  {
+    "sql": "SELECT 'a\\'' INTO DUMPFILE '/tmp/x' -- '",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "run",
+    "note": "INTO hidden from the no-backslash reading"
+  },
+  {
+    "sql": "SELECT 'a\\' INTO DUMPFILE '/tmp/x' -- '",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "run",
+    "note": "INTO hidden from the backslash reading"
+  },
+  {
+    "sql": "UPDATE t SET a = '\\' WHERE id = 1 -- '",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "WHERE only in one reading"
+  },
+  {
+    "sql": "WITH x AS (SELECT 1 AS no) DELETE FROM t",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "skip word across a paren"
+  },
+  {
+    "sql": "WITH x AS (SELECT 1 AS for) UPDATE t SET a = 1",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "skip word across a paren"
+  },
+  {
+    "sql": "SELECT 1--1; COMMIT; SET SESSION TRANSACTION READ WRITE; DELETE FROM t",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "MySQL -- rule (B10)"
+  },
+  {
+    "sql": "SELECT 1; DROP TABLE x",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "two statements"
+  },
+  {
+    "sql": "EXPLAIN SELECT 1; DELETE FROM users",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "two statements"
+  },
+  {
+    "sql": "SELECT '\\'; DROP TABLE t; --'",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "backslash reading splits"
+  },
+  {
+    "sql": "SELECT '\\'; DROP TABLE t; --'",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "backslash reading splits"
+  },
+  {
+    "sql": "SELECT $$a$$; DROP TABLE t",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "dollar quote then statement"
+  },
+  {
+    "sql": "DELETE FROM t",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "DELETE FROM t",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "DELETE FROM t",
+    "dialect": "sqlite",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "DROP TABLE t",
+    "dialect": "sqlite",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "TRUNCATE t",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "ALTER TABLE t ADD c int",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "UPDATE t SET a = 1",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "UPDATE t SET a = (SELECT b FROM u WHERE u.id = 1)",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "WHERE only in a subquery"
+  },
+  {
+    "sql": "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "writing CTE"
+  },
+  {
+    "sql": "SELECT * FROM t INTO OUTFILE '/tmp/x'",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "run"
+  },
+  {
+    "sql": "SELECT * INTO t2 FROM t",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "run"
+  },
+  {
+    "sql": "SELECT * FROM t FOR UPDATE",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "run",
+    "note": "locking read"
+  },
+  {
+    "sql": "SELECT * FROM t LOCK IN SHARE MODE",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "run",
+    "note": "locking read"
+  },
+  {
+    "sql": "PRAGMA query_only = OFF",
+    "dialect": "sqlite",
+    "readOnly": "refuse",
+    "writable": "run"
+  },
+  {
+    "sql": "DELETE FROM t WHERE id = 1",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "run"
+  },
+  {
+    "sql": "UPDATE t SET a = 1 WHERE id = 2",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "run"
+  },
+  {
+    "sql": "INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "run"
+  },
+  {
+    "sql": "INSERT INTO t VALUES (1) ON DUPLICATE KEY UPDATE a = 2",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "run"
+  },
+  {
+    "sql": "SELECT 1",
+    "dialect": "postgres",
+    "readOnly": "allow",
+    "writable": "run"
+  },
+  {
+    "sql": "SELECT 1",
+    "dialect": "mysql",
+    "readOnly": "allow",
+    "writable": "run"
+  },
+  {
+    "sql": "SELECT 1",
+    "dialect": "sqlite",
+    "readOnly": "allow",
+    "writable": "run"
+  },
+  {
+    "sql": "SELECT 'drop table t; delete from t'",
+    "dialect": "postgres",
+    "readOnly": "allow",
+    "writable": "run"
+  },
+  {
+    "sql": "SELECT 1 -- ; DROP TABLE t\n",
+    "dialect": "mysql",
+    "readOnly": "allow",
+    "writable": "run"
+  },
+  {
+    "sql": "/*!40101 SELECT 1 */",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "run",
+    "note": "gated body: some servers run nothing, so read-only refuses it"
+  },
+  {
+    "sql": "WITH a AS (SELECT 1) SELECT * FROM a",
+    "dialect": "postgres",
+    "readOnly": "allow",
+    "writable": "run"
+  },
+  {
+    "sql": "SELECT `a;b` FROM t",
+    "dialect": "mysql",
+    "readOnly": "allow",
+    "writable": "run"
+  },
+  {
+    "sql": "EXPLAIN ANALYZE DELETE FROM t WHERE id = 1",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "run",
+    "note": "EXPLAIN ANALYZE runs the statement"
+  },
+  {
+    "sql": "EXPLAIN ANALYZE UPDATE t SET a = 1",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "EXPLAIN (ANALYZE) INSERT INTO t VALUES (1)",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "run"
+  },
+  {
+    "sql": "EXPLAIN ANALYZE EXECUTE p",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "EXPLAIN SELECT 1",
+    "dialect": "postgres",
+    "readOnly": "allow",
+    "writable": "run"
+  },
+  {
+    "sql": "DO $$BEGIN DELETE FROM t; END$$",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm",
+    "note": "the body runs server-side and can't be inspected"
+  },
+  {
+    "sql": "PREPARE p AS DELETE FROM t WHERE id = 1",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "EXECUTE p",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "CALL cleanup()",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "CALL cleanup()",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "PREPARE s FROM @q",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "EXECUTE s",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "COPY t FROM PROGRAM 'curl -s example.test'",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "confirm"
+  },
+  {
+    "sql": "COPY t TO STDOUT",
+    "dialect": "postgres",
+    "readOnly": "refuse",
+    "writable": "run"
+  },
+  {
+    "sql": "SELECT load_file('/etc/passwd')",
+    "dialect": "mysql",
+    "readOnly": "refuse",
+    "writable": "run",
+    "note": "reads a server file"
+  }
+]

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { classify, defaultReadOnly, isLocalHost, splitStatements, statementAt, toCsv, toJson, tokenize, withAutoLimit } from "../sqlsafety";
+import attacks from "./fixtures/sql-attacks.json";
+import { classify, defaultReadOnly, isLocalHost, splitStatements, sqlLiteral, statementAt, statementCount, toCsv, toJson, toMarkdown, toSqlInsert, tokenize, withAutoLimit } from "../sqlsafety";
 
 const texts = (sql: string, d?: "postgres" | "mysql" | "sqlite") => splitStatements(sql, d).map((s) => s.text);
 
@@ -133,10 +134,62 @@ describe("read-only defaults", () => {
 
 describe("export formatting", () => {
   it("escapes CSV per RFC 4180", () => {
-    expect(toCsv(["a", "b"], [["1", null], ['x "y"', "c,d"], ["line\nbreak", ""]])).toBe('a,b\r\n1,\r\n"x ""y""","c,d"\r\n"line\nbreak",\r\n');
+    expect(toCsv(["a", "b"], [["1", null], ['x "y"', "c,d"], ["line\nbreak", ""]])).toBe('a,b\r\n1,\r\n"x ""y""","c,d"\r\n"line\nbreak",""\r\n');
   });
   it("writes JSON arrays of objects", () => {
     expect(JSON.parse(toJson(["id", "name", "id"], [["1", null, "2"]]))).toEqual([{ id: "1", name: null, id_2: "2" }]);
     expect(JSON.parse(toJson(["a"], []))).toEqual([]);
+  });
+});
+
+describe("MySQL -- comments (B10)", () => {
+  it("needs whitespace after -- so 1--1 cannot hide a second statement", () => {
+    const attack = "SELECT 1--1; COMMIT; SET SESSION TRANSACTION READ WRITE; DELETE FROM t";
+    expect(splitStatements(attack, "mysql")).toHaveLength(4);
+    expect(classify(attack, "mysql")).toMatchObject({ dangerous: true, kind: "write" });
+    expect(texts("SELECT 1 -- ; x\nSELECT 2", "mysql")).toEqual(["SELECT 1 -- ; x\nSELECT 2"]);
+    expect(texts("SELECT 1 --\t; x", "mysql")).toEqual(["SELECT 1 --\t; x"]);
+    expect(texts("SELECT 1--1; SELECT 2", "postgres")).toEqual(["SELECT 1--1; SELECT 2"]);
+  });
+});
+
+describe("exports (B74)", () => {
+  it("CSV tells NULL from an empty string and defuses spreadsheet formulas", () => {
+    expect(toCsv(["v"], [[null], [""], ["=HYPERLINK(1)"], ["+1+1"], ["@SUM(A1)"], ["-5"], ["1e3"], ["-x"]])).toBe('v\r\n\r\n""\r\n\'=HYPERLINK(1)\r\n\'+1+1\r\n\'@SUM(A1)\r\n-5\r\n1e3\r\n\'-x\r\n');
+    expect(toCsv(["v"], [["=1,2"]])).toBe('v\r\n"\'=1,2"\r\n');
+  });
+
+  it("JSON renames duplicate columns without colliding with a real column", () => {
+    expect(JSON.parse(toJson(["a", "a", "a_2"], [["1", "2", "3"]]))).toEqual([{ a: "1", a_2: "2", a_2_2: "3" }]);
+    expect(Object.keys(JSON.parse(toJson(["a_2", "a", "a"], [["1", "2", "3"]]))[0])).toEqual(["a_2", "a", "a_3"]);
+  });
+
+  it("SQL INSERT and Markdown", () => {
+    expect(toSqlInsert("t", ["id", "name"], [["1", "it's"], ["2", null]], "sqlite")).toBe(`INSERT INTO "t" ("id", "name") VALUES ('1', 'it''s');\nINSERT INTO "t" ("id", "name") VALUES ('2', NULL);\n`);
+    expect(toMarkdown(["a", "b"], [["x|y", null], ["1\n2", ""]])).toBe("| a | b |\n| --- | --- |\n| x\\|y | NULL |\n| 1<br>2 |  |\n");
+  });
+});
+
+describe("SQL INSERT literals", () => {
+  it("quotes values so no server setting can misread them", () => {
+    expect(sqlLiteral("it's \\ $g$", "postgres")).toBe("$g0$it's \\ $g$$g0$");
+    expect(sqlLiteral("a$g", "postgres")).toBe("$g0$a$g$g0$");
+    expect(sqlLiteral("x", "postgres")).toBe("$g$x$g$");
+    expect(sqlLiteral("é'\\", "mysql")).toBe("_utf8mb4 X'c3a9275c'");
+    expect(sqlLiteral("", "mysql")).toBe("''");
+    expect(sqlLiteral(null, "sqlite")).toBe("NULL");
+    for (const v of ["it's", "a$g", "$g$", "x\\'; DROP TABLE t; --"]) {
+      const sql = `SELECT ${sqlLiteral(v, "postgres")}`;
+      expect(splitStatements(sql, "postgres")).toHaveLength(1);
+      expect(tokenize(sql, "postgres").filter((t) => t.type === "string")).toHaveLength(1);
+    }
+  });
+});
+
+describe("attack corpus shared with the Rust checks", () => {
+  it.each(attacks as { sql: string; dialect: "postgres" | "mysql" | "sqlite"; readOnly: string; writable: string }[])("$dialect: $sql", ({ sql, dialect, readOnly, writable }) => {
+    const multi = statementCount(sql, dialect) !== 1;
+    const c = classify(sql, dialect);
+    expect({ readOnly: multi || c.kind !== "read" ? "refuse" : "allow", writable: multi || c.dangerous ? "confirm" : "run" }).toEqual({ readOnly, writable });
   });
 });

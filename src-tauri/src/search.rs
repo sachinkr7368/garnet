@@ -15,6 +15,7 @@ use tauri::State;
 const MAX_MATCHES: usize = 5000;
 const MAX_LINE: usize = 400;
 const MAX_RANGES: usize = 200;
+const MAX_LINES: usize = 500;
 
 #[derive(Default)]
 pub struct SearchState {
@@ -45,7 +46,8 @@ pub struct LineMatch {
 #[derive(Serialize, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SearchEvent {
-    File { path: String, matches: Vec<LineMatch> },
+    /// `truncated`: the file has more matches than listed (over MAX_LINES lines or MAX_RANGES on a line).
+    File { path: String, matches: Vec<LineMatch>, truncated: bool },
     Done { total: usize, truncated: bool },
 }
 
@@ -130,20 +132,29 @@ fn search(
                     return WalkState::Continue;
                 }
                 let mut matches = Vec::new();
+                let mut more = false;
                 let _ = searcher.search_path(
                     &matcher,
                     entry.path(),
                     UTF8(|line_no, line| {
                         let line = line.trim_end_matches(['\n', '\r']);
-                        matches.push(line_match(&matcher, line_no, line, replace.as_ref()));
-                        Ok(matches.len() < 500)
+                        if matches.len() >= MAX_LINES {
+                            more = true;
+                            return Ok(false);
+                        }
+                        let m = line_match(&matcher, line_no, line, replace.as_ref());
+                        more |= m.ranges.len() >= MAX_RANGES;
+                        matches.push(m);
+                        Ok(true)
                     }),
                 );
-                if !matches.is_empty() {
-                    total.fetch_add(matches.len(), Ordering::Relaxed);
+                // A newer search (e.g. the next keystroke in Replace) supersedes this one; its results must not land.
+                if !matches.is_empty() && current.load(Ordering::SeqCst) == generation {
+                    total.fetch_add(matches.iter().map(|m| m.ranges.len()).sum(), Ordering::Relaxed);
                     emit(SearchEvent::File {
                         path: entry.path().to_string_lossy().into_owned(),
                         matches,
+                        truncated: more,
                     });
                 }
                 WalkState::Continue
@@ -192,7 +203,7 @@ mod tests {
         let mut done = None;
         for e in events.lock().unwrap().drain(..) {
             match e {
-                SearchEvent::File { path, matches } => files.push((
+                SearchEvent::File { path, matches, .. } => files.push((
                     Path::new(&path).strip_prefix(root).unwrap().to_string_lossy().into_owned(),
                     matches.into_iter().map(|m| (m.line, m.ranges)).collect(),
                 )),
@@ -240,6 +251,79 @@ mod tests {
         let mut bad = opts("(");
         bad.regex = true;
         assert!(search(root.clone(), bad, 1, Arc::new(AtomicU64::new(1)), |_| {}).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn counts_matches_not_lines_and_flags_truncated_files() {
+        let root = project("counts");
+        std::fs::write(root.join("many.txt"), "x\n".repeat(MAX_LINES + 20)).unwrap();
+        std::fs::write(root.join("wide.txt"), "x".repeat(MAX_RANGES + 5)).unwrap();
+        std::fs::write(root.join("two.txt"), "x x\nx\n").unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut o = opts("x");
+        o.include = Some("*.txt".into());
+        search(root.clone(), o, 1, Arc::new(AtomicU64::new(1)), move |e| sink.lock().unwrap().push(e)).unwrap().join().unwrap();
+        let mut by_name = std::collections::HashMap::new();
+        let mut total = 0;
+        for e in events.lock().unwrap().drain(..) {
+            match e {
+                SearchEvent::File { path, matches, truncated } => {
+                    by_name.insert(Path::new(&path).file_name().unwrap().to_string_lossy().into_owned(), (matches.iter().map(|m| m.ranges.len()).sum::<usize>(), truncated));
+                }
+                SearchEvent::Done { total: t, .. } => total = t,
+            }
+        }
+        assert_eq!(by_name["two.txt"], (3, false));
+        assert_eq!(by_name["many.txt"], (MAX_LINES, true));
+        assert_eq!(by_name["wide.txt"], (MAX_RANGES, true));
+        assert_eq!(total, 3 + MAX_LINES + MAX_RANGES);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replace_refuses_symlinks_and_paths_outside_the_project() {
+        let root = project("guard");
+        let outside = root.with_extension("outside");
+        std::fs::write(&outside, "foo\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link.rb")).unwrap();
+        let roots = [std::fs::canonicalize(&root).unwrap()];
+        let e = vec![ReplaceEdit { line: 1, start: 0, end: 3, old: "foo".into(), new: "bar".into() }];
+        let link = root.join("link.rb").to_string_lossy().into_owned();
+        assert!(replace_file(&link, &e, &roots).unwrap_err().contains("symlink"));
+        assert!(replace_file(&outside.to_string_lossy(), &e, &roots).unwrap_err().contains("outside the project"));
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "foo\n");
+        let inside = root.join("app/models/user.rb");
+        let e = vec![ReplaceEdit { line: 1, start: 6, end: 10, old: "User".into(), new: "Member".into() }];
+        assert_eq!(replace_file(&inside.to_string_lossy(), &e, &roots), Ok(1));
+        assert_eq!(std::fs::read_to_string(&inside).unwrap(), "class Member\nend\n");
+        std::fs::remove_file(outside).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replace_writes_atomically_and_never_walks_a_symlinked_directory() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = project("atomic");
+        let file = root.join("app/models/user.rb");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o664)).unwrap();
+        let before = std::fs::metadata(&file).unwrap().ino();
+        let roots = [std::fs::canonicalize(&root).unwrap()];
+        let e = vec![ReplaceEdit { line: 1, start: 6, end: 10, old: "User".into(), new: "Member".into() }];
+        assert_eq!(replace_file(&file.to_string_lossy(), &e, &roots), Ok(1));
+        let meta = std::fs::metadata(&file).unwrap();
+        assert_ne!(meta.ino(), before, "written to a new file and renamed into place");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o664, "group-write survives the umask");
+        let leftovers: Vec<_> = std::fs::read_dir(root.join("app/models")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains(".garnet-")).collect();
+        assert!(leftovers.is_empty());
+        // A directory swapped for a symlink after the check: the component-wise O_NOFOLLOW walk refuses it.
+        let outside = root.with_extension("outside-dir");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
+        assert!(nofollow::open_dir(&roots[0].join("linked")).is_err());
+        assert!(nofollow::open_dir(&roots[0].join("app/models")).is_ok());
+        std::fs::remove_dir_all(outside).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -333,14 +417,106 @@ pub fn apply_edits(text: &str, edits: &[ReplaceEdit]) -> (String, usize) {
 }
 
 #[tauri::command]
-pub async fn replace_in_file(path: String, edits: Vec<ReplaceEdit>) -> Result<usize, String> {
-    let bytes = std::fs::read(&path).map_err(e2s)?;
-    let text = String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8"))?;
-    let (next, applied) = apply_edits(&text, &edits);
-    if applied > 0 {
-        std::fs::write(&path, next).map_err(e2s)?;
+pub async fn replace_in_file(app: tauri::AppHandle, index: State<'_, Index>, path: String, edits: Vec<ReplaceEdit>) -> Result<usize, String> {
+    replace_file(&path, &edits, &crate::fsops::write_roots(&app, &index))
+}
+
+/// Same guard as `write_file` (inside the project, never through a symlink), without a window between the check
+/// and the write: the checked directory is opened component by component without following symlinks, the file is
+/// read and a temp file written relative to that handle, and the temp file is renamed over the original.
+fn replace_file(path: &str, edits: &[ReplaceEdit], roots: &[std::path::PathBuf]) -> Result<usize, String> {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    crate::fsops::check_write(path, roots, false)?;
+    let p = std::path::Path::new(path);
+    let name = p.file_name().ok_or_else(|| format!("{path} has no file name"))?;
+    let parent = std::fs::canonicalize(p.parent().unwrap_or(p)).map_err(e2s)?;
+    if !roots.iter().any(|r| parent.starts_with(r)) {
+        return Err(format!("refusing to write {path}: outside the project"));
     }
+    let dir = nofollow::open_dir(&parent)?;
+    let mut file = nofollow::open_at(&dir, name, libc::O_RDONLY, 0)?;
+    let meta = file.metadata().map_err(e2s)?;
+    if !meta.is_file() {
+        return Err(format!("{path} is not a regular file"));
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text).map_err(|_| format!("{path} is not UTF-8"))?;
+    let (next, applied) = apply_edits(&text, edits);
+    if applied == 0 {
+        return Ok(0);
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let tmp = std::ffi::OsString::from(format!(".{}.garnet-{}-{nanos}", name.to_string_lossy(), std::process::id()));
+    let mode = meta.permissions().mode() & 0o7777;
+    let mut out = nofollow::open_at(&dir, &tmp, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, mode)?;
+    // openat's mode is masked by the umask; fchmod restores the original bits exactly.
+    let written = out.set_permissions(std::fs::Permissions::from_mode(mode)).and_then(|_| out.write_all(next.as_bytes())).and_then(|_| out.sync_all()).map_err(e2s);
+    let moved = written.and_then(|_| nofollow::rename_at(&dir, &tmp, name));
+    if moved.is_err() {
+        nofollow::unlink_at(&dir, &tmp);
+    }
+    moved?;
+    nofollow::sync(&dir);
     Ok(applied)
+}
+
+/// openat/renameat relative to a directory handle, never following a symlink.
+mod nofollow {
+    use std::ffi::{CString, OsStr};
+    use std::fs::File;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Component, Path};
+
+    fn cstr(s: &OsStr) -> Result<CString, String> {
+        CString::new(s.as_bytes()).map_err(|_| "path contains a NUL byte".to_string())
+    }
+
+    fn check(fd: i32, what: &OsStr) -> Result<i32, String> {
+        if fd < 0 {
+            Err(format!("{}: {}", what.to_string_lossy(), std::io::Error::last_os_error()))
+        } else {
+            Ok(fd)
+        }
+    }
+
+    /// Opens `path` (absolute) one component at a time with O_NOFOLLOW, so no component can be a symlink.
+    pub fn open_dir(path: &Path) -> Result<OwnedFd, String> {
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let root = cstr(OsStr::new("/"))?;
+        // SAFETY: plain syscalls on NUL-terminated paths; each fd is owned by an OwnedFd right away.
+        let mut dir = unsafe { OwnedFd::from_raw_fd(check(libc::open(root.as_ptr(), flags), OsStr::new("/"))?) };
+        for c in path.components() {
+            let Component::Normal(part) = c else { continue };
+            let name = cstr(part)?;
+            dir = unsafe { OwnedFd::from_raw_fd(check(libc::openat(dir.as_raw_fd(), name.as_ptr(), flags), part)?) };
+        }
+        Ok(dir)
+    }
+
+    pub fn open_at(dir: &OwnedFd, name: &OsStr, flags: i32, mode: u32) -> Result<File, String> {
+        let n = cstr(name)?;
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), n.as_ptr(), flags | libc::O_NOFOLLOW | libc::O_CLOEXEC, mode as libc::c_uint) };
+        Ok(unsafe { File::from_raw_fd(check(fd, name)?) })
+    }
+
+    pub fn rename_at(dir: &OwnedFd, from: &OsStr, to: &OsStr) -> Result<(), String> {
+        let (f, t) = (cstr(from)?, cstr(to)?);
+        let r = unsafe { libc::renameat(dir.as_raw_fd(), f.as_ptr(), dir.as_raw_fd(), t.as_ptr()) };
+        check(r, to).map(|_| ())
+    }
+
+    /// fsync the directory so the rename itself is durable.
+    pub fn sync(dir: &OwnedFd) {
+        unsafe { libc::fsync(dir.as_raw_fd()) };
+    }
+
+    pub fn unlink_at(dir: &OwnedFd, name: &OsStr) {
+        if let Ok(n) = cstr(name) {
+            unsafe { libc::unlinkat(dir.as_raw_fd(), n.as_ptr(), 0) };
+        }
+    }
 }
 
 #[cfg(test)]

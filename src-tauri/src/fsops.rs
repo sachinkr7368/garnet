@@ -51,7 +51,7 @@ pub async fn read_file(path: String) -> Result<String, String> {
 }
 
 /// Where Garnet may write: the open project and its own config directory.
-fn write_roots(app: &AppHandle, index: &Index) -> Vec<PathBuf> {
+pub(crate) fn write_roots(app: &AppHandle, index: &Index) -> Vec<PathBuf> {
     [index.root().ok(), app.path().app_config_dir().ok()]
         .into_iter()
         .flatten()
@@ -95,7 +95,7 @@ fn git_dirs(root: &Path) -> Vec<PathBuf> {
     [Some(dir), common].into_iter().flatten().filter_map(|d| fs::canonicalize(d).ok()).collect()
 }
 
-fn write_new(p: &Path, content: &str, create_new: bool) -> Result<(), String> {
+pub(crate) fn write_new(p: &Path, content: &str, create_new: bool) -> Result<(), String> {
     use std::io::Write;
     let mut opts = fs::OpenOptions::new();
     opts.write(true).custom_flags(libc::O_NOFOLLOW);

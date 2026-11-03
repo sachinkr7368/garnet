@@ -1,6 +1,6 @@
 [package]
 name = "garnet"
-version = "0.2.1"
+version = "0.2.2"
 description = "A fast Ruby and Rails IDE"
 authors = ["Sachin"]
 license = "MIT"

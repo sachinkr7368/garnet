@@ -93,11 +93,20 @@ beforeEach(async () => {
     return "";
   });
   h.set("git_commit", () => "[main 1234567] done");
+  h.set("git_rollback", () => ({ reverted: 1, deleted: 0 }));
+  h.set("git_stage", () => {});
   await git.refreshGit();
 });
 
 const message = () => document.querySelector<HTMLTextAreaElement>(".commit-message")!;
-const commitBtn = () => [...document.querySelectorAll<HTMLButtonElement>(".commit-actions button")].find((b) => b.textContent === "Commit")!;
+const commitBtn = () => document.querySelector<HTMLButtonElement>(".commit-btn")!;
+const pushBtn = () => document.querySelector<HTMLButtonElement>(".commit-actions .split")!;
+const include = (path: string) => {
+  const box = row(path).querySelector<HTMLInputElement>(".include-box")!;
+  box.checked = !box.checked;
+  box.dispatchEvent(new Event("change"));
+};
+const toasts = () => [...document.querySelectorAll("#overlay-root .toast")].map((t) => t.textContent ?? "");
 const amendBox = () => document.querySelector<HTMLInputElement>(".amend-box")!;
 const type = (text: string) => {
   message().value = text;
@@ -107,13 +116,12 @@ const row = (path: string) => document.querySelector<HTMLElement>(`.change-row[d
 const menuItem = (label: string) => [...document.querySelectorAll<HTMLElement>(".ctx-item")].find((i) => i.querySelector(".ctx-label")?.textContent === label);
 
 describe("commit (B8, B21)", () => {
-  it("is enabled only with a message and something staged, selected or amended", () => {
-    const base = { message: "msg", staged: 1, selected: 0, amend: false, busy: false, conflicts: 0 };
+  it("is enabled only with a message and files to commit, or amend", () => {
+    const base = { message: "msg", files: 1, amend: false, busy: false, conflicts: 0 };
     expect(git.commitReady(base)).toBe(true);
     expect(git.commitReady({ ...base, message: "  " })).toBe(false);
-    expect(git.commitReady({ ...base, staged: 0 })).toBe(false);
-    expect(git.commitReady({ ...base, staged: 0, selected: 2 })).toBe(true);
-    expect(git.commitReady({ ...base, staged: 0, amend: true })).toBe(true);
+    expect(git.commitReady({ ...base, files: 0 })).toBe(false);
+    expect(git.commitReady({ ...base, files: 0, amend: true })).toBe(true);
     expect(git.commitReady({ ...base, busy: true })).toBe(false);
     expect(git.commitReady({ ...base, conflicts: 1 })).toBe(false);
   });
@@ -124,6 +132,7 @@ describe("commit (B8, B21)", () => {
     expect(commitBtn().disabled).toBe(true);
     type("Fix it");
     expect(commitBtn().disabled).toBe(false);
+    expect(commitBtn().textContent).toBe("Commit 1 file");
     let finish = () => {};
     fake.handlers.set("git_commit", () => new Promise((r) => (finish = () => r("[main 1] Fix it"))));
     commitBtn().click();
@@ -133,31 +142,79 @@ describe("commit (B8, B21)", () => {
     finish();
     await settle();
     expect(inv("git_commit")).toHaveLength(1);
-    expect(inv("git_commit")[0].args).toMatchObject({ message: "Fix it", amend: false });
+    expect(inv("git_commit")[0].args).toMatchObject({ message: "Fix it", amend: false, paths: null });
   });
 
-  it("amends with the last message prefilled and nothing staged", async () => {
+  it("amends with the last message prefilled and nothing staged; Commit and Push is off meanwhile", async () => {
     amendBox().checked = true;
     amendBox().dispatchEvent(new Event("change"));
     await settle();
     expect(message().value).toBe("Last message\n\nBody");
     expect(commitBtn().disabled).toBe(false);
+    expect(pushBtn().disabled).toBe(true);
     commitBtn().click();
     await settle();
-    expect(inv("git_commit")[0].args).toMatchObject({ message: "Last message\n\nBody", amend: true });
+    expect(inv("git_commit")[0].args).toMatchObject({ message: "Last message\n\nBody", amend: true, paths: null });
+    expect(ask).not.toHaveBeenCalled();
     expect(amendBox().checked).toBe(false);
   });
 
-  it("commits selected files when nothing is staged, and Commit and Push pushes after", async () => {
+  it("never commits the selection: a stale selection is ignored by Amend", async () => {
     repo.status = [{ path: "b.rb", index: " ", worktree: "M" }];
     await git.refreshGit();
     row("b.rb").click();
-    type("Selected");
+    amendBox().checked = true;
+    amendBox().dispatchEvent(new Event("change"));
+    await settle();
+    await git.commit();
+    await settle();
+    expect(inv("git_stage")).toHaveLength(0);
+    expect(inv("git_commit")[0].args).toMatchObject({ amend: true, paths: null });
+  });
+
+  it("asks before amending a commit that is already on its upstream", async () => {
+    const run = fake.handlers.get("git_run")!;
+    fake.handlers.set("git_run", (a: { args: string[] }) => (a.args[0] === "rev-list" ? (repo.runs.push(a.args), "0\n") : run(a)));
+    amendBox().checked = true;
+    amendBox().dispatchEvent(new Event("change"));
+    await settle();
+    await git.commit();
+    expect(repo.runs).toContainEqual(["rev-list", "--count", "@{upstream}..HEAD"]);
+    expect(ask).toHaveBeenCalledWith(expect.stringContaining("already pushed"), expect.anything());
+    expect(inv("git_commit")).toHaveLength(0);
+    vi.mocked(ask).mockResolvedValue(true);
+    await git.commit();
+    expect(inv("git_commit")[0].args).toMatchObject({ amend: true });
+  });
+
+  it("commits only the ticked files, staging untracked ones, and Commit and Push pushes after", async () => {
+    repo.status = [
+      { path: "b.rb", index: " ", worktree: "M" },
+      { path: "c.rb", index: "?", worktree: "?" },
+      { path: "s.rb", index: "M", worktree: " " },
+    ];
+    await git.refreshGit();
+    row("s.rb").click();
+    include("b.rb");
+    include("c.rb");
+    type("Ticked");
+    expect(commitBtn().textContent).toBe("Commit 2 files");
+    expect(commitBtn().title).toContain("2 files");
     await git.commit(true);
     await settle();
-    expect(inv("git_stage")[0].args.paths).toEqual(["b.rb"]);
-    expect(inv("git_commit")).toHaveLength(1);
+    expect(inv("git_stage").map((i) => i.args.paths)).toEqual([["c.rb"]]);
+    expect(inv("git_commit")[0].args).toMatchObject({ message: "Ticked", paths: ["b.rb", "c.rb"] });
     expect(repo.runs).toContainEqual(["push"]);
+  });
+
+  it("refuses to commit unstaged changes that are neither staged nor ticked", async () => {
+    repo.status = [{ path: "b.rb", index: " ", worktree: "M" }];
+    await git.refreshGit();
+    row("b.rb").click();
+    type("Nothing");
+    expect(commitBtn().disabled).toBe(true);
+    await git.commit();
+    expect(inv("git_commit")).toHaveLength(0);
   });
 });
 
@@ -263,12 +320,27 @@ describe("Rollback files (B7)", () => {
     git.rollbackDialog(["app"]);
     const dialog = document.querySelector(".rollback-dialog")!;
     expect([...dialog.querySelectorAll(".change-name")].map((n) => n.textContent)).toEqual(["app/m.rb", "app/u.rb"]);
-    dialog.querySelector<HTMLInputElement>(".rollback-delete input")!.checked = true;
+    expect(dialog.querySelector(".rollback-note")!.textContent).toMatch(/^1 file will be reverted/);
+    const del = dialog.querySelector<HTMLInputElement>(".rollback-delete input")!;
+    del.checked = true;
+    del.dispatchEvent(new Event("change"));
+    expect(dialog.querySelector(".rollback-note")!.textContent).toMatch(/^2 files will be reverted to HEAD or deleted/);
+    fake.handlers.set("git_rollback", () => ({ reverted: 1, deleted: 1 }));
     [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Rollback")!.click();
     await settle();
     expect(inv("git_rollback")[0].args).toMatchObject({ paths: ["app/m.rb", "app/u.rb"], deleteAdded: true });
     expect(ed.handleFsChanged).toHaveBeenCalledWith(["/repo/app/m.rb", "/repo/app/u.rb"]);
     expect(document.querySelector(".rollback-dialog")).toBeNull();
+    expect(toasts()).toContain("Rolled back 1 file, deleted 1 file.");
+  });
+
+  it("reports untracked files kept instead of counting them", async () => {
+    git.rollbackDialog(["app/u.rb"]);
+    expect(document.querySelector(".rollback-note")!.textContent).toContain("kept");
+    fake.handlers.set("git_rollback", () => ({ reverted: 0, deleted: 0 }));
+    [...document.querySelectorAll<HTMLButtonElement>(".rollback-dialog button")].find((b) => b.textContent === "Rollback")!.click();
+    await settle();
+    expect(toasts()).toContain("Nothing to roll back; untracked files were kept.");
   });
 
   it("offers no delete option without added files, and Cancel does nothing", () => {
@@ -300,6 +372,51 @@ describe("Rollback files (B7)", () => {
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     await settle();
     expect(repo.runs).toContainEqual(["stash", "push", "--include-untracked", "-m", "wip", "--", "app/u.rb"]);
+  });
+
+  const shelveVia = async (path: string, name: string) => {
+    row(path).dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    menuItem("Shelve Changes…")!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    await flush();
+    const input = document.querySelector<HTMLInputElement>(".qp-input");
+    if (input) {
+      input.value = name;
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    }
+    await settle();
+  };
+
+  it("shelves dash-named files with a dash message as plain arguments", async () => {
+    repo.status = [{ path: "-dash.rb", index: " ", worktree: "M" }];
+    await git.refreshGit();
+    await shelveVia("-dash.rb", "-wip");
+    expect(repo.runs).toContainEqual(["stash", "push", "--include-untracked", "-m", "-wip", "--", "-dash.rb"]);
+  });
+
+  it("refuses to shelve a staged rename", async () => {
+    repo.status = [{ path: "new.rb", orig: "old.rb", index: "R", worktree: " " }];
+    await git.refreshGit();
+    await shelveVia("new.rb", "x");
+    expect(repo.runs.filter((a) => a[0] === "stash")).toEqual([]);
+    expect(toasts().join()).toContain("Renamed files can't be shelved");
+  });
+
+  it("drops the stash a failed shelve created, and only that one", async () => {
+    let top = "old";
+    const run = fake.handlers.get("git_run")!;
+    fake.handlers.set("git_run", (a: { args: string[] }) => {
+      const cmd = a.args.slice(0, 2).join(" ");
+      if (cmd === "rev-parse -q") return `${top}\n`;
+      if (cmd === "stash list") return `${top}\nold\n`;
+      if (cmd === "stash push") {
+        top = "new";
+        throw new Error("could not restore untracked files");
+      }
+      return run(a);
+    });
+    await shelveVia("app/m.rb", "wip");
+    expect(repo.runs).toContainEqual(["stash", "drop", "stash@{0}"]);
+    expect(toasts().join()).toContain("git stash apply new");
   });
 
   it("⌘D in the focused list opens the diff instead of an editor action", async () => {

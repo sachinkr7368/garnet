@@ -43,6 +43,23 @@ async function run(label: string, fn: () => Promise<unknown>) {
   return ok;
 }
 
+/// The commit refs/stash points to ("" when there are no stashes).
+export const stashTop = async () => (await git("rev-parse", "-q", "--verify", "refs/stash").catch(() => "")).trim();
+
+/// `stash@{n}` for a stash commit, or "" when it is no longer on the stash list.
+export async function stashRef(sha: string) {
+  const i = (await git("stash", "list", "--format=%H").catch(() => "")).split("\n").indexOf(sha);
+  return i >= 0 ? `stash@{${i}}` : "";
+}
+
+/// After a failed `stash push`: drops the stash it created, if any (its commit stays recoverable by sha). Returns the sha.
+export async function dropNewStash(before: string) {
+  const after = await stashTop();
+  const ref = after && after !== before ? await stashRef(after) : "";
+  if (ref) await git("stash", "drop", ref).catch(() => {});
+  return ref ? after : "";
+}
+
 /// Branch label; `git rev-parse --abbrev-ref HEAD` prints "HEAD" on a detached checkout.
 export const headLabel = (abbrev: string, sha: string) => (abbrev === "HEAD" ? `detached at ${sha.slice(0, 7) || "HEAD"}` : abbrev || "detached");
 
@@ -270,19 +287,22 @@ async function newBranch() {
 export async function checkout(name: string, from?: string, create = false) {
   await saveAll();
   const dirty = (await git("status", "--porcelain", "--untracked-files=no").catch(() => "")).trim();
-  let stashed = false;
+  let stashed = "";
   if (dirty && !create) {
     const answer = await message(`You have uncommitted changes. How should they be handled when switching to ${name}?`, {
       kind: "warning",
       buttons: { yes: "Stash and Checkout", no: "Carry Changes", cancel: "Cancel" },
     });
     if (answer === "Stash and Checkout" || answer === "Yes") {
+      const before = await stashTop();
       try {
         await git("stash", "push", "-m", `garnet: before checkout ${name}`);
       } catch (e) {
+        await dropNewStash(before);
         return toast(`Could not stash your changes, so ${name} was not checked out: ${e}`, "error");
       }
-      stashed = true;
+      const after = await stashTop();
+      stashed = after !== before ? after : "";
     } else if (answer !== "Carry Changes" && answer !== "No") return;
   }
   const args = create ? ["checkout", "-b", name, ...(from ? [from] : [])] : from ? ["checkout", "-b", name, "--track", from] : ["checkout", name];
@@ -292,7 +312,8 @@ export async function checkout(name: string, from?: string, create = false) {
       throw e;
     }),
   );
-  if (stashed) await runGitOp(ok ? "Restore local changes" : "Checkout failed; restore local changes", ["stash", "pop"]);
+  const ref = stashed && (await stashRef(stashed));
+  if (ref) await runGitOp(ok ? "Restore local changes" : "Checkout failed; restore local changes", ["stash", "pop", ref]);
 }
 
 /// Worktree switcher

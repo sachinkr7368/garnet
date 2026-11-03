@@ -94,10 +94,10 @@ partial row is meant to become a GitHub issue.
 | Feature | Status | Notes |
 | --- | --- | --- |
 | Changes panel, stage/unstage (file), commit, commit checks for errors | done | |
-| Commit: Amend (last message prefilled), Commit and Push, Commit enabled only with a message and staged or selected files | done | selected unstaged files are staged, then committed |
+| Commit: include checkboxes (commit the ticked files, else the staged set; the button names the count), Amend (last message prefilled, warns when the commit is already pushed), Commit and Push (off while amending) | done | never commits the row selection |
 | Rollback (⌥⌘Z in the Commit panel): selected files, a folder or all changes, confirm dialog listing the files with "Delete local copies of added files"; modified, added, deleted and renamed files | done | open buffers reload with undo |
 | Changed-file context menu: Show Diff (⌘D), Jump to Source (F4), Rollback, Shelve Changes, Copy Path, Add to .gitignore, Delete | done | |
-| Shelve / Unshelve: shelve selected files, Shelf tab (Git tool window) with unshelve, apply, delete and preview | done | backed by git stash, so shelves are stashes |
+| Shelve / Unshelve: shelve selected files, Shelf tab (Git tool window) with unshelve, apply, delete and preview | done | backed by git stash, so shelves are stashes; unshelve restores the staged state (falls back to a plain pop); staged renames can't be shelved |
 | Changes as a directory tree: filter, status badges, +/- counts, Viewed marks (per branch, cleared when the file changes), expand/collapse all, group by changelist or directory | done | |
 | Compare with Branch (`git diff <base>...HEAD`, PR-style review tree) | done | diffs show merge base ↔ HEAD, not uncommitted edits |
 | Diff view: side-by-side / unified, collapse unchanged regions, next/previous difference (F7 / ⇧F7), read-only revision diffs | done | |

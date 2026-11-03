@@ -43,7 +43,6 @@ fn run_git(root: &str, args: &[&str], stdin: Option<&str>) -> Result<std::proces
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
-        .env("GIT_TEST_DISALLOW_ABBREVIATED_OPTIONS", "1")
         .stdin(if stdin.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -114,8 +113,9 @@ pub async fn git_branch(root: String) -> Result<String, String> {
 /// File content at `rev` ("HEAD" or "" for the index); empty when the file is new.
 #[tauri::command]
 pub async fn git_show(root: String, path: String, rev: String) -> Result<String, String> {
+    check_rev(&rev)?;
     let rel = rel(&root, &path);
-    off(move || Ok(git(&root, &["show", "--no-textconv", "--no-ext-diff", &format!("{rev}:{rel}")]).unwrap_or_default())).await
+    off(move || Ok(git(&root, &["show", "--no-textconv", "--no-ext-diff", &format!("{rev}:{rel}"), "--"]).unwrap_or_default())).await
 }
 
 fn rel(root: &str, path: &str) -> String {
@@ -155,6 +155,7 @@ pub async fn git_unstage(root: String, paths: Vec<String>) -> Result<(), String>
 }
 
 /// Subcommands the UI runs through git_run, each with the exact options it uses (long options may carry `=value`).
+/// Subcommands the UI runs through git_run, each with the exact options it uses (long options may carry `=value`).
 const RUN_ALLOWED: &[(&str, &[&str])] = &[
     ("add", &[]),
     ("branch", &["-d", "-D", "-m", "--list"]),
@@ -173,56 +174,110 @@ const RUN_ALLOWED: &[(&str, &[&str])] = &[
     ("reset", &["--soft", "--mixed", "--hard"]),
     ("revert", &["--no-edit", "-m", "--abort", "--continue"]),
     ("rev-list", &["--count", "--left-right"]),
-    ("rev-parse", &["--abbrev-ref"]),
+    ("rev-parse", &["--abbrev-ref", "-q", "--verify"]),
     ("rm", &["-q"]),
-    ("stash", &["-m", "--include-untracked", "--format"]),
+    ("stash", &["-m", "--include-untracked", "--format", "--index"]),
     ("status", &["--porcelain", "--untracked-files"]),
     ("tag", &[]),
     ("worktree", &["-b", "--porcelain", "--force"]),
 ];
-
+/// Options whose next argument is a value (it may start with '-', like a `-wip` message).
+const RUN_VALUES: &[(&str, &str)] = &[("stash", "-m"), ("cherry-pick", "-m"), ("revert", "-m"), ("checkout", "-b"), ("worktree", "-b")];
+/// Subcommands whose arguments after `--` are pathspecs (git_run passes --literal-pathspecs, so any text is a path).
+const RUN_PATHSPECS: &[&str] = &["add", "rm", "checkout", "stash"];
 const NETWORK: &[&str] = &["fetch", "pull", "push"];
 
 /// git_run is reachable from the webview, so it runs only the subcommands and exact options the UI uses: no global
-/// options (`-c`, `--config-env`), no abbreviations (`--e` for `--exec`), nothing that executes code. Every argument is
-/// checked, including those after `--` (stash forwards its argv). Network subcommands only talk to a configured
-/// remote (`remotes`), never a URL or path given as a positional.
+/// options (`-c`, `--config-env`), no abbreviations (`--e` for `--exec`), nothing that executes code. Network
+/// subcommands only talk to a configured remote (`remotes`) with plain refs (no URL, path, `+force` or `^`), checkout
+/// only switches branches or takes a merge side, and `worktree add` only creates a new folder outside any repository.
 fn check_run_args(args: &[String], remotes: &[String]) -> Result<(), String> {
     let sub = args.first().map(String::as_str).unwrap_or("");
     let Some((_, opts)) = RUN_ALLOWED.iter().find(|(name, _)| *name == sub) else {
         return Err(format!("git {sub} is not allowed here"));
     };
-    let second = args.get(1).map(String::as_str);
-    if sub == "remote" && second != Some("get-url") {
-        return Err("only git remote get-url is allowed here".into());
+    let second = args.get(1).map(String::as_str).unwrap_or("");
+    match sub {
+        "remote" if second != "get-url" => return Err("only git remote get-url is allowed here".into()),
+        "stash" if !matches!(second, "push" | "list" | "pop" | "apply" | "drop") => return Err("only git stash push/list/pop/apply/drop are allowed here".into()),
+        "worktree" if !matches!(second, "add" | "list" | "remove" | "prune") => return Err("only git worktree add/list/remove/prune are allowed here".into()),
+        _ => {}
     }
-    if sub == "stash" && !matches!(second, Some("push" | "list" | "pop" | "apply" | "drop")) {
-        return Err("only git stash push/list/pop/apply/drop are allowed here".into());
-    }
-    let mut after_dashes = false;
-    let mut positionals = 0;
-    for a in &args[1..] {
+    let mut positionals: Vec<&str> = Vec::new();
+    let mut options: Vec<&str> = Vec::new();
+    let mut paths: Vec<&str> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        let a = args[i].as_str();
+        i += 1;
         if a.contains('\0') {
             return Err("invalid argument".into());
         }
-        if a == "--" && !after_dashes {
-            after_dashes = true;
-            continue;
-        }
-        if a.starts_with('-') {
-            let name = if a.starts_with("--") { a.split('=').next().unwrap_or_default() } else { a.as_str() };
-            if after_dashes || !opts.contains(&name) {
-                return Err(format!("git {sub} argument {a} is not allowed here"));
+        if a == "--" {
+            if !RUN_PATHSPECS.contains(&sub) || (sub == "stash" && second != "push") {
+                return Err(format!("git {sub} takes no paths here"));
             }
+            paths.extend(args[i..].iter().map(String::as_str));
+            if paths.iter().any(|p| p.contains('\0')) {
+                return Err("invalid argument".into());
+            }
+            break;
+        }
+        if !a.starts_with('-') {
+            positionals.push(a);
             continue;
         }
-        if NETWORK.contains(&sub) {
-            let ok = if positionals == 0 { remotes.iter().any(|r| r == a) } else { !a.contains(':') && !a.starts_with('/') && !a.starts_with('.') };
+        let name = if a.starts_with("--") { a.split('=').next().unwrap_or_default() } else { a };
+        if !opts.contains(&name) {
+            return Err(format!("git {sub} argument {a} is not allowed here"));
+        }
+        options.push(name);
+        if RUN_VALUES.contains(&(sub, name)) {
+            i += 1;
+        }
+    }
+    let has = |o: &str| options.contains(&o);
+    if NETWORK.contains(&sub) {
+        for (n, a) in positionals.iter().enumerate() {
+            let ok = if n == 0 { remotes.iter().any(|r| r == a) } else { !a.contains(':') && !a.starts_with(['/', '.', '+', '^']) };
             if !ok {
                 return Err(format!("git {sub}: {a} is not a configured remote or a plain ref"));
             }
-            positionals += 1;
         }
+    }
+    if sub == "checkout" {
+        let side = has("--ours") || has("--theirs");
+        let ok = if side { positionals.is_empty() && !paths.is_empty() } else { paths.is_empty() && positionals.len() <= 1 && (has("-b") || positionals.len() == 1) };
+        if !ok {
+            return Err("git checkout here only switches branches or takes a merge side for paths".into());
+        }
+    }
+    if sub == "stash" && has("--index") && !matches!(second, "pop" | "apply") {
+        return Err("--index is only for stash pop/apply".into());
+    }
+    if sub == "worktree" {
+        if has("--force") && second != "remove" || has("-b") && second != "add" || has("--porcelain") && second != "list" {
+            return Err(format!("git worktree {second}: option not allowed"));
+        }
+        if second == "add" {
+            check_new_worktree_dir(positionals.get(1).copied().unwrap_or(""))?;
+        }
+    }
+    Ok(())
+}
+
+/// A new worktree goes into a folder that does not exist yet, under an existing parent, and outside any repository.
+fn check_new_worktree_dir(path: &str) -> Result<(), String> {
+    let p = Path::new(path);
+    if !p.is_absolute() || p.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err(format!("worktree folder must be an absolute path: {path}"));
+    }
+    if p.symlink_metadata().is_ok() {
+        return Err(format!("{path} already exists"));
+    }
+    let parent = p.parent().filter(|d| d.is_dir()).ok_or_else(|| format!("the parent folder of {path} does not exist"))?;
+    if let Some(repo) = parent.ancestors().find(|d| d.join(".git").symlink_metadata().is_ok()) {
+        return Err(format!("{path} is inside the repository {}; choose a folder outside it", repo.display()));
     }
     Ok(())
 }
@@ -251,11 +306,16 @@ pub async fn git_fetch(root: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn git_commit(root: String, message: String, amend: Option<bool>) -> Result<String, String> {
+/// Commits the index, or with `paths` only those files (`git commit -- <paths>`, other staged changes stay staged).
+pub async fn git_commit(root: String, message: String, amend: Option<bool>, paths: Option<Vec<String>>) -> Result<String, String> {
     off(move || {
-        let mut args = vec!["commit", "-m", &message];
+        let mut args = vec!["--literal-pathspecs", "commit", "-m", &message];
         if amend == Some(true) {
             args.push("--amend");
+        }
+        if let Some(paths) = paths.as_ref().filter(|p| !p.is_empty()) {
+            args.push("--");
+            args.extend(paths.iter().map(String::as_str));
         }
         git(&root, &args)
     })
@@ -268,10 +328,24 @@ fn under(path: &str, p: &str) -> bool {
 
 /// RubyMine's Rollback: tracked paths return to HEAD (index and working copy), added files leave the index and their
 /// local copies are deleted only with `delete_added`, and a rename moves back to its old path. Paths may be folders.
-fn rollback(root: &str, paths: &[String], delete_added: bool) -> Result<(), String> {
-    let wanted = |e: &StatusEntry| paths.iter().any(|p| under(&e.path, p) || e.orig.as_deref().is_some_and(|o| under(o, p)));
-    let (mut restore, mut unindex, mut remove) = (Vec::new(), Vec::new(), Vec::new());
-    for e in status(root)?.into_iter().filter(wanted) {
+#[derive(Serialize, Debug, PartialEq)]
+pub struct RollbackResult {
+    /// Files returned to HEAD or taken out of the index.
+    reverted: usize,
+    /// Local copies of added files deleted.
+    deleted: usize,
+}
+
+fn rollback(root: &str, paths: &[String], delete_added: bool) -> Result<RollbackResult, String> {
+    let matches = |e: &StatusEntry, p: &str| under(&e.path, p) || e.orig.as_deref().is_some_and(|o| under(o, p));
+    let entries = status(root)?;
+    if let Some(p) = paths.iter().find(|p| !entries.iter().any(|e| matches(e, p))) {
+        return Err(format!("{p} has no changes to roll back"));
+    }
+    let (mut restore, mut unindex, mut remove, mut moved) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut reverted = 0;
+    for e in entries.into_iter().filter(|e| paths.iter().any(|p| matches(e, p))) {
+        reverted += usize::from(e.index != '?');
         match (e.index, e.worktree) {
             ('?', _) => {
                 if delete_added {
@@ -281,7 +355,7 @@ fn rollback(root: &str, paths: &[String], delete_added: bool) -> Result<(), Stri
             ('R', _) => {
                 restore.extend(e.orig);
                 unindex.push(e.path.clone());
-                remove.push(e.path);
+                moved.push(e.path);
             }
             ('A' | 'C', _) | (_, 'A') => {
                 unindex.push(e.path.clone());
@@ -292,6 +366,9 @@ fn rollback(root: &str, paths: &[String], delete_added: bool) -> Result<(), Stri
             _ => restore.push(e.path),
         }
     }
+    // A path that is both restored and listed again (staged deletion recreated as untracked) keeps its restored copy.
+    remove.retain(|p| !restore.contains(p));
+    remove.dedup();
     if !unindex.is_empty() {
         let mut args = vec!["--literal-pathspecs", "rm", "--cached", "-f", "-q", "--"];
         args.extend(unindex.iter().map(String::as_str));
@@ -302,17 +379,19 @@ fn rollback(root: &str, paths: &[String], delete_added: bool) -> Result<(), Stri
         args.extend(restore.iter().map(String::as_str));
         git(root, &args)?;
     }
-    for p in remove {
-        let file = Path::new(root).join(&p);
+    let mut deleted = 0;
+    for (p, counted) in remove.iter().map(|p| (p, true)).chain(moved.iter().map(|p| (p, false))) {
+        let file = Path::new(root).join(p);
         if file.symlink_metadata().is_ok() {
             std::fs::remove_file(&file).map_err(|e| format!("{p}: {e}"))?;
+            deleted += usize::from(counted);
         }
     }
-    Ok(())
+    Ok(RollbackResult { reverted, deleted })
 }
 
 #[tauri::command]
-pub async fn git_rollback(root: String, paths: Vec<String>, delete_added: bool) -> Result<(), String> {
+pub async fn git_rollback(root: String, paths: Vec<String>, delete_added: bool) -> Result<RollbackResult, String> {
     off(move || rollback(&root, &paths, delete_added)).await
 }
 
@@ -333,7 +412,7 @@ pub async fn git_file_at(root: String, rev: String, path: String) -> Result<Opti
         let spec = format!("{rev}:{}", rel(&root, &path));
         let mut args = vec!["show"];
         args.extend(NO_EXT);
-        args.push(&spec);
+        args.extend([spec.as_str(), "--"]);
         match run_git(&root, &args, None)? {
             out if out.status.success() => Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned())),
             _ => Ok(None),
@@ -694,7 +773,7 @@ pub async fn git_merge_input(root: String, path: String) -> Result<MergeInput, S
         let rel = rel(&root, &path);
         let stage = |n: u8| -> Result<Option<Vec<u8>>, String> {
             let spec = format!(":{n}:{rel}");
-            let out = run_git(&root, &["show", "--no-ext-diff", "--no-textconv", &spec], None)?;
+            let out = run_git(&root, &["show", "--no-ext-diff", "--no-textconv", &spec, "--"], None)?;
             Ok(out.status.success().then_some(out.stdout))
         };
         let symlink = git(&root, &["ls-files", "-u", "-s", "--", &rel])?.lines().any(|l| l.starts_with("120000"))
@@ -944,7 +1023,10 @@ mod tests {
             && git mv old.rb new.rb && printf 'add\n' > a.rb && git add a.rb && printf 'u\n' > u.rb && printf 'keep\n' > keep.rb && mkdir -p lib && printf 'x\n' > 'lib/[g].rb'");
         TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
         let all = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        block(git_rollback(root.clone(), all(&["m.rb", "s.rb", "d.rb", "new.rb", "a.rb", "u.rb", "lib"]), false)).unwrap();
+        assert!(block(git_rollback(root.clone(), all(&["m.rb", "nope.rb"]), false)).unwrap_err().contains("nope.rb"), "validated before acting");
+        assert_eq!(std::fs::read_to_string(dir.join("m.rb")).unwrap(), "changed\n");
+        let r = block(git_rollback(root.clone(), all(&["m.rb", "s.rb", "d.rb", "new.rb", "a.rb", "u.rb", "lib"]), false)).unwrap();
+        assert_eq!(r, RollbackResult { reverted: 5, deleted: 0 }, "untracked files are kept and not counted");
         let read = |p: &str| std::fs::read_to_string(dir.join(p)).ok();
         assert_eq!(read("m.rb").as_deref(), Some("one\n"));
         assert_eq!(read("s.rb").as_deref(), Some("staged\n"), "staged and unstaged edits both go");
@@ -959,6 +1041,10 @@ mod tests {
         block(git_rollback(root.clone(), all(&["a.rb", "u.rb", "lib"]), true)).unwrap();
         assert_eq!((read("a.rb"), read("u.rb"), read("lib/[g].rb")), (None, None, None), "delete local copies of added files");
         assert_eq!(read("keep.rb").as_deref(), Some("keep\n"), "unselected files are untouched");
+        // A staged deletion recreated as an untracked file keeps the restored copy even with "delete added".
+        sh("git add keep.rb && git commit -qm keep && git rm -q --cached keep.rb && printf 'again\n' > keep.rb");
+        block(git_rollback(root.clone(), all(&["keep.rb"]), true)).unwrap();
+        assert_eq!(read("keep.rb").as_deref(), Some("keep\n"));
         TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -988,10 +1074,17 @@ mod tests {
         let (dir, root, sh) = repo("amend");
         TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
         sh("printf 'a\n' > a.rb && git add a.rb");
-        block(git_commit(root.clone(), "first".into(), None)).unwrap();
-        block(git_commit(root.clone(), "first, reworded".into(), Some(true))).unwrap();
+        block(git_commit(root.clone(), "first".into(), None, None)).unwrap();
+        block(git_commit(root.clone(), "first, reworded".into(), Some(true), None)).unwrap();
         assert_eq!(git(&root, &["log", "--format=%s"]).unwrap(), "first, reworded\n");
-        assert!(block(git_commit(root.clone(), "nothing".into(), Some(false))).is_err());
+        assert!(block(git_commit(root.clone(), "nothing".into(), Some(false), None)).is_err());
+        sh("printf 'b\n' > b.rb && printf 'c\n' > c.rb && git add b.rb c.rb");
+        block(git_commit(root.clone(), "only b".into(), None, Some(vec!["b.rb".into()]))).unwrap();
+        assert_eq!(git(&root, &["show", "--name-only", "--format=", "HEAD"]).unwrap(), "b.rb\n");
+        assert_eq!(status(&root).unwrap()[0].path, "c.rb", "other staged files stay staged");
+        assert!(block(git_show(root.clone(), format!("{root}/b.rb"), "--output=/tmp/garnet-show-pwned".into())).is_err());
+        assert!(!Path::new("/tmp/garnet-show-pwned").exists());
+        assert_eq!(block(git_show(root.clone(), format!("{root}/b.rb"), "HEAD".into())).unwrap(), "b\n");
         TRUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1010,6 +1103,8 @@ mod tests {
             &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], &["rev-list", "--count", "@{upstream}..HEAD"], &["worktree", "list", "--porcelain"],
             &["worktree", "add", "-b", "x", "/p", "origin/x"], &["worktree", "remove", "--force", "/p"], &["merge-base", "main", "HEAD"], &["cherry-pick", "-m", "1", "abc"],
             &["revert", "--no-edit", "abc"], &["cherry-pick", "--continue"], &["commit", "--no-edit"], &["reset", "--hard", "abc"], &["rm", "-q", "--", "a.rb"], &["add", "--", "a.rb"], &["tag", "v1", "abc"],
+            &["stash", "push", "--include-untracked", "-m", "-wip", "--", "-dash.rb", "--output=x"], &["checkout", "--ours", "--", "-x"], &["stash", "pop", "--index", "stash@{0}"],
+            &["stash", "apply", "--index", "stash@{1}"], &["rev-parse", "-q", "--verify", "refs/stash"], &["stash", "list", "--format=%H"], &["worktree", "prune"], &["worktree", "add", "/nonexistent-garnet-wt", "main"],
         ] {
             assert!(check_run_args(&s(ok), &s(&["origin"])).is_ok(), "{ok:?}");
         }
@@ -1019,14 +1114,19 @@ mod tests {
             &["pull", "--upload-pack", "x"], &["push", "--receive-pack=x"], &["push", "--exec", "x"], &["push", "--e=x", "."], &["push", "--ex=x"], &["rebase", "-x", "make"],
             &["rebase", "-ix", "make"], &["rebase", "--exec=make"], &["log", "--output=/tmp/x"], &["log", "--ext-diff"], &["remote", "add", "x", "ext::sh"], &["remote"], &["commit", "-C", "HEAD"],
             &["status", "--git-dir=/x"], &["show", "HEAD"], &["stash", "push", "-m", "x", "--pathspec-from-file=/etc/passwd"],
-            &["stash", "list", "--", "--output=x"], &["stash", "push", "--", "-x"], &["stash", "show", "-p"], &["stash", "--output=x"], &["stash"],
+            &["stash", "list", "--output=x"], &["stash", "show", "-p"], &["stash", "--output=x"], &["stash"], &["stash", "list", "--", "--output=x"],
             &["push", "ext::sh -c touch /tmp/x"], &["fetch", "../other"], &["pull", "file:///tmp/r"], &["push", "origin", "a::b"], &["push", "origin", "src:dst"],
             &["fetch", "upstream", "main"], &["fetch", "origin", "/tmp/x"], &["fetch", "origin", "--", "--upload-pack=x"],
+            &["push", "origin", "+main"], &["push", "origin", "+main:main"], &["fetch", "origin", "^x"], &["checkout", "HEAD", "--", "."], &["checkout", "HEAD", "."], &["checkout", "--", "."],
+            &["stash", "list", "--", "x"], &["stash", "drop", "--index"], &["stash", "push", "-x"], &["log", "--", "x"], &["worktree", "move", "/a", "/b"], &["worktree", "add", "--force", "/nonexistent-garnet-wt"],
+            &["worktree", "add", "-b", "x", "/tmp"], &["worktree", "add", "relative", "main"], &["worktree", "add", "/no-such-parent/x/y"], &["worktree", "list", "--force"],
         ] {
             assert!(check_run_args(&s(bad), &s(&["origin"])).is_err(), "{bad:?}");
         }
         let _g = GLOBALS.lock().unwrap();
         let (dir, root, _sh) = repo("run");
+        assert!(check_new_worktree_dir(&format!("{root}/inside")).unwrap_err().contains("inside the repository"));
+        assert!(check_new_worktree_dir(&format!("{root}-sibling-wt")).is_ok());
         TRUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(block(git_run(root.clone(), s(&["fetch", "--upload-pack=touch pwned", "."]))).is_err());
         let other = dir.with_extension("other");
@@ -1066,7 +1166,7 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         let start = std::time::Instant::now();
         let (commit, ticked) = rt.block_on(async {
-            tokio::join!(git_commit(root.clone(), "slow".into(), None), async {
+            tokio::join!(git_commit(root.clone(), "slow".into(), None, None), async {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 start.elapsed()
             })

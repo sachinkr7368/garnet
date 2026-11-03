@@ -615,10 +615,12 @@ async function vcsWorkflowChecks(dir: string, sh: (cmd: string) => Promise<strin
     button(dialog, "Rollback")!.click();
   }
   const clean = await until(async () => !(await api.gitStatus(dir)).length, 5000);
+  const rolled = [...overlay.querySelectorAll(".toast")].map((t) => t.textContent ?? "").find((t) => t.startsWith("Rolled back"));
+  check("rollback toast reports the real counts", /^Rolled back \d+ files?, deleted 2 files\.$/.test(rolled ?? "") || String(rolled));
   check("rollback restores modified and deleted files and deletes added copies", (!!clean && (await read("r.rb")) === "base\n" && (await read("d.rb")) === "gone\n" && (await read("added.rb")) === null && (await read("untracked.rb")) === null) || JSON.stringify(await api.gitStatus(dir)));
 
   const message = commitView.querySelector<HTMLTextAreaElement>(".commit-message")!;
-  const commitBtn = button(commitView, "Commit")!;
+  const commitBtn = commitView.querySelector<HTMLButtonElement>(".commit-btn")!;
   const amend = commitView.querySelector<HTMLInputElement>(".amend-box")!;
   const type = (text: string) => ((message.value = text), message.dispatchEvent(new Event("input")));
   await sh("printf 'one\\n' > r.rb && git add r.rb");
@@ -642,7 +644,19 @@ async function vcsWorkflowChecks(dir: string, sh: (cmd: string) => Promise<strin
   await until(async () => (await subjects()).startsWith("smoke commit, amended"), 5000);
   check("amend rewrites the last commit", (await subjects()).split("\n").slice(0, 2).join("|") === "smoke commit, amended|base" || (await subjects()));
 
-  await sh("printf 'shelved\\n' > r.rb");
+  await sh("printf 'tick\\n' > t1.rb && printf 'keep\\n' > t2.rb && git add t1.rb t2.rb && git commit -qm 'two files' && printf 'ticked\\n' > t1.rb && printf 'unticked\\n' > t2.rb");
+  await refreshGit();
+  const box = commitView.querySelector<HTMLInputElement>('.change-row[data-path="t1.rb"] .include-box');
+  if (box) ((box.checked = true), box.dispatchEvent(new Event("change")));
+  type("ticked only");
+  check("Commit names the ticked file count", commitBtn.textContent === "Commit 1 file" || String(commitBtn.textContent));
+  commitBtn.click();
+  await until(async () => (await subjects()).startsWith("ticked only\n"), 5000);
+  const shown = await sh("git show --name-only --format= HEAD");
+  check("commit takes only the ticked files", (shown.trim() === "t1.rb" && (await read("t2.rb")) === "unticked\n") || shown);
+  await sh("git checkout -q -- t2.rb");
+
+  await sh("printf 'shelved\\n' > r.rb && git add r.rb");
   await refreshGit();
   const row = commitView.querySelector<HTMLElement>('.change-row[data-path="r.rb"]');
   row?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
@@ -660,6 +674,8 @@ async function vcsWorkflowChecks(dir: string, sh: (cmd: string) => Promise<strin
   document.querySelector<HTMLElement>('.gitlog-view .log-row [title^="Unshelve"]')?.click();
   await until(async () => (await read("r.rb")) === "shelved\n", 5000);
   check("unshelve restores the changes and empties the shelf", ((await read("r.rb")) === "shelved\n" && !(await api.git(dir, "stash", "list")).trim()) || String(await read("r.rb")));
+  const restaged = await until(async () => (await api.gitStatus(dir)).find((e) => e.path === "r.rb")?.index === "M", 3000);
+  check("unshelve keeps the staged state (--index)", !!restaged || JSON.stringify(await api.gitStatus(dir)));
   setLogMode("log");
 }
 

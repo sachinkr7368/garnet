@@ -7,7 +7,7 @@ import { abortOperation, acceptSide, continueOperation, openResolver, showConfli
 import { abs, basename, debounce, rel, root, state } from "./state";
 import { setGitDecorations } from "./tree";
 import { askTrust, isTrusted, onSettingsChange, setting, updateSetting } from "./settings";
-import { branches, headLabel, listWorktrees, newWorktree, openWorktree, pushCurrent, removeWorktree, type Worktree } from "./toolbar";
+import { branches, dropNewStash, headLabel, listWorktrees, stashTop, newWorktree, openWorktree, pushCurrent, removeWorktree, type Worktree } from "./toolbar";
 import { contextMenu, fileIcon, h, icon, iconButton, inputBox, modal, quickPick, statusSlot, tip, toast } from "./ui";
 
 const branchEl = statusSlot("branch", "left", undefined, "Current Git branch");
@@ -32,7 +32,7 @@ export const diffAsync = (a: string, b: string) =>
 /// Commit tool window
 
 const message = h("textarea", { class: "commit-message", placeholder: "Commit message (⌘↩ to commit)", rows: 4, spellcheck: true });
-const commitBtn = h("button", { class: "btn primary", onclick: () => commit() }, "Commit");
+const commitBtn = h("button", { class: "btn primary commit-btn", onclick: () => commit() }, "Commit");
 const commitPushBtn = iconButton("chevron-down", "Commit and Push…", (e) => contextMenu(e, [{ label: "Commit and Push…", run: () => commit(true) }]));
 commitPushBtn.classList.add("btn", "primary", "split");
 const amendBox = h("input", { type: "checkbox", class: "amend-box" });
@@ -112,6 +112,8 @@ let refreshSeq = 0;
 let committing = false;
 /// Repo-relative paths selected in the changes list (click, ⌘-click).
 const selection = new Set<string>();
+/// Files ticked for the next commit (RubyMine's include checkboxes); none ticked = commit the staged set.
+const included = new Set<string>();
 queueMicrotask(() => updateCommitEnabled());
 const collapsed = new Set<string>();
 const expandedHunks = new Set<string>();
@@ -242,6 +244,14 @@ function stageToggle(r: Row) {
   });
 }
 
+function paintIncluded() {
+  for (const el of list.querySelectorAll<HTMLElement>(".change-row[data-path]")) {
+    const box = el.querySelector<HTMLInputElement>(".include-box");
+    if (box) box.checked = included.has(el.dataset.path!);
+  }
+  updateCommitEnabled();
+}
+
 function paintSelection() {
   for (const el of list.querySelectorAll<HTMLElement>(".change-row[data-path]")) el.classList.toggle("selected", selection.has(el.dataset.path!));
   updateCommitEnabled();
@@ -281,6 +291,16 @@ function changeRow(r: Row, depth: number, groupKey: string) {
           render();
         })
       : h("span", { class: "twisty-space" }),
+    r.code === "U"
+      ? null
+      : h("input", {
+          type: "checkbox",
+          class: "include-box",
+          title: "Include in commit",
+          checked: included.has(r.path),
+          onclick: (e: MouseEvent) => e.stopPropagation(),
+          onchange: (e: Event) => ((e.target as HTMLInputElement).checked ? included.add(r.path) : included.delete(r.path), paintIncluded()),
+        }),
     badge(r.code),
     fileIcon(r.path),
     h("span", { class: "change-name" }, basename(r.path)),
@@ -345,14 +365,20 @@ export function rollbackSelected() {
 export function rollbackDialog(paths: string[]) {
   const targets = rollbackTargets(paths);
   if (!targets.length) return toast("No changes to roll back.");
-  const deleteAdded = h("input", { type: "checkbox" });
   let close = () => {};
   const go = () => (close(), rollbackFiles(targets.map((t) => t.path), deleteAdded.checked));
+  const note = h("div", { class: "dim rollback-note" });
+  /// Untracked files are only touched when their copies are deleted, so they count only then.
+  const describe = () => {
+    const n = targets.filter((t) => deleteAdded.checked || t.index !== "?").length;
+    note.textContent = n ? `${n} file${n === 1 ? "" : "s"} will be reverted to HEAD${deleteAdded.checked ? " or deleted" : ""}; local changes are lost.` : "Untracked files are kept unless their local copies are deleted.";
+  };
+  const deleteAdded = h("input", { type: "checkbox", onchange: describe });
   const box = h(
     "div",
     { class: "qp rollback-dialog" },
     h("div", { class: "qp-title" }, "Rollback Changes"),
-    h("div", { class: "dim rollback-note" }, `${targets.length} file${targets.length === 1 ? "" : "s"} will be reverted to HEAD; local changes are lost.`),
+    note,
     h(
       "div",
       { class: "qp-list" },
@@ -364,6 +390,7 @@ export function rollbackDialog(paths: string[]) {
     targets.some(isAdded) ? h("label", { class: "rollback-delete" }, deleteAdded, "Delete local copies of added files") : null,
     h("div", { class: "dialog-actions" }, h("span", { class: "spacer" }), h("button", { class: "btn", onclick: () => close() }, "Cancel"), h("button", { class: "btn primary", onclick: go }, "Rollback")),
   );
+  describe();
   const backdrop = modal(box, () => close());
   close = () => backdrop.remove();
 }
@@ -371,8 +398,9 @@ export function rollbackDialog(paths: string[]) {
 export async function rollbackFiles(paths: string[], deleteAdded: boolean) {
   const touched = rollbackTargets(paths).flatMap((e) => [e.path, ...(e.orig ? [e.orig] : [])]);
   try {
-    await api.gitRollback(root(), paths, deleteAdded);
-    toast(`Rolled back ${paths.length} file${paths.length === 1 ? "" : "s"}.`);
+    const { reverted, deleted } = await api.gitRollback(root(), paths, deleteAdded);
+    const plural = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
+    toast(reverted || deleted ? [reverted && `Rolled back ${plural(reverted)}`, deleted && `deleted ${plural(deleted)}`].filter(Boolean).join(", ") + "." : "Nothing to roll back; untracked files were kept.");
   } catch (e) {
     toast(`Rollback failed: ${e}`, "error");
   }
@@ -382,13 +410,17 @@ export async function rollbackFiles(paths: string[], deleteAdded: boolean) {
 }
 
 async function shelve(paths: string[]) {
+  const renamed = paths.filter((p) => entryFor(p)?.index === "R");
+  if (renamed.length) return toast(`Renamed files can't be shelved (${renamed.join(", ")}). Commit or unstage the rename first.`, "error");
   const name = await inputBox("Shelve changes: description", `Shelved ${paths.length === 1 ? basename(paths[0]) : `${paths.length} files`}`);
   if (name === null) return;
+  const before = await stashTop();
   try {
-    await api.git(root(), "stash", "push", "--include-untracked", "-m", name.trim() || "Shelved changes", "--", ...withOrig(paths));
+    await api.git(root(), "stash", "push", "--include-untracked", "-m", name.trim() || "Shelved changes", "--", ...paths);
     toast("Changes shelved. Unshelve them from the Git tool window's Shelf tab.");
   } catch (e) {
-    toast(`Shelve failed: ${e}`, "error");
+    const dropped = await dropNewStash(before);
+    toast(`Shelve failed: ${e}${dropped ? ` (the partial shelf was removed; recover it with git stash apply ${dropped.slice(0, 10)})` : ""}`, "error");
   }
   selection.clear();
   await handleFsChanged(paths.map(abs));
@@ -615,6 +647,7 @@ export async function refreshGit() {
   currentBranch = sha || branch;
   const known = new Set(status.map((e) => e.path));
   for (const p of selection) if (!known.has(p)) selection.delete(p);
+  for (const p of included) if (!known.has(p)) included.delete(p);
   unstagedCounts = new Map(unstaged.map((f) => [f.path, f]));
   stagedCounts = new Map(staged.map((f) => [f.path, f]));
   branchEl.replaceChildren(icon("git-branch"), ` ${headLabel(branch, sha)}`);
@@ -639,38 +672,64 @@ export const gitOpState = () => opState;
 
 const stagedEntries = () => entries.filter((e) => e.index !== " " && e.index !== "?" && !opState.conflicts.includes(e.path));
 
-/// Commit needs a message and something to commit (staged files, selected files, or Amend), and is off while one runs.
-export const commitReady = (o: { message: string; staged: number; selected: number; amend: boolean; busy: boolean; conflicts: number }) =>
-  !o.busy && !o.conflicts && !!o.message.trim() && (o.amend || o.staged > 0 || o.selected > 0);
+/// Commit needs a message and files to commit (ticked, else staged), or Amend; it is off while a commit runs.
+export const commitReady = (o: { message: string; files: number; amend: boolean; busy: boolean; conflicts: number }) =>
+  !o.busy && !o.conflicts && !!o.message.trim() && (o.amend || o.files > 0);
+
+/// The files the next commit takes: the ticked ones, or the staged set when nothing is ticked.
+const commitFiles = () => (included.size ? [...included] : stagedEntries().map((e) => e.path));
 
 function updateCommitEnabled() {
-  const ready = commitReady({ message: message.value, staged: stagedEntries().length, selected: selection.size, amend: amendBox.checked, busy: committing, conflicts: opState.conflicts.length });
-  commitBtn.disabled = commitPushBtn.disabled = !ready;
-  commitBtn.title = committing ? "Committing…" : ready ? tip(amendBox.checked ? "Amend the last commit" : "Commit staged changes") : opState.conflicts.length ? "Resolve the merge conflicts first" : !message.value.trim() ? "Enter a commit message" : "Stage or select files to commit";
+  const n = commitFiles().length;
+  const amend = amendBox.checked;
+  const files = `${n} file${n === 1 ? "" : "s"}`;
+  const ready = commitReady({ message: message.value, files: n, amend, busy: committing, conflicts: opState.conflicts.length });
+  commitBtn.disabled = !ready;
+  commitPushBtn.disabled = !ready || amend;
+  commitBtn.textContent = amend ? (n ? `Amend (${files})` : "Amend") : n ? `Commit ${files}` : "Commit";
+  commitBtn.title = committing
+    ? "Committing…"
+    : ready
+      ? tip(amend ? `Amend the last commit${n ? ` with ${files}` : ""}` : `Commit ${files}${included.size ? " (ticked)" : " (staged)"}`)
+      : opState.conflicts.length
+        ? "Resolve the merge conflicts first"
+        : !message.value.trim()
+          ? "Enter a commit message"
+          : "Stage files or tick them to commit";
+  commitPushBtn.title = amend ? "Commit and Push is off while amending" : "Commit and Push…";
+}
+
+/// True when HEAD is already on its upstream, so amending rewrites a pushed commit.
+async function headPushed() {
+  return (await api.git(root(), "rev-list", "--count", "@{upstream}..HEAD").catch(() => "")).trim() === "0";
 }
 
 export async function commit(push = false) {
   if (committing) return;
   const msg = message.value.trim();
   const amend = amendBox.checked;
+  if (amend && push) return toast("Commit and Push is off while amending.");
   if (!msg) return toast("Enter a commit message.");
   if (opState.conflicts.length) return toast("Resolve the merge conflicts first.", "error");
-  const staged = stagedEntries();
-  const picked = staged.length ? [] : [...selection];
-  if (!staged.length && !picked.length && !amend) return toast("Nothing staged. Stage or select files first.");
+  const picked = [...included];
+  const files = commitFiles();
+  if (!files.length && !amend) return toast("Nothing to commit. Stage files or tick them in the list.");
   committing = true;
   updateCommitEnabled();
   try {
+    if (amend && (await headPushed()) && !(await ask("The last commit is already pushed. Amending rewrites it, and the branch will need a force push. Amend anyway?", { kind: "warning", okLabel: "Amend", cancelLabel: "Cancel" })))
+      return;
     if (setting("git.checkProblemsBeforeCommit")) {
-      const paths = new Set([...staged.map((e) => e.path), ...picked].map(abs));
+      const paths = new Set(files.map(abs));
       const errors = monaco.editor.getModelMarkers({}).filter((m) => m.severity === monaco.MarkerSeverity.Error && paths.has(m.resource.fsPath));
       if (errors.length && !(await ask(`${errors.length} error(s) in the files to commit (see Problems). Commit anyway?`, { kind: "warning", okLabel: "Commit", cancelLabel: "Cancel" }))) return;
     }
-    if (picked.length) await api.gitStage(root(), picked);
-    const out = await api.gitCommit(root(), msg, amend);
+    const untracked = picked.filter((p) => entryFor(p)?.index === "?");
+    if (untracked.length) await api.gitStage(root(), untracked);
+    const out = await api.gitCommit(root(), msg, amend, picked.length ? withOrig(picked) : undefined);
     message.value = "";
     amendBox.checked = false;
-    selection.clear();
+    included.clear();
     toast(out.split("\n")[0] || "Committed");
     if (push) await pushCurrent();
   } catch (e) {

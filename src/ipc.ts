@@ -121,8 +121,8 @@ export const api = {
   git: (root: string, ...args: string[]) => invoke<string>("git_run", { root, args }),
   gitStage: (root: string, paths: string[]) => invoke<void>("git_stage", { root, paths }),
   gitUnstage: (root: string, paths: string[]) => invoke<void>("git_unstage", { root, paths }),
-  gitCommit: (root: string, message: string, amend = false) => invoke<string>("git_commit", { root, message, amend }),
-  gitRollback: (root: string, paths: string[], deleteAdded: boolean) => invoke<void>("git_rollback", { root, paths, deleteAdded }),
+  gitCommit: (root: string, message: string, amend = false, paths?: string[]) => invoke<string>("git_commit", { root, message, amend, paths: paths ?? null }),
+  gitRollback: (root: string, paths: string[], deleteAdded: boolean) => invoke<{ reverted: number; deleted: number }>("git_rollback", { root, paths, deleteAdded }),
   gitBlameLine: (root: string, path: string, line: number) =>
     invoke<{ hash: string; author: string; time: number; summary: string }>("git_blame_line", { root, path, line }),
   freePort: () => invoke<number>("free_port"),

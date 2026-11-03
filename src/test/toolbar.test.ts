@@ -77,27 +77,50 @@ describe("git actions", () => {
     fake.handlers.set("git_run", ({ args }: { args: string[] }) => git(args));
   });
 
-  it("Stash and Checkout restores the changes on the new branch (B28)", async () => {
-    git = (a) => (a[0] === "status" ? " M a.rb\n" : "");
+  /// A fake stash stack: `push` adds a commit unless `pushMakes` is empty, `fail` names subcommands that error.
+  const stashRepo = (opts: { pushMakes?: string; fail?: string[] } = {}) => {
+    const stack = ["older"];
+    git = (a) => {
+      if (opts.fail?.includes(a[0])) {
+        if (a[0] === "stash" && a[1] === "push" && opts.pushMakes) stack.unshift(opts.pushMakes);
+        if (a[0] !== "stash" || a[1] === "push") return Promise.reject(`cannot ${a[0]}`);
+      }
+      if (a[0] === "status") return " M a.rb\n";
+      if (a.join(" ") === "rev-parse -q --verify refs/stash") return stack[0] ? `${stack[0]}\n` : Promise.reject("");
+      if (a.join(" ") === "stash list --format=%H") return stack.join("\n");
+      if (a[0] === "stash" && a[1] === "push" && opts.pushMakes) stack.unshift(opts.pushMakes);
+      return "";
+    };
     vi.mocked(message).mockResolvedValueOnce("Stash and Checkout" as never);
+  };
+
+  it("Stash and Checkout restores exactly its own stash on the new branch (B28)", async () => {
+    stashRepo({ pushMakes: "mine" });
     await checkout("feature");
-    expect(runs().slice(0, 3)).toEqual(["status --porcelain --untracked-files=no", "stash push -m garnet: before checkout feature", "checkout feature"]);
-    expect(runGitOp).toHaveBeenCalledWith("Restore local changes", ["stash", "pop"]);
+    expect(runs().filter((r) => !r.startsWith("rev-parse") && !r.startsWith("stash list")).slice(0, 3)).toEqual(["status --porcelain --untracked-files=no", "stash push -m garnet: before checkout feature", "checkout feature"]);
+    expect(runGitOp).toHaveBeenCalledWith("Restore local changes", ["stash", "pop", "stash@{0}"]);
+  });
+
+  it("pops nothing when the stash push made no stash", async () => {
+    stashRepo();
+    await checkout("feature");
+    expect(runs()).toContain("checkout feature");
+    expect(runGitOp).not.toHaveBeenCalled();
   });
 
   it("puts the stash back when the checkout fails, and never checks out when the stash fails (B28)", async () => {
-    git = (a) => (a[0] === "status" ? " M a.rb\n" : a[0] === "checkout" ? Promise.reject("error: would be overwritten") : "");
-    vi.mocked(message).mockResolvedValueOnce("Stash and Checkout" as never);
+    stashRepo({ pushMakes: "mine", fail: ["checkout"] });
     await checkout("feature");
-    expect(runGitOp).toHaveBeenCalledWith("Checkout failed; restore local changes", ["stash", "pop"]);
+    expect(runGitOp).toHaveBeenCalledWith("Checkout failed; restore local changes", ["stash", "pop", "stash@{0}"]);
 
     fake.invocations.length = 0;
     vi.mocked(runGitOp).mockClear();
     document.getElementById("overlay-root")!.replaceChildren();
-    git = (a) => (a[0] === "status" ? " M a.rb\n" : a[0] === "stash" ? Promise.reject("cannot stash") : "");
-    vi.mocked(message).mockResolvedValueOnce("Stash and Checkout" as never);
+    stashRepo({ pushMakes: "partial", fail: ["stash"] });
     await checkout("feature");
     expect(runs().some((r) => r.startsWith("checkout"))).toBe(false);
+    expect(runs()).toContain("stash drop stash@{0}");
+    expect(runs()).not.toContain("stash drop stash@{1}");
     expect(runGitOp).not.toHaveBeenCalled();
     expect(document.querySelector(".toast.error")?.textContent).toContain("cannot stash");
   });

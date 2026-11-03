@@ -77,11 +77,22 @@ pub fn check_write(path: &str, roots: &[PathBuf], allow_link: bool) -> Result<()
     }
     let mut canonical = fs::canonicalize(existing).map_err(e2s)?;
     canonical.extend(rest.iter().rev());
-    if roots.iter().any(|r| canonical.starts_with(r)) {
-        Ok(())
-    } else {
-        Err(format!("refusing to write {path}: outside the project"))
+    if !roots.iter().any(|r| canonical.starts_with(r)) {
+        return Err(format!("refusing to write {path}: outside the project"));
     }
+    if canonical.components().any(|c| c.as_os_str() == ".git") || roots.iter().flat_map(|r| git_dirs(r)).any(|d| canonical.starts_with(d)) {
+        return Err(format!("refusing to write {path}: inside a git directory (its config can run programs)"));
+    }
+    Ok(())
+}
+
+/// Git directories a root points to through a `.git` file (linked worktree, --separate-git-dir) and their common dir.
+fn git_dirs(root: &Path) -> Vec<PathBuf> {
+    let Some(dir) = fs::read_to_string(root.join(".git")).ok().and_then(|t| t.strip_prefix("gitdir:").map(|d| root.join(d.trim()))) else {
+        return Vec::new();
+    };
+    let common = fs::read_to_string(dir.join("commondir")).ok().map(|c| dir.join(c.trim()));
+    [Some(dir), common].into_iter().flatten().filter_map(|d| fs::canonicalize(d).ok()).collect()
 }
 
 fn write_new(p: &Path, content: &str, create_new: bool) -> Result<(), String> {
@@ -222,6 +233,16 @@ mod tests {
         assert!(check_write(&at(&outside.join("secret")), &roots, false).is_err());
         assert!(check_write(&format!("{}/app/../../outside/secret", proj.display()), &roots, false).is_err());
         assert!(check_write("relative.rb", &roots, false).is_err());
+        fs::create_dir_all(proj.join(".git")).unwrap();
+        assert!(check_write(&at(&proj.join(".git/config")), &roots, false).unwrap_err().contains("git directory"));
+        assert!(check_write(&at(&proj.join("vendor/x/.git/hooks/pre-commit")), &roots, false).is_err());
+        assert!(check_write(&at(&proj.join(".gitattributes")), &roots, false).is_ok());
+        fs::remove_dir_all(proj.join(".git")).unwrap();
+        fs::create_dir_all(proj.join("store/worktrees/wt")).unwrap();
+        fs::write(proj.join("store/worktrees/wt/commondir"), "../..").unwrap();
+        fs::write(proj.join(".git"), "gitdir: store/worktrees/wt\n").unwrap();
+        assert!(check_write(&at(&proj.join("store/worktrees/wt/HEAD")), &roots, false).is_err(), "worktree gitdir");
+        assert!(check_write(&at(&proj.join("store/config")), &roots, false).is_err(), "common dir");
         assert!(write_new(&proj.join("link.rb"), "pwned", false).is_err());
         assert_eq!(fs::read_to_string(outside.join("secret")).unwrap(), "keep");
         fs::remove_dir_all(&base).unwrap();

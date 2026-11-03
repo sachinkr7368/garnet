@@ -42,6 +42,22 @@ describe("settings window", () => {
     expect(row("editor.fontFamily").querySelector("input")!.value).toBe("Menlo");
   });
 
+  it("re-renders after a click released outside the dialog or cancelled", async () => {
+    for (const end of ["pointerup", "pointercancel"]) {
+      document.getElementById("overlay-root")!.replaceChildren();
+      openSettingsWindow("Editor/Font");
+      const dialog = document.querySelector(".st-dialog")!;
+      const box = row("editor.fontLigatures").querySelector("input")!;
+      dialog.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      await updateSetting("editor.fontFamily", end);
+      expect(box.isConnected).toBe(true);
+      window.dispatchEvent(new Event(end));
+      await settle();
+      expect(box.isConnected, end).toBe(false);
+      expect(row("editor.fontFamily").querySelector("input")!.value).toBe(end);
+    }
+  });
+
   it("keeps the Keymap search filter after adding a shortcut", async () => {
     commands({ id: "saveAll", title: "File: Save All", key: "cmd+s", run: () => {} }, { id: "goToLine", title: "Navigate: Go to Line…", key: "cmd+l", run: () => {} });
     openSettingsWindow("Keymap");

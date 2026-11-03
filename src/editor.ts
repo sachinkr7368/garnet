@@ -667,6 +667,18 @@ window.addEventListener("blur", () => {
 export const saveActive = () => active && save(active);
 export const saveAll = () => Promise.all(tabs.filter(isDirty).map(save));
 /// Titles of file buffers with unsaved changes, once per buffer (an editable diff shares its file's model).
+/// Unsaved file buffers with their text (hot exit backups).
+export const dirtyBuffers = () => [...new Map(tabs.filter((t) => t.kind === "file" && isDirty(t)).map((t) => [t.model, { path: t.path, text: t.model.getValue() }])).values()];
+
+/// Puts backed-up text into a file's buffer as an undoable, unsaved edit; false when there is nothing to restore.
+export async function restoreBuffer(b: { path: string; text: string }): Promise<boolean> {
+  await openFile(b.path);
+  const tab = tabs.find((t) => t.kind === "file" && t.path === b.path);
+  if (!tab || tab.model.getValue() === b.text) return false;
+  tab.model.pushEditOperations([], [{ range: tab.model.getFullModelRange(), text: b.text }], () => null);
+  return true;
+}
+
 export const unsavedTitles = () => [...new Map(tabs.filter((t) => t.kind !== "view" && isDirty(t)).map((t) => [t.model, t.title])).values()];
 export const closeActive = () => active && closeTab(active);
 /// The active file or diff tab; view tabs (database console, table data, DDL) have no file path, see activeViewTab().

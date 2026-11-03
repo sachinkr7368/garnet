@@ -203,7 +203,11 @@ let projectBroken = false;
 
 async function readJson(read: () => Promise<string | null>, label: string, path?: string): Promise<Record<string, unknown> | null> {
   const raw = await read().catch(() => null);
-  if (raw === null || !raw.trim()) return {};
+  if (raw === null) return {};
+  if (!raw.trim()) {
+    void configProblem(label, `${label} is empty. Garnet keeps the previous settings and will not overwrite the file until it is fixed (delete it to start fresh).`, path);
+    return null;
+  }
   try {
     const v = JSON.parse(raw);
     return v && typeof v === "object" ? v : {};
@@ -250,12 +254,15 @@ export async function updateSetting(key: string, value: unknown, scope: "global"
   if (scope === "project") {
     if (!projectRoot) return toast("Open a project to use project settings.", "error");
     const path = `${projectRoot}/.garnet/settings.json`;
+    if (projectBroken) await loadSettings(projectRoot);
     if (projectBroken) return void configProblem(".garnet/settings.json", ".garnet/settings.json is not valid JSON; fix it before changing project settings.", path);
     const text = JSON.stringify(set({ ...projectValues }), null, 2) + "\n";
     await api.createPath(`${projectRoot}/.garnet`, true).catch(() => {});
     await api.writeFile(path, text);
     set(projectValues);
   } else {
+    // The file may have been fixed outside Garnet since it was read.
+    if (globalBroken) await loadSettings(projectRoot);
     if (globalBroken) return void configProblem("settings.json", "settings.json is not valid JSON; fix it before changing settings.");
     if (!(await modifyConfig<Record<string, unknown>>("settings.json", {}, (v) => set({ ...v })))) return;
     set(globalValues);
@@ -289,8 +296,8 @@ export async function loadSession(root: string): Promise<Session | undefined> {
   return (await readConfig<Record<string, Session>>("sessions.json", {}))[root];
 }
 
-export async function saveSession(root: string, session: Session) {
-  await modifyConfig<Record<string, Session>>("sessions.json", {}, (all) => ({ ...all, [root]: session }));
+export async function saveSession(root: string, session: Session): Promise<boolean> {
+  return modifyConfig<Record<string, Session>>("sessions.json", {}, (all) => ({ ...all, [root]: session }));
 }
 
 /// Minimal glob → RegExp for file names and relative paths (*, **, ?, {a,b}).

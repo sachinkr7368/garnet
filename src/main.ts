@@ -7,7 +7,7 @@ import { attachToProcess, debugView, evaluateSelection, flushBreakpoints, gotoBr
 import { rerunAll, rerunFailed, testResultsView } from "./testresults";
 import {
   activeTab, allTabs, closeActive, closeAll, cycleTab, diffActive, events, goToDiff, handleFsChanged, monaco, navigateBack, navigateForward, openFile,
-  focusActiveTab, recentFileList, recentLocations, saveActive, saveAll, targetEditor, unsavedTitles,
+  dirtyBuffers, focusActiveTab, recentFileList, recentLocations, restoreBuffer, saveActive, saveAll, targetEditor, unsavedTitles,
 } from "./editor";
 import {
   blameCurrentLine, commitView, compareWithBranch, diffActiveFile, gitOpState, goToChange, onGitChanged, refreshGit, rollbackLines, showChangeAtCaret, stageHunkAtCaret,
@@ -28,7 +28,8 @@ import { editConfigurations, launch, loadRunConfigs, newConfig, pickConfiguratio
 import { findInFiles, replaceInFiles, searchView } from "./search";
 import { loadCodeStyle } from "./codestyle";
 import { addRecentProject, askTrust, checkTrust, editableSettingsPath, isTrusted, loadSession, onSettingsChange, trustProject, loadSettings, recentProjects, saveSession, setting, toggleTheme, updateSetting } from "./settings";
-import { confirmQuit } from "./quit";
+import { offerRestore, backupUnsaved } from "./hotexit";
+import { listenForQuit, quitFlow, type QuitHooks } from "./quit";
 import { openSettingsWindow } from "./settingsui";
 import { cloneDialog, createGist, createPullRequest, githubSignIn, openOnGitHub, refreshAccount } from "./github";
 import { openPullRequestByNumber, pullRequestsView, showPullRequests } from "./prs";
@@ -400,27 +401,26 @@ onSettingsChange(() => void renderWelcome());
 
 /// Project lifecycle
 
-async function persistNow() {
-  if (!state.project) return;
+async function persistNow(): Promise<boolean> {
+  if (!state.project) return true;
   const tabs = allTabs().filter((t) => t.kind === "file");
-  await saveSession(state.project.root, { tabs: tabs.map((t) => t.path), active: activeTab()?.path, expanded: expandedPaths(), bottom: bottom.active });
+  return saveSession(state.project.root, { tabs: tabs.map((t) => t.path), active: activeTab()?.path, expanded: expandedPaths(), bottom: bottom.active });
 }
 const persistSession = debounce(() => void persistNow(), 500);
 
-/// ⌘Q, the red close button and the Quit menu item: prompt for unsaved files, then tell the backend.
-let quitting = false;
-async function quit() {
-  if (quitting) return;
-  quitting = true;
-  let ok = false;
-  try {
-    ok = await confirmQuit(unsavedTitles(), async () => (await saveAll()).every(Boolean));
-    if (ok) await Promise.all([persistNow(), flushBreakpoints()]).catch(() => {});
-  } finally {
-    quitting = false;
-    await invoke("quit_now", { quit: ok }).catch(() => {});
-  }
-}
+/// ⌘Q, the red close button, Dock Quit and logout: prompt for unsaved files, save the session, then tell the backend.
+const quitHooks: QuitHooks = {
+  unsaved: unsavedTitles,
+  saveAll: async () => (await saveAll()).every(Boolean),
+  persist: async () => {
+    const [session, bps] = await Promise.all([persistNow(), flushBreakpoints()]);
+    // Saved or deliberately discarded: nothing is left to restore next time.
+    if (session && bps && state.project) await backupUnsaved(state.project.root, []);
+    return session && bps;
+  },
+};
+const quit = () => quitFlow(quitHooks);
+setInterval(() => state.project && void backupUnsaved(state.project.root, dirtyBuffers()), 5000);
 
 async function openProject(path: string) {
   let info;
@@ -451,6 +451,7 @@ async function openProject(path: string) {
   if (isTrusted() && session?.bottom && setting("appearance.restoreBottomPanel")) bottom.show(session.bottom);
   for (const p of session?.tabs ?? []) await openFile(p).catch(() => {});
   if (session?.active) await openFile(session.active).catch(() => {});
+  void offerRestore(info.root, restoreBuffer);
   events.tabsChanged.on(persistSession);
   events.activated.on(persistSession);
   treeView.addEventListener("click", persistSession);
@@ -473,7 +474,8 @@ listen<{ count: number; ms: number }>("index-ready", (e) => {
   indexSlot.title = `Indexed in ${e.payload.ms} ms`;
 });
 listen<string>("menu", (e) => runCommand(e.payload));
-listen("close-requested", () => void quit());
+void listenForQuit(quitHooks);
+window.addEventListener("garnet:open-settings", (e) => openSettingsWindow((e as CustomEvent<string>).detail));
 window.addEventListener("garnet:open-file", (e) => void openFile((e as CustomEvent<string>).detail));
 window.addEventListener("garnet:trusted", () => {
   refreshToolbar();

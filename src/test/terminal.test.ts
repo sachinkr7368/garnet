@@ -61,4 +61,14 @@ describe("terminals", () => {
     channels[1].onmessage({ type: "exit", code: null });
     expect(terminals.items).toHaveLength(1);
   });
+
+  it("keeps a shell tab that failed, so its error and exit code stay readable", async () => {
+    let channel: Ch | null = null;
+    fake.handlers.set("pty_spawn", (args: { onEvent: Ch }) => ((channel = args.onEvent), 1));
+    newTerminal();
+    await tick();
+    channel!.onmessage({ type: "data", data: "zsh: bad option: -Z\r\n" });
+    channel!.onmessage({ type: "exit", code: 1 });
+    expect(terminals.items).toHaveLength(1);
+  });
 });

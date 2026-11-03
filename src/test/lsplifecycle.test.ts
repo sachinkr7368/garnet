@@ -54,6 +54,28 @@ describe("Ruby LSP lifecycle", () => {
     expect(document.querySelector(".toast.error")).toBeNull();
   });
 
+  it("overlapping starts: the newest one wins and the older start's late answer is ignored", async () => {
+    let finishFirst = (_v: unknown) => {};
+    const answer = { command: "ruby-lsp", manager: "none", reason: "", prefix: [] };
+    let calls = 0;
+    fake.handlers.set("lsp_start", (args: { onEvent: Ch }) => {
+      channels.push(args.onEvent);
+      return ++calls === 1 ? new Promise((r) => (finishFirst = r)) : answer;
+    });
+    const first = startLsp();
+    await tick();
+    const second = startLsp();
+    await second;
+    finishFirst(answer);
+    await first;
+    await tick();
+    expect(status()).toBe("Ruby LSP");
+    expect(sent.filter((m) => m.method === "initialize")).toHaveLength(1);
+    channels.at(-2)!.onmessage({ type: "exit", code: 1 });
+    await tick();
+    expect(status()).toBe("Ruby LSP");
+  });
+
   it("sends nothing but initialize until the server has initialized", async () => {
     holdInitialize = true;
     const started = startLsp();

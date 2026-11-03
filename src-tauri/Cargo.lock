@@ -1172,6 +1172,7 @@ dependencies = [
  "native-tls",
  "notify",
  "nucleo-matcher",
+ "objc2",
  "portable-pty",
  "postgres-native-tls",
  "reqwest",

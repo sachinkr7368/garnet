@@ -45,33 +45,81 @@ pub async fn list_dir(path: String) -> Result<Vec<Entry>, String> {
 pub async fn read_file(app: AppHandle, index: State<'_, Index>, path: String) -> Result<String, String> {
     let mut roots = write_roots(&app, &index);
     roots.extend(app.path().app_data_dir().ok().and_then(|d| fs::canonicalize(d).ok()));
-    read_text(&check_read(&path, &roots)?)
+    if let Ok(project) = index.root() {
+        roots.extend(tauri::async_runtime::spawn_blocking(move || ruby_roots(&project)).await.map_err(e2s)?);
+    }
+    let (canonical, id) = check_read(&path, &roots)?;
+    read_text(&canonical, Some(id))
 }
 
-fn read_text(path: &Path) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(e2s)?;
+/// Reads a file; with `id` (device, inode) it must be the file that was checked: opened without following a final
+/// symlink and compared after opening, so swapping the file or a parent directory in between is refused.
+fn read_text(path: &Path, id: Option<(u64, u64)>) -> Result<String, String> {
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+    let mut file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path).map_err(e2s)?;
+    let meta = file.metadata().map_err(e2s)?;
+    if id.is_some_and(|id| id != (meta.dev(), meta.ino())) {
+        return Err(format!("{} changed while it was being opened", path.display()));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(e2s)?;
     if bytes.iter().take(8000).any(|&b| b == 0) {
         return Err("binary file".into());
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Ruby's standard library and installed gems: public code that go to declaration, the debugger and backtrace links
-/// open, so it stays readable outside the project.
-fn ruby_library(p: &Path) -> bool {
-    let parts: Vec<&str> = p.components().filter_map(|c| if let Component::Normal(s) = c { s.to_str() } else { None }).collect();
-    parts.contains(&"gems") || parts.windows(2).any(|w| w == ["lib", "ruby"])
+/// Where the project's Ruby keeps its standard library and gems (asked once per project from that Ruby), plus the
+/// Bundler `path:` gems from Gemfile.lock: public code that go to declaration, the debugger and backtrace links open.
+pub fn ruby_roots(project: &Path) -> Vec<PathBuf> {
+    static CACHE: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, Vec<PathBuf>>>> = std::sync::Mutex::new(None);
+    if let Some(hit) = CACHE.lock().unwrap().as_ref().and_then(|c| c.get(project).cloned()) {
+        return hit;
+    }
+    let lock = fs::read_to_string(project.join("Gemfile.lock")).unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = path_gems(&lock).into_iter().map(|p| project.join(p)).collect();
+    dirs.extend(ruby_lib_dirs(project));
+    let dirs: Vec<PathBuf> = dirs.into_iter().filter_map(|d| fs::canonicalize(d).ok()).filter(|d| d.parent().is_some() && d != Path::new("/")).collect();
+    CACHE.lock().unwrap().get_or_insert_with(Default::default).insert(project.to_path_buf(), dirs.clone());
+    dirs
 }
 
-/// Reads are limited to `roots` (the project and Garnet's own dirs) and Ruby library code, after resolving
-/// symlinks; returns the resolved path to read, so a link swapped in afterwards cannot redirect it.
-pub fn check_read(path: &str, roots: &[PathBuf]) -> Result<PathBuf, String> {
-    let canonical = fs::canonicalize(path).map_err(e2s)?;
-    if roots.iter().any(|r| canonical.starts_with(r)) || ruby_library(&canonical) {
-        Ok(canonical)
-    } else {
-        Err(format!("refusing to read {path}: outside the project"))
+fn ruby_lib_dirs(project: &Path) -> Vec<PathBuf> {
+    let (_, mut argv) = crate::lsp::project_ruby(project, "auto");
+    argv.push("ruby".into());
+    let script = r#"puts Gem.path; puts RbConfig::CONFIG.values_at("rubylibdir", "rubyarchdir", "sitelibdir", "vendorlibdir").compact"#;
+    let out = crate::env::command(project, &argv[0]).args(&argv[1..]).args(["-e", script]).stdin(std::process::Stdio::null()).output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.starts_with('/')).map(PathBuf::from).collect(),
+        _ => vec![],
     }
+}
+
+/// `remote:` of each PATH section in Gemfile.lock (gems Bundler loads from a local directory).
+fn path_gems(lock: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut in_path = false;
+    for line in lock.lines() {
+        if !line.starts_with(' ') {
+            in_path = line == "PATH";
+        } else if let Some(remote) = line.strip_prefix("  remote: ").filter(|_| in_path) {
+            out.push(remote.trim().to_string());
+        }
+    }
+    out
+}
+
+/// Reads are limited to `roots` (the project, Garnet's own dirs and the project's Ruby library dirs) after resolving
+/// symlinks. Returns the resolved path and its (device, inode) for `read_text` to confirm it opened that same file.
+pub fn check_read(path: &str, roots: &[PathBuf]) -> Result<(PathBuf, (u64, u64)), String> {
+    use std::os::unix::fs::MetadataExt;
+    let canonical = fs::canonicalize(path).map_err(e2s)?;
+    if !roots.iter().any(|r| canonical.starts_with(r)) {
+        return Err(format!("refusing to read {path}: outside the project"));
+    }
+    let meta = fs::metadata(&canonical).map_err(e2s)?;
+    Ok((canonical, (meta.dev(), meta.ino())))
 }
 
 /// Asks for a file in a native open dialog (never a path from the webview) and returns its text, or None.
@@ -85,7 +133,7 @@ pub async fn import_file(app: AppHandle, title: String, extension: String) -> Re
     let Some(picked) = picked else { return Ok(None) };
     let path = picked.into_path().map_err(e2s)?;
     check_export_path(&path, &extension)?;
-    read_text(&path).map(Some)
+    read_text(&path, None).map(Some)
 }
 
 /// Where Garnet may write: the open project and its own config directory.
@@ -266,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_stay_inside_the_project_or_ruby_libraries() {
+    fn reads_stay_inside_the_project_or_its_ruby_library_dirs() {
         let base = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("garnet-read-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let (proj, home) = (base.join("proj"), base.join("home"));
@@ -274,19 +322,48 @@ mod tests {
         fs::create_dir_all(home.join(".ssh")).unwrap();
         fs::create_dir_all(home.join(".rbenv/versions/3.3.0/lib/ruby/3.3.0")).unwrap();
         fs::create_dir_all(home.join(".gem/ruby/3.3.0/gems/rack-3.0/lib")).unwrap();
-        for f in ["proj/app/a.rb", "home/.ssh/id_rsa", "home/.rbenv/versions/3.3.0/lib/ruby/3.3.0/set.rb", "home/.gem/ruby/3.3.0/gems/rack-3.0/lib/rack.rb"] {
+        fs::create_dir_all(home.join("work/gems/secrets")).unwrap();
+        fs::create_dir_all(home.join("other/lib/ruby")).unwrap();
+        for f in ["proj/app/a.rb", "home/.ssh/id_rsa", "home/.rbenv/versions/3.3.0/lib/ruby/3.3.0/set.rb", "home/.gem/ruby/3.3.0/gems/rack-3.0/lib/rack.rb", "home/work/gems/secrets/key.rb", "home/other/lib/ruby/x.rb"] {
             fs::write(base.join(f), "x").unwrap();
         }
         std::os::unix::fs::symlink(home.join(".ssh/id_rsa"), proj.join("key.rb")).unwrap();
-        let roots = vec![proj.clone()];
+        let roots = vec![proj.clone(), home.join(".rbenv/versions/3.3.0/lib/ruby/3.3.0"), home.join(".gem/ruby/3.3.0")];
         let at = |p: PathBuf| p.to_string_lossy().into_owned();
         assert!(check_read(&at(proj.join("app/a.rb")), &roots).is_ok());
         assert!(check_read(&at(home.join(".rbenv/versions/3.3.0/lib/ruby/3.3.0/set.rb")), &roots).is_ok());
-        assert!(check_read(&at(home.join(".gem/ruby/3.3.0/gems/rack-3.0/lib/rack.rb")), &roots).is_ok());
+        let (gem, id) = check_read(&at(home.join(".gem/ruby/3.3.0/gems/rack-3.0/lib/rack.rb")), &roots).unwrap();
+        assert_eq!(read_text(&gem, Some(id)).unwrap(), "x");
+        assert!(check_read(&at(home.join("work/gems/secrets/key.rb")), &roots).unwrap_err().contains("outside"), "any /gems/ path");
+        assert!(check_read(&at(home.join("other/lib/ruby/x.rb")), &roots).unwrap_err().contains("outside"), "any lib/ruby path");
         assert!(check_read(&at(home.join(".ssh/id_rsa")), &roots).unwrap_err().contains("outside"));
         assert!(check_read(&at(proj.join("key.rb")), &roots).unwrap_err().contains("outside"));
         assert!(check_read(&format!("{}/app/../../home/.ssh/id_rsa", proj.display()), &roots).is_err());
+        // The file opened must be the one checked.
+        let (checked, id) = check_read(&at(proj.join("app/a.rb")), &roots).unwrap();
+        fs::remove_file(&checked).unwrap();
+        std::os::unix::fs::symlink(home.join(".ssh/id_rsa"), &checked).unwrap();
+        assert!(read_text(&checked, Some(id)).is_err(), "a symlink swapped in after the check was followed");
+        fs::remove_file(&checked).unwrap();
+        fs::write(&checked, "y").unwrap();
+        assert!(read_text(&checked, Some(id)).is_err(), "a different file swapped in after the check was read");
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn asks_the_projects_ruby_for_its_library_dirs() {
+        let dirs = ruby_lib_dirs(Path::new(env!("CARGO_MANIFEST_DIR")));
+        // No Ruby on this machine: nothing outside the project is readable, which is the safe answer.
+        if !dirs.is_empty() {
+            assert!(dirs.iter().any(|d| d.join("rubygems.rb").exists()), "{dirs:?}");
+        }
+    }
+
+    #[test]
+    fn bundler_path_gems_come_from_gemfile_lock_path_sections() {
+        let lock = "GIT\n  remote: https://github.com/x/y.git\n  specs:\n\nPATH\n  remote: ../engines/billing\n  specs:\n    billing (0.1.0)\n\nPATH\n  remote: vendor/gems/z\n  specs:\n\nGEM\n  remote: https://rubygems.org/\n";
+        assert_eq!(path_gems(lock), vec!["../engines/billing", "vendor/gems/z"]);
+        assert!(path_gems("").is_empty());
     }
 
     #[test]

@@ -36,6 +36,8 @@ describe("run.json validation", () => {
     [{ name: "x", type: "rspec", bundler: "yes" }],
     [{ name: "x", type: "rspec", env: ["A=1"] }],
     [{ name: "x", type: "rspec", env: { A: 1 } }],
+    [{ name: "x", type: "rspec", env: { "A;touch /tmp/pwn": "1" } }],
+    [{ name: "x", type: "rspec", env: { "1A": "1" } }],
   ])("rejects %j", (raw) => expect(validateConfig(raw)).toBeNull());
 
   it("drops interpreter-hijacking env vars", () => {

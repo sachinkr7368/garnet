@@ -139,13 +139,24 @@ export function openSettingsWindow(initialPage = "Appearance") {
       h("button", { class: "btn primary", onclick: close }, "Done"),
     ),
   );
-  dialog.addEventListener("pointerdown", () => (pointerDown = true), true);
-  dialog.addEventListener("pointerup", () =>
+  // On window: the pointer may be released outside the dialog, or the press cancelled.
+  const release = () => {
+    window.removeEventListener("pointerup", release, true);
+    window.removeEventListener("pointercancel", release, true);
     setTimeout(() => {
       pointerDown = false;
       if (pending && backdrop) render();
       pending = false;
-    }),
+    });
+  };
+  dialog.addEventListener(
+    "pointerdown",
+    () => {
+      pointerDown = true;
+      window.addEventListener("pointerup", release, true);
+      window.addEventListener("pointercancel", release, true);
+    },
+    true,
   );
   backdrop = modal(dialog, close, { autofocus: search });
   render();

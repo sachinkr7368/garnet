@@ -51,7 +51,10 @@ pub async fn open_project(app: AppHandle, path: String) -> Result<ProjectInfo, S
     let handle = app.clone();
     std::thread::spawn(move || index::rebuild(&handle));
     let warm = root.clone();
-    std::thread::spawn(move || env::shell_env(&warm));
+    std::thread::spawn(move || {
+        env::shell_env(&warm);
+        crate::fsops::ruby_roots(&warm);
+    });
     Ok(detect(&root))
 }
 
@@ -123,12 +126,18 @@ pub fn write_config_file(path: &Path, content: &str, expected: Option<&str>) -> 
     if unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) } != 0 {
         return Err(std::io::Error::last_os_error().to_string());
     }
-    let current = std::fs::read_to_string(path).ok();
+    // A symlinked config (dotfiles repo) is updated in place at its target, not replaced by a plain file.
+    let real = std::fs::canonicalize(path)
+        .or_else(|_| std::fs::read_link(path).map(|t| dir.join(t)))
+        .unwrap_or_else(|_| path.to_path_buf());
+    let current = std::fs::read_to_string(&real).ok();
     if path.extension().is_some_and(|e| e == "json") {
-        if let Some(text) = current.as_deref().filter(|t| !t.trim().is_empty()) {
-            if let Err(e) = serde_json::from_str::<serde_json::Value>(text) {
+        if let Some(text) = current.as_deref() {
+            // An existing empty file is a truncated one, not `{}`; only a missing file starts fresh.
+            let problem = if text.trim().is_empty() { Some("the file is empty".to_string()) } else { serde_json::from_str::<serde_json::Value>(text).err().map(|e| e.to_string()) };
+            if let Some(e) = problem {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
-                let saved = backup_broken(path, text).map(|b| format!(" A copy is saved as {b}.")).unwrap_or_default();
+                let saved = backup_broken(&real, text).map(|b| format!(" A copy is saved as {b}.")).unwrap_or_default();
                 return Err(format!("{name} is not valid JSON ({e}), so Garnet did not overwrite it.{saved} Fix the file to save changes again."));
             }
         }
@@ -136,16 +145,44 @@ pub fn write_config_file(path: &Path, content: &str, expected: Option<&str>) -> 
     if expected.is_some_and(|x| x != current.as_deref().unwrap_or("")) {
         return Err(CONFIG_CHANGED.into());
     }
+    replace_durably(&real, content)
+}
+
+/// Temp file in the target's own directory, flushed to disk (F_FULLFSYNC on macOS), renamed over the target with
+/// its permissions, then the directory flushed, so a crash or power loss leaves the old or the new file, never neither.
+fn replace_durably(path: &Path, content: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = path.parent().ok_or("invalid config path")?;
     let tmp = dir.join(format!(".{}.{}.tmp", path.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));
-    std::fs::write(&tmp, content).map_err(e2s)?;
-    std::fs::rename(&tmp, path).map_err(|e| {
+    let result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        if let Ok(meta) = std::fs::metadata(path) {
+            f.set_permissions(std::fs::Permissions::from_mode(meta.permissions().mode() & 0o7777))?;
+        }
+        full_sync(&f)?;
+        std::fs::rename(&tmp, path)?;
+        full_sync(&std::fs::File::open(dir)?)
+    })();
+    if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
-        e2s(e)
-    })
+    }
+    result.map_err(e2s)
+}
+
+fn full_sync(f: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    if unsafe { libc::fcntl(std::os::unix::io::AsRawFd::as_raw_fd(f), libc::F_FULLFSYNC) } == 0 {
+        return Ok(());
+    }
+    f.sync_all()
 }
 
 /// `name.bak-<unix seconds>` next to a config file that no longer parses; one copy per distinct broken content.
+/// Never overwrites an existing file: a taken name gets a `-1`, `-2`… suffix.
 fn backup_broken(path: &Path, text: &str) -> Option<String> {
+    use std::io::Write;
     let dir = path.parent()?;
     let prefix = format!("{}.bak-", path.file_name()?.to_str()?);
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
@@ -155,9 +192,15 @@ fn backup_broken(path: &Path, text: &str) -> Option<String> {
         }
     }
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-    let name = format!("{prefix}{secs}");
-    std::fs::write(dir.join(&name), text).ok()?;
-    Some(name)
+    for i in 0..100 {
+        let name = if i == 0 { format!("{prefix}{secs}") } else { format!("{prefix}{secs}-{i}") };
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join(&name)) {
+            Ok(mut f) => return f.write_all(text.as_bytes()).ok().map(|_| name),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 #[tauri::command]
@@ -298,6 +341,39 @@ mod tests {
         write_config_file(&file, "not json is fine to write", None).unwrap();
         let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains(".tmp")).collect();
         assert!(left.is_empty(), "{left:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn empty_and_symlinked_configs_and_taken_backup_names() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("garnet-config-edge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("dotfiles")).unwrap();
+        // An empty existing settings.json is broken; a missing one is created.
+        let file = dir.join("settings.json");
+        std::fs::write(&file, "").unwrap();
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        for s in [secs, secs + 1] {
+            std::fs::write(dir.join(format!("settings.json.bak-{s}")), "someone else's backup").unwrap();
+        }
+        let err = write_config_file(&file, "{}", Some("")).unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "");
+        for s in [secs, secs + 1] {
+            assert_eq!(std::fs::read_to_string(dir.join(format!("settings.json.bak-{s}"))).unwrap(), "someone else's backup");
+        }
+        write_config_file(&dir.join("recent.json"), "[]", Some("")).unwrap();
+        // A symlinked config keeps its link and its target's permissions.
+        let target = dir.join("dotfiles/keymap.json");
+        std::fs::write(&target, "{}").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join("keymap.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        write_config_file(&link, "{\"a\":1}", Some("{}")).unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the symlink was replaced");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"a\":1}");
+        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o600);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

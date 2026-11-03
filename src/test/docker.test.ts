@@ -35,6 +35,12 @@ describe("composeCommand", () => {
     expect(composeCommand(t, "ruby x.rb", { envNames: ["A"], cwd: "./sub/" }, shellQuote)).toBe("docker compose -f 'docker/my compose.yml' run --rm -e A -w '/my app/sub' web sh -c 'ruby x.rb'");
   });
 
+  it("never puts an invalid env name on the command line", () => {
+    const cmd = composeCommand({ ...defaultDocker(), service: "web" }, "rspec", { envNames: ["A_1", "B;touch /tmp/pwn", "$(id)", "1X"], cwd: "" }, shellQuote);
+    expect(cmd).toContain("-e A_1 ");
+    expect(cmd).not.toMatch(/pwn|\$\(id\)|1X/);
+  });
+
   it("picks the debug port: a free published one for run, the configured one for exec", () => {
     expect(debugPortFor({ ...defaultDocker(), mode: "run" }, 5555)).toBe(5555);
     expect(debugPortFor({ ...defaultDocker(), mode: "exec", debugPort: 1234 }, 5555)).toBe(1234);

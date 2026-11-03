@@ -1,5 +1,5 @@
 import { debugSession, sessionFor, stopSession } from "./debug";
-import { checkPublishedPort, composeCommand, debugPortFor, defaultDocker, hostSocket, localfsMap, mapPath, rdbgListen, validateDocker, type DockerTarget } from "./docker";
+import { checkPublishedPort, composeCommand, debugPortFor, defaultDocker, ENV_NAME, hostSocket, localfsMap, mapPath, rdbgListen, validateDocker, type DockerTarget } from "./docker";
 import { activeTab, editor, events, monaco, saveAll } from "./editor";
 import { api } from "./ipc";
 import { askTrust, isTrusted, setting } from "./settings";
@@ -106,7 +106,7 @@ export function validateConfig(raw: unknown): RunConfig | null {
   if (!str(c.args) || !str(c.cwd) || !str(c.envFile)) return null;
   if (c.rubyManager !== undefined && !(typeof c.rubyManager === "string" && MANAGERS.includes(c.rubyManager as RubyManager))) return null;
   if (c.bundler !== undefined && typeof c.bundler !== "boolean") return null;
-  if (c.env !== undefined && (!c.env || typeof c.env !== "object" || Array.isArray(c.env) || Object.values(c.env).some((v) => typeof v !== "string"))) return null;
+  if (c.env !== undefined && (!c.env || typeof c.env !== "object" || Array.isArray(c.env) || Object.entries(c.env).some(([k, v]) => !ENV_NAME.test(k) || typeof v !== "string"))) return null;
   const docker = c.docker === undefined ? undefined : validateDocker(c.docker);
   if (docker === null) return null;
   const base = newConfig(c.type as RunType, c.name);

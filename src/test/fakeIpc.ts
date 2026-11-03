@@ -55,8 +55,9 @@ export const api = new Proxy(
     configRead: async (name: string) => fake.config.get(name) ?? null,
     configWrite: async (name: string, content: string, expected?: string) => {
       const current = fake.config.get(name);
-      if (name.endsWith(".json") && current?.trim()) {
+      if (name.endsWith(".json") && current !== undefined) {
         try {
+          if (!current.trim()) throw new Error("empty");
           JSON.parse(current);
         } catch {
           throw new Error(`${name} is not valid JSON, so Garnet did not overwrite it.`);

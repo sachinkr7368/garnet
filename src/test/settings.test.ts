@@ -56,6 +56,29 @@ describe("config files Garnet writes", () => {
     expect(opened).toEqual(["/config/settings.json"]);
   });
 
+  it("treats an existing empty settings.json as broken, not as {}", async () => {
+    document.getElementById("overlay-root")!.replaceChildren();
+    fake.config.set("settings.json", JSON.stringify({ "editor.fontSize": 15 }));
+    await loadSettings(ROOT);
+    fake.config.set("settings.json", "");
+    await loadSettings(ROOT);
+    expect(setting("editor.fontSize")).toBe(15);
+    expect(problemToasts()[0]?.textContent).toContain("empty");
+    await updateSetting("appearance.theme", "dark");
+    expect(fake.config.get("settings.json")).toBe("");
+  });
+
+  it("saves again once a broken settings.json was fixed outside Garnet, without a reload", async () => {
+    fake.config.set("settings.json", "{ nope");
+    await loadSettings(ROOT);
+    await updateSetting("appearance.theme", "dark");
+    expect(fake.config.get("settings.json")).toBe("{ nope");
+    fake.config.set("settings.json", JSON.stringify({ "editor.fontSize": 17 }));
+    await updateSetting("appearance.theme", "dark");
+    expect(JSON.parse(fake.config.get("settings.json")!)).toEqual({ "editor.fontSize": 17, "appearance.theme": "dark" });
+    expect(setting("editor.fontSize")).toBe(17);
+  });
+
   it("merges a key into what is on disk now, so another window's change survives", async () => {
     await loadSettings(ROOT);
     let first = true;

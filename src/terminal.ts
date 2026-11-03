@@ -107,7 +107,7 @@ export class PtyView {
     } catch (e) {
       this.exited = true;
       if (!this.disposed) this.term.write(`\x1b[31m${String(e)}\x1b[0m\r\n`);
-      toast(`Could not start ${shell ?? "the shell"}: ${e}`, "error", shell ? [{ label: "Fix in Settings", run: () => import("./settingsui").then((m) => m.openSettingsWindow("Terminal")) }] : []);
+      toast(`Could not start ${shell ?? "the shell"}: ${e}`, "error", shell ? [{ label: "Fix in Settings", run: () => window.dispatchEvent(new CustomEvent("garnet:open-settings", { detail: "Terminal" })) }] : []);
       this.opts.onExit?.(null);
       return;
     }
@@ -208,7 +208,7 @@ terminals.toolbar.append(iconButton("add", "New Terminal", () => newTerminal()))
 
 export function newTerminal() {
   // Like RubyMine, a shell that exits (exit, ⌃D) closes its tab; one Garnet killed or could not start stays.
-  const item = terminals.add(`Local${++termCount > 1 ? ` (${termCount})` : ""}`, new PtyView({ onExit: (code) => code !== null && terminals.close(item) }));
+  const item = terminals.add(`Local${++termCount > 1 ? ` (${termCount})` : ""}`, new PtyView({ onExit: (code) => code === 0 && terminals.close(item) }));
 }
 
 /// Runs a command the user asked for in a new Terminal tab, so its output stays visible.

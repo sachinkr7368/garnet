@@ -363,20 +363,22 @@ async function readStore(): Promise<Record<string, unknown>> {
   }
 }
 
-let saving: Promise<void> = Promise.resolve();
-async function persist() {
-  if (!projectKey || loadedFor !== projectKey) return;
+let saving: Promise<unknown> = Promise.resolve();
+/// True when the breakpoints are on disk (or there is nothing to save).
+async function persist(): Promise<boolean> {
+  if (!projectKey || loadedFor !== projectKey) return true;
   const key = projectKey;
   const files = serialize(breakpoints, rel);
-  saving = saving.then(async () => {
-    await modifyConfig<Record<string, unknown>>("breakpoints.json", {}, (all) => {
+  const write = saving.then(() =>
+    modifyConfig<Record<string, unknown>>("breakpoints.json", {}, (all) => {
       const next = { ...all };
       if (Object.keys(files).length) next[key] = files;
       else delete next[key];
       return next;
-    });
-  });
-  await saving.catch((e) => toast(`Could not save breakpoints: ${e}`, "error"));
+    }),
+  );
+  saving = write.catch(() => false);
+  return write.catch((e) => (toast(`Could not save breakpoints: ${e}`, "error"), false));
 }
 const persistSoon = debounce(persist, 300);
 
@@ -396,8 +398,8 @@ export async function loadBreakpoints() {
 }
 
 /// Writes pending breakpoint changes now (smoke tests, shutdown).
-export async function flushBreakpoints() {
-  await persist();
+export async function flushBreakpoints(): Promise<boolean> {
+  return persist();
 }
 
 window.addEventListener("beforeunload", () => void persist());

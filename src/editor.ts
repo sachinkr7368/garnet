@@ -13,7 +13,7 @@ import { slimConf, slimLanguage } from "./languages/slim";
 import { snippetsFor } from "./languages/snippets";
 import { styleFor } from "./codestyle";
 import { monacoTheme } from "./theme";
-import { globToRegExp, isDarkTheme, loadSettings, onSettingsChange, projectSettingsPath, setting, settingsPath, updateSetting } from "./settings";
+import { globToRegExp, isDarkTheme, loadSettings, onSettingsChange, projectSettingsPath, setEditorFontSize, setting, settingsPath, updateSetting } from "./settings";
 import { basename, rel } from "./state";
 import { fileIcon, h, icon, iconButton, overflowStrip, statusSlot, tip, toast } from "./ui";
 
@@ -351,7 +351,7 @@ editorArea.addEventListener(
     if (Math.abs(wheelDelta) < 30) return;
     const size = wheelFontSize(setting<number>("editor.fontSize"), wheelDelta);
     wheelDelta = 0;
-    if (size !== setting<number>("editor.fontSize")) void updateSetting("editor.fontSize", size);
+    if (size !== setting<number>("editor.fontSize")) void setEditorFontSize(size);
   },
   { capture: true, passive: false },
 );
@@ -366,7 +366,7 @@ editorArea.addEventListener("gestureend", (e) => {
   if (!pinchFrom) return;
   e.preventDefault();
   pinchFrom = 0;
-  void updateSetting("editor.fontSize", editor.getOption(monaco.editor.EditorOption.fontSize));
+  void setEditorFontSize(editor.getOption(monaco.editor.EditorOption.fontSize));
 });
 
 monaco.editor.registerEditorOpener({

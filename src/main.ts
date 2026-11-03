@@ -31,7 +31,7 @@ import { findInFiles, replaceInFiles, searchView } from "./search";
 import { loadCodeStyle } from "./codestyle";
 import {
   addRecentProject, askTrust, checkTrust, currentViewMode, editableSettingsPath, isTrusted, loadSession, modifyConfig, onSettingsChange, loadSettings, recentProjects, saveSession, setAppearance, setting, setViewMode,
-  toggleTheme, updateSetting, zoomIDE, type ViewMode,
+  setEditorFontSize, toggleTheme, updateSetting, zoomIDE, type ViewMode,
 } from "./settings";
 import { offerRestore, backupUnsaved } from "./hotexit";
 import { listenForQuit, quitFlow, type QuitHooks } from "./quit";
@@ -40,7 +40,7 @@ import { cloneDialog, createGist, createPullRequest, githubSignIn, openOnGitHub,
 import { openPullRequestByNumber, pullRequestsView, showPullRequests } from "./prs";
 import { initToolbar, pullCurrent, pushCurrent, refreshToolbar, showBranches, showProjects, showThemeMenu, showWorktrees } from "./toolbar";
 import { abs, debounce, rel, state } from "./state";
-import { newTerminal, showTerminalPanel, terminals } from "./terminal";
+import { newTerminal, pasteIntoTerminal, showTerminalPanel, terminals } from "./terminal";
 import { expandedPaths, initTree, refreshTree, revealInTree, toggleRailsView, treeView } from "./tree";
 import { bottom, Dock, fileIconName, fuzzyScore, h, type PickItem, quickPick, rightbar, setupResizers, sidebar, statusSlot, toast } from "./ui";
 
@@ -346,9 +346,9 @@ commands(
   E("prevError", "Navigate: Previous Highlighted Error", "shift+f2", "editor.action.marker.prevInFiles"),
   E("refactorThis", "Refactor: Refactor This…", "ctrl+t", "editor.action.refactor"),
   E("highlightUsages", "Navigate: Highlight Usages in File", "cmd+shift+f7", "editor.action.wordHighlight.trigger"),
-  { id: "increaseFont", title: "View: Increase Font Size in All Editors", key: "ctrl+shift+.", run: () => updateSetting("editor.fontSize", Math.min(32, setting<number>("editor.fontSize") + 1)) },
-  { id: "decreaseFont", title: "View: Decrease Font Size in All Editors", key: "ctrl+shift+,", run: () => updateSetting("editor.fontSize", Math.max(8, setting<number>("editor.fontSize") - 1)) },
-  { id: "resetFont", title: "View: Reset Font Size", run: () => updateSetting("editor.fontSize", undefined) },
+  { id: "increaseFont", title: "View: Increase Font Size in All Editors", key: "ctrl+shift+.", run: () => setEditorFontSize(Math.min(32, setting<number>("editor.fontSize") + 1)) },
+  { id: "decreaseFont", title: "View: Decrease Font Size in All Editors", key: "ctrl+shift+,", run: () => setEditorFontSize(Math.max(8, setting<number>("editor.fontSize") - 1)) },
+  { id: "resetFont", title: "View: Reset Font Size", run: () => setEditorFontSize(undefined) },
   E("expandRegion", "Code: Expand", "cmd+= cmd+numpadadd", "editor.unfold"),
   E("collapseRegion", "Code: Collapse", "cmd+- cmd+numpadsubtract", "editor.fold"),
   E("expandRecursively", "Code: Expand Recursively", "cmd+alt+= cmd+alt+numpadadd", "editor.unfoldRecursively"),
@@ -546,6 +546,17 @@ listen<{ count: number; ms: number }>("index-ready", (e) => {
   indexSlot.textContent = `${e.payload.count.toLocaleString()} files indexed`;
   indexSlot.title = `Indexed in ${e.payload.ms} ms`;
 });
+/// Esc leaves Distraction Free and Presentation Mode unless something else (a widget, a dialog) used it.
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.defaultPrevented || !currentViewMode() || document.querySelector("#overlay-root > [data-modal]")) return;
+  void toggleViewMode(currentViewMode() as Exclude<ViewMode, "">);
+});
+
+/// A focused text field outside the editor (terminal, tool window inputs, commit message) keeps editor shortcuts:
+/// the menu would otherwise send ⌘F/⌘G to the editor behind it.
+export const menuBlockedByFocus = (id: string, el = document.activeElement) =>
+  !!allCommands().find((c) => c.id === id)?.editor && !!el?.closest("input, textarea, select, .xterm") && !el.closest(".monaco-editor");
+
 /// Native menu bar: items are command ids, plus "recent:<path>". A shortcut the key handler already ran also
 /// reaches the menu when the web view passes it on, so that echo is dropped; dialogs block the menu like they
 /// block shortcuts.
@@ -555,11 +566,11 @@ listen<string>("menu", (e) => {
   if (id.startsWith("recent:")) return void switchProject(id.slice(7));
   const last = lastKeyCommand();
   if (last.id === id && performance.now() - last.at < 500) return;
-  if (document.querySelector("#overlay-root > [data-modal]")) return;
+  if (document.querySelector("#overlay-root > [data-modal]") || menuBlockedByFocus(id)) return;
   runCommand(id);
 });
 
-/// Commands whose shortcut the menu may own: an editor action fired from a text field would hit the editor behind.
+/// Editor actions whose shortcut the menu shows; the rest stay off the menu so text fields keep keys like ⌘⌫.
 const MENU_EDITOR_KEYS = new Set(["find", "replace", "findNext", "findPrevious"]);
 const CHECKS: Record<string, () => boolean> = {
   themeSystem: () => setting("appearance.theme") === "system",
@@ -588,10 +599,14 @@ async function openDropped(paths: string[]) {
   if (!state.project) return switchProject(dirs[0]);
   for (const d of dirs) await invoke("open_new_window", { path: d }).catch((e) => toast(`Cannot open ${d}: ${e}`, "error"));
 }
-listen<string[]>("open-paths", () => void invoke<string[]>("take_opened_paths").then(openDropped));
+// Until boot has taken the launch paths, it opens them itself.
+let launchPathsTaken = false;
+listen<string[]>("open-paths", () => launchPathsTaken && void invoke<string[]>("take_opened_paths").then(openDropped));
 try {
   void getCurrentWebview().onDragDropEvent((e) => {
-    if (e.payload.type === "drop") void openDropped(e.payload.paths);
+    if (e.payload.type !== "drop") return;
+    const at = document.elementFromPoint(e.payload.position.x / devicePixelRatio, e.payload.position.y / devicePixelRatio);
+    if (!(at && pasteIntoTerminal(at, e.payload.paths))) void openDropped(e.payload.paths);
   });
 } catch {
   // no Tauri webview (tests)
@@ -617,6 +632,7 @@ async function boot() {
   void syncMenu();
   const pending = smoke ? null : new URLSearchParams(location.search).get(PENDING_ROOT);
   const dropped = smoke ? [] : await invoke<string[]>("take_opened_paths").catch(() => [] as string[]);
+  launchPathsTaken = true;
   const initial = pending ?? dropped?.[0] ?? (await api.initialPath());
   if (smoke && initial) {
     const { runSmoke } = await import("./smoke");

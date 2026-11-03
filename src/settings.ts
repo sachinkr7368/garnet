@@ -158,10 +158,14 @@ export function setViewMode(mode: ViewMode) {
   viewMode = mode;
   setTransient("editor.fontSize", mode === "presentation" ? setting("appearance.presentationFontSize") : undefined);
 }
+/// Font size commands: in Presentation Mode they change the presentation size only, so leaving it restores the
+/// saved size untouched. `undefined` resets.
+export const setEditorFontSize = (size: number | undefined) =>
+  viewMode === "presentation" ? setTransient("editor.fontSize", size ?? setting("appearance.presentationFontSize")) : updateSetting("editor.fontSize", size);
 
 export const ZOOM_STEPS = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200];
-export const nextZoom = (current: number, dir: 1 | -1) =>
-  dir > 0 ? (ZOOM_STEPS.find((z) => z > current) ?? ZOOM_STEPS.at(-1)!) : ([...ZOOM_STEPS].reverse().find((z) => z < current) ?? ZOOM_STEPS[0]);
+export const nextZoom = (current: number, dir: 1 | -1): number =>
+  Number.isNaN(current) ? nextZoom(100, dir) : dir > 0 ? (ZOOM_STEPS.find((z) => z > current) ?? ZOOM_STEPS.at(-1)!) : ([...ZOOM_STEPS].reverse().find((z) => z < current) ?? ZOOM_STEPS[0]);
 /// Zoom In / Zoom Out IDE (0 resets to 100%).
 let zoomTarget: number | null = null;
 export const zoomIDE = async (dir: 1 | -1 | 0) => {

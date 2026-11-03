@@ -374,25 +374,39 @@ fn frame_file<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("window.json"))
 }
 
-/// A saved frame that is big enough and still lands on a connected display (by its title bar).
+/// A saved frame that is big enough and still lands on a connected display (by its title bar), clamped into that
+/// display's visible area (shrunk when it no longer fits).
 pub fn usable(frame: Frame, min: (f64, f64), displays: &[(f64, f64, f64, f64)]) -> Option<Frame> {
     if !(frame.width >= min.0 && frame.height >= min.1 && frame.width.is_finite() && frame.height.is_finite()) {
         return None;
     }
     let (cx, cy) = (frame.x + frame.width / 2.0, frame.y + 10.0);
-    displays.iter().any(|&(x, y, w, h)| cx >= x && cx < x + w && cy >= y && cy < y + h).then_some(frame)
+    let &(dx, dy, dw, dh) = displays.iter().find(|&&(x, y, w, h)| cx >= x && cx < x + w && cy >= y && cy < y + h)?;
+    let (width, height) = (frame.width.min(dw).max(min.0), frame.height.min(dh).max(min.1));
+    Some(Frame { x: frame.x.min(dx + dw - width).max(dx), y: frame.y.min(dy + dh - height).max(dy), width, height })
+}
+
+/// `--frame=x,y,w,h`: the frame a New Window should open at (its opener's, offset so the two don't stack).
+fn frame_arg() -> Option<Frame> {
+    let v: Vec<f64> = std::env::args().find_map(|a| a.strip_prefix("--frame=").map(str::to_owned))?.split(',').filter_map(|n| n.parse().ok()).collect();
+    (v.len() == 4).then(|| Frame { x: v[0], y: v[1], width: v[2], height: v[3] })
+}
+
+pub fn cascade_arg<R: Runtime>(window: &tauri::Window<R>) -> Option<String> {
+    let (s, p, z) = (window.scale_factor().ok()?, window.outer_position().ok()?, window.inner_size().ok()?);
+    Some(format!("--frame={},{},{},{}", p.x as f64 / s + 24.0, p.y as f64 / s + 24.0, z.width as f64 / s, z.height as f64 / s))
 }
 
 pub fn restore_frame<R: Runtime>(app: &AppHandle<R>, window: &mut tauri::utils::config::WindowConfig) {
-    let Some(saved) = frame_file(app).and_then(|f| std::fs::read_to_string(f).ok()).and_then(|s| serde_json::from_str::<Frame>(&s).ok()) else { return };
+    let Some(saved) = frame_arg().or_else(|| frame_file(app).and_then(|f| std::fs::read_to_string(f).ok()).and_then(|s| serde_json::from_str::<Frame>(&s).ok())) else { return };
     let displays: Vec<_> = app
         .available_monitors()
         .unwrap_or_default()
         .iter()
         .map(|m| {
             let s = m.scale_factor();
-            let (p, z) = (m.position(), m.size());
-            (p.x as f64 / s, p.y as f64 / s, z.width as f64 / s, z.height as f64 / s)
+            let a = m.work_area();
+            (a.position.x as f64 / s, a.position.y as f64 / s, a.size.width as f64 / s, a.size.height as f64 / s)
         })
         .collect();
     let min = (window.min_width.unwrap_or(0.0), window.min_height.unwrap_or(0.0));
@@ -589,5 +603,9 @@ mod tests {
         assert_eq!(usable(second, (800.0, 500.0), &displays), Some(second));
         assert_eq!(usable(Frame { x: 5000.0, ..f }, (800.0, 500.0), &displays), None, "display unplugged");
         assert_eq!(usable(Frame { width: 300.0, ..f }, (800.0, 500.0), &displays), None);
+        let big = Frame { x: 400.0, y: 50.0, width: 1600.0, height: 1000.0 };
+        assert_eq!(usable(big, (800.0, 500.0), &displays), Some(Frame { x: 0.0, y: 0.0, width: 1440.0, height: 900.0 }), "shrunk into the display");
+        let hanging = Frame { x: 600.0, y: 300.0, ..f };
+        assert_eq!(usable(hanging, (800.0, 500.0), &displays), Some(Frame { x: 240.0, y: 100.0, ..f }), "moved fully on screen");
     }
 }

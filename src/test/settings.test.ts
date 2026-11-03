@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { appliedZoomFactor, checkTrust, editableSettingsPath, globalOnly, globToRegExp, isTrusted, loadSettings, loadSession, modifyConfig, nextZoom, saveSession, setting, setViewMode, trustProject, updateSetting, zoomIDE } from "../settings";
+import { appliedZoomFactor, checkTrust, editableSettingsPath, globalOnly, globToRegExp, isTrusted, loadSettings, loadSession, modifyConfig, nextZoom, saveSession, setEditorFontSize, setting, setViewMode, trustProject, updateSetting, zoomIDE } from "../settings";
 import { api, fake } from "./fakeIpc";
 
 const ROOT = "/work/blog";
@@ -198,6 +198,7 @@ describe("IDE zoom", () => {
     expect(nextZoom(200, 1)).toBe(200);
     expect(nextZoom(50, -1)).toBe(50);
     expect(nextZoom(103, -1)).toBe(100);
+    expect(nextZoom(NaN, 1)).toBe(110);
   });
 
   it("Zoom In/Out/Reset IDE persist appearance.zoom and scale the page", async () => {
@@ -224,5 +225,17 @@ describe("IDE zoom", () => {
     expect(setting("editor.fontSize")).toBe(13);
     await updateSetting("appearance.showStatusBar", undefined);
     expect(document.body.classList.contains("no-statusbar")).toBe(false);
+  });
+
+  it("font size commands in Presentation Mode leave the saved size alone", async () => {
+    setViewMode("presentation");
+    await setEditorFontSize(25);
+    expect(setting("editor.fontSize")).toBe(25);
+    await setEditorFontSize(undefined);
+    expect(setting("editor.fontSize")).toBe(24);
+    await setEditorFontSize(26);
+    setViewMode("");
+    expect(setting("editor.fontSize")).toBe(13);
+    expect(JSON.parse(fake.config.get("settings.json") ?? "{}")["editor.fontSize"]).toBeUndefined();
   });
 });

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../editor", async () => await import("./fakeEditor"));
 
 import { checkTrust, trustProject } from "../settings";
-import { newTerminal, PtyView, showTerminalPanel, terminals } from "../terminal";
+import { newTerminal, pasteIntoTerminal, PtyView, showTerminalPanel, terminals } from "../terminal";
 import { bottom } from "../ui";
 import { state } from "../state";
 import { fake } from "./fakeIpc";
@@ -95,5 +95,23 @@ describe("terminals", () => {
     channel!.onmessage({ type: "data", data: "zsh: bad option: -Z\r\n" });
     channel!.onmessage({ type: "exit", code: 1 });
     expect(terminals.items).toHaveLength(1);
+  });
+});
+
+describe("dropping files on the terminal", () => {
+  it("types quoted paths and refuses names with control characters", async () => {
+    fake.handlers.set("pty_spawn", () => 1);
+    const view = new PtyView({});
+    document.body.append(view.el);
+    const pasted: string[] = [];
+    view.term.paste = (t: string) => void pasted.push(t);
+    expect(pasteIntoTerminal(document.body, ["/a"])).toBe(false);
+    expect(pasteIntoTerminal(view.el, ["/work/my app", "/x'y"])).toBe(true);
+    expect(pasted).toEqual([`'/work/my app' '/x'\\''y'`]);
+    expect(pasteIntoTerminal(view.el, ["/tmp/a\x1b[201~\ntouch pwned"])).toBe(true);
+    expect(pasteIntoTerminal(view.el, ["/tmp/ok", "/tmp/b\nrm -rf x"])).toBe(true);
+    expect(pasted).toHaveLength(1);
+    expect(document.body.textContent).toContain("Path contains control characters; not inserted");
+    view.dispose();
   });
 });

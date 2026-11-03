@@ -165,7 +165,7 @@ describe("RubyMine macOS default keymap", () => {
     await updateSetting("keymap.macZoomKeys", undefined);
   });
 
-  it("menu bar shows shortcuts, except editor actions a text field would send to the editor", async () => {
+  it("menu bar shows app shortcuts and find, but not other editor actions", async () => {
     const { menuAccelerators } = await import("../main");
     const accels = menuAccelerators();
     expect(accels.zoomIn).toBe("ctrl+alt+=");
@@ -175,6 +175,24 @@ describe("RubyMine macOS default keymap", () => {
     expect(accels.deleteLine).toBeNull();
     expect(accels.expandRegion).toBeNull();
     expect("quit" in accels).toBe(false);
+  });
+
+  it("a menu shortcut for an editor action is ignored while a text field outside the editor has focus", async () => {
+    const { menuBlockedByFocus } = await import("../main");
+    const input = document.createElement("input");
+    const term = document.createElement("div");
+    term.className = "xterm";
+    const termInput = document.createElement("textarea");
+    term.append(termInput);
+    const monacoEl = document.createElement("div");
+    monacoEl.className = "monaco-editor";
+    const monacoInput = document.createElement("textarea");
+    monacoEl.append(monacoInput);
+    expect(menuBlockedByFocus("find", input)).toBe(true);
+    expect(menuBlockedByFocus("findNext", termInput)).toBe(true);
+    expect(menuBlockedByFocus("find", monacoInput)).toBe(false);
+    expect(menuBlockedByFocus("find", document.body)).toBe(false);
+    expect(menuBlockedByFocus("saveAll", input)).toBe(false);
   });
 
   it("only unbinds Monaco defaults on keys Garnet owns", () => {
